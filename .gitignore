@@ -1,0 +1,48 @@
+# Go 编译产物
+/open-agents-bridge
+/dev-server
+build/
+
+# Go 通用二进制
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试覆盖率
+*.out
+coverage.txt
+
+# 临时文件
+*.tmp
+*.swp
+*.swo
+*~
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# 日志
+*.log
+# Output directory
+output/
+config.json
+
+# GoReleaser
+dist/
+
+# npm
+npm/bin/
+npm/node_modules/

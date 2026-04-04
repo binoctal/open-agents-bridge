@@ -1,0 +1,38 @@
+{
+  "_comment": "Open Agents Bridge 配置文件示例",
+  "_docs": "运行 'open-agents pair --name <device-name>' 添加设备",
+
+  "_serverUrl_comment": "服务器地址，根据环境选择",
+  "serverUrl": "wss://api.openagents.top",
+
+  "_environment_comment": "可选: development, staging, production。不设置则自动检测",
+  "environment": "",
+
+  "_logLevel_comment": "可选: debug, info, warn, error。默认: info",
+  "logLevel": "info",
+
+  "cliEnabled": {
+    "_comment": "启用的 CLI 工具",
+    "claude": true,
+    "cline": true,
+    "codex": true,
+    "gemini": true,
+    "kiro": true
+  },
+
+  "permissions": {
+    "_comment": "默认权限设置",
+    "fs_read": true,
+    "fs_write": true,
+    "execute_bash": true,
+    "network": false
+  },
+
+  "ioLogging": {
+    "_comment": "I/O 日志记录配置（用于调试和审计）",
+    "enabled": false,
+    "types": ["prompt", "agent_message"],
+    "maxSizeMB": 50,
+    "maxBackups": 7
+  }
+}
