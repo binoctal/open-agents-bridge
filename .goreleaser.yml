@@ -1,0 +1,36 @@
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: ./cmd/open-agents-bridge
+    binary: open-agents-bridge
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/open-agents/open-agents-bridge/internal/updater.version={{.Version}}
+      - -X github.com/open-agents/open-agents-bridge/internal/updater.commit={{.Commit}}
+      - -X github.com/open-agents/open-agents-bridge/internal/updater.date={{.Date}}
+
+archives:
+  - format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    name_template: "open-agents-bridge_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude: ['^docs:', '^test:', '^chore:']
+
+release:
+  github:
+    owner: binoctal
+    name: open-agents-bridge

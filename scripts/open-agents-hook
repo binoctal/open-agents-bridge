@@ -1,0 +1,39 @@
+#!/bin/bash
+# open-agents-hook - Permission hook script for AI CLI tools
+
+SOCKET_PATH="${OPEN_AGENTS_SOCKET_DIR:-/tmp}/open-agents.sock"
+
+# Check if socket exists
+if [ ! -S "$SOCKET_PATH" ]; then
+  echo "Warning: Bridge not running, auto-approving" >&2
+  exit 0
+fi
+
+# Read JSON from stdin
+read -r input
+
+# Parse input - handle both formats
+tool_name=$(echo "$input" | jq -r '.tool_name // .toolName // "unknown"' 2>/dev/null)
+tool_input=$(echo "$input" | jq -c '.tool_input // .toolInput // {}' 2>/dev/null)
+session_id="${OPEN_AGENTS_SESSION_ID:-default}"
+
+# Build request JSON
+request="{\"type\":\"permission\",\"toolName\":\"$tool_name\",\"toolInput\":$tool_input,\"sessionId\":\"$session_id\"}"
+
+# Send to bridge and wait for response (with timeout)
+response=$(echo "$request" | timeout 65 nc -U "$SOCKET_PATH" 2>/dev/null)
+
+if [ -z "$response" ]; then
+  echo "Timeout waiting for response" >&2
+  exit 2
+fi
+
+# Parse response
+approved=$(echo "$response" | jq -r '.approved // false' 2>/dev/null)
+
+if [ "$approved" = "true" ]; then
+  exit 0
+else
+  echo "Permission denied by user" >&2
+  exit 2
+fi

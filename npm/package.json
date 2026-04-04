@@ -1,0 +1,37 @@
+{
+  "name": "@binoctal/open-agents-bridge",
+  "version": "0.2.0",
+  "description": "Bridge CLI for Open Agents - connect your devices to the agent network",
+  "bin": {
+    "open-agents-bridge": "./run.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "install.js",
+    "run.js"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "open-agents",
+    "bridge",
+    "cli",
+    "agents",
+    "remote-control"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=16"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/binoctal/open-agents-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/binoctal/open-agents-bridge/issues"
+  },
+  "homepage": "https://github.com/binoctal/open-agents-bridge#readme"
+}
