@@ -1,6 +1,6 @@
 {
   "name": "@binoctal/open-agents-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Bridge CLI for Open Agents - connect your devices to the agent network",
   "bin": {
     "open-agents-bridge": "./run.js"
@@ -22,7 +22,7 @@
     "agents",
     "remote-control"
   ],
-  "license": "MIT",
+  "license": "AGPL-3.0",
   "engines": {
     "node": ">=16"
   },
