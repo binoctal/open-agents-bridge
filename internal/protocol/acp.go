@@ -423,6 +423,11 @@ func (a *ACPAdapter) readErrors() {
 			continue
 		}
 
+		// Skip npm non-error output (npm writes warn/info to stderr)
+		if strings.HasPrefix(line, "npm warn") || strings.HasPrefix(line, "npm info") || strings.HasPrefix(line, "npm notice") {
+			continue
+		}
+
 		// Forward stderr to Web UI as error messages
 		a.emitMessage(Message{
 			Type:    MessageTypeError,

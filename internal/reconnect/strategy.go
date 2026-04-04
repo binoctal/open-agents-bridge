@@ -16,9 +16,15 @@ type Strategy struct {
 	attempts    int
 	maxAttempts int
 	mu          sync.RWMutex
+
+	// Time budget mode (replaces maxAttempts)
+	startTime  time.Time
+	timeBudget time.Duration
+	budgetMode bool
 }
 
 // NewStrategy creates a new reconnection strategy with default values
+// Uses time budget mode (10 minutes) by default
 func NewStrategy() *Strategy {
 	return &Strategy{
 		minDelay:    1 * time.Second,
@@ -27,6 +33,9 @@ func NewStrategy() *Strategy {
 		jitter:      0.1,
 		attempts:    0,
 		maxAttempts: 10,
+		timeBudget:  10 * time.Minute,
+		budgetMode:  true,
+		startTime:   time.Now(),
 	}
 }
 
@@ -43,12 +52,18 @@ func NewCustomStrategy(minDelay, maxDelay time.Duration, multiplier, jitter floa
 }
 
 // NextDelay calculates the next retry delay with exponential backoff and jitter
-// Returns 0 if max attempts reached
+// Returns 0 if max attempts reached or time budget exhausted
 func (s *Strategy) NextDelay() time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.attempts >= s.maxAttempts {
+	// Check time budget in budget mode
+	if s.budgetMode && !s.startTime.IsZero() && time.Since(s.startTime) >= s.timeBudget {
+		return 0 // Budget exhausted
+	}
+
+	// Check max attempts in non-budget mode
+	if !s.budgetMode && s.attempts >= s.maxAttempts {
 		return 0 // Stop retrying
 	}
 
@@ -64,11 +79,14 @@ func (s *Strategy) NextDelay() time.Duration {
 	return finalDelay
 }
 
-// Reset resets the retry counter
+// Reset resets the retry counter and time budget start time
 func (s *Strategy) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.attempts = 0
+	if s.budgetMode {
+		s.startTime = time.Now()
+	}
 }
 
 // Attempts returns the current number of attempts
@@ -89,7 +107,34 @@ func (s *Strategy) MaxAttempts() int {
 func (s *Strategy) HasReachedMax() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.budgetMode {
+		return !s.startTime.IsZero() && time.Since(s.startTime) >= s.timeBudget
+	}
 	return s.attempts >= s.maxAttempts
+}
+
+// HasExhaustedBudget returns true if the time budget has been exhausted
+func (s *Strategy) HasExhaustedBudget() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.budgetMode {
+		return s.attempts >= s.maxAttempts
+	}
+	return !s.startTime.IsZero() && time.Since(s.startTime) >= s.timeBudget
+}
+
+// ResetBudget resets the time budget timer, giving a fresh budget
+func (s *Strategy) ResetBudget() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.startTime = time.Now()
+}
+
+// TimeBudget returns the configured time budget duration
+func (s *Strategy) TimeBudget() time.Duration {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.timeBudget
 }
 
 // Event represents a reconnection event

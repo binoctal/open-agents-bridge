@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -120,6 +122,13 @@ type Bridge struct {
 	// Offline message buffer (Scheme 3: buffer when disconnected)
 	offlineMu  sync.Mutex
 	offlineBuf []Message
+
+	// Ring buffer for message replay after reconnection
+	msgBuffer *MessageBuffer
+
+	// Keep-alive data frame for preventing proxy idle timeout
+	keepAliveDone chan struct{}
+	lastSendTime  int64 // unix milliseconds of last business message send
 }
 
 // taskMeta stores metadata for workflow tasks
@@ -182,6 +191,8 @@ func New(cfg *config.Config) (*Bridge, error) {
 		worktreeManager:   workflows.NewWorktreeManager("."),
 		batchBuf:          make(map[string]*contentBatch),
 		offlineBuf:        nil,
+		msgBuffer:         NewMessageBuffer(DefaultBufferCapacity),
+		keepAliveDone:     make(chan struct{}),
 	}
 
 	// Apply scanner config
@@ -340,6 +351,10 @@ func (b *Bridge) Start() error {
 	b.logInfo("[%s] Launching heartbeat goroutine...", logger.ModBridge)
 	go b.heartbeat()
 
+	// Start keep-alive data frame loop
+	b.logInfo("[%s] Launching keepAliveLoop goroutine...", logger.ModBridge)
+	go b.keepAliveLoop()
+
 	b.logInfo("[%s] All goroutines started, entering main loop", logger.ModBridge)
 
 	// Wait for shutdown
@@ -349,6 +364,9 @@ func (b *Bridge) Start() error {
 }
 
 func (b *Bridge) Stop() {
+	// Stop keep-alive loop
+	b.stopKeepAlive()
+
 	// Flush remaining batched messages before shutdown
 	b.batchMu.Lock()
 	if b.batchTimer != nil {
@@ -417,9 +435,9 @@ func (b *Bridge) readLoop() {
 
 		// If not connected, try to connect with exponential backoff
 		if b.conn == nil {
-			if b.reconnectStrategy.HasReachedMax() {
-				b.logError("[%s] Max reconnection attempts reached, giving up", logger.ModBridge)
-				b.stateManager.SetState(StateFailed, "max_attempts_reached")
+			if b.reconnectStrategy.HasExhaustedBudget() {
+				b.logError("[%s] Reconnect time budget exhausted (%v), giving up", logger.ModBridge, b.reconnectStrategy.TimeBudget())
+				b.stateManager.SetState(StateFailed, "time_budget_exhausted")
 				b.reconnectCallback.Notify(reconnect.Event{
 					Type:      reconnect.EventMaxRetry,
 					Attempts:  b.reconnectStrategy.Attempts(),
@@ -431,8 +449,8 @@ func (b *Bridge) readLoop() {
 
 			delay := b.reconnectStrategy.NextDelay()
 			if delay > 0 {
-				b.logInfo("[%s] Waiting %v before reconnection attempt %d/%d",
-					logger.ModBridge, delay, b.reconnectStrategy.Attempts(), b.reconnectStrategy.MaxAttempts())
+				b.logInfo("[%s] Waiting %v before reconnection attempt %d",
+					logger.ModBridge, delay, b.reconnectStrategy.Attempts())
 				time.Sleep(delay)
 			}
 
@@ -447,8 +465,8 @@ func (b *Bridge) readLoop() {
 			startTime := time.Now()
 			if err := b.connect(); err != nil {
 				elapsed := time.Since(startTime)
-				b.logInfo("[%s] Connection failed (attempt %d/%d): %v",
-					logger.ModBridge, b.reconnectStrategy.Attempts(), b.reconnectStrategy.MaxAttempts(), err)
+				b.logInfo("[%s] Connection failed (attempt %d): %v",
+					logger.ModBridge, b.reconnectStrategy.Attempts(), err)
 				b.reconnectMetrics.RecordAttempt(false, elapsed)
 				b.reconnectCallback.Notify(reconnect.Event{
 					Type:      reconnect.EventFailed,
@@ -480,7 +498,32 @@ func (b *Bridge) readLoop() {
 		b.logDebug("[%s] Waiting for message on WebSocket...", logger.ModBridge)
 		_, data, err := b.conn.ReadMessage()
 		if err != nil {
-			b.logInfo("[%s] WebSocket read error: %v", logger.ModBridge, err)
+			closeCode := b.extractCloseCode(err)
+			if b.isPermanentCloseCode(closeCode) {
+				b.logInfo("[%s] WebSocket closed with permanent code %d: %v", logger.ModBridge, closeCode, err)
+				b.stateManager.SetState(StateFailed, fmt.Sprintf("permanent_close_%d", closeCode))
+				b.reconnectCallback.Notify(reconnect.Event{
+					Type:      reconnect.EventAborted,
+					Attempts:  b.reconnectStrategy.Attempts(),
+					Error:     err,
+					Timestamp: time.Now(),
+					Layer:     "websocket",
+					Extra:     map[string]interface{}{"closeCode": closeCode},
+				})
+				return
+			}
+			if closeCode > 0 && !isTemporaryCloseCode(closeCode) {
+				b.logInfo("[%s] WebSocket closed with unknown code %d, attempts=%d: %v",
+					logger.ModBridge, closeCode, b.reconnectStrategy.Attempts(), err)
+			} else {
+				lastSend := atomic.LoadInt64(&b.lastSendTime)
+				lastActivity := "never"
+				if lastSend > 0 {
+					lastActivity = fmt.Sprintf("%v ago", time.Since(time.UnixMilli(lastSend)).Round(time.Second))
+				}
+				b.logInfo("[%s] WebSocket read error (closeCode=%d, lastActivity=%s, attempts=%d): %v",
+					logger.ModBridge, closeCode, lastActivity, b.reconnectStrategy.Attempts(), err)
+			}
 			b.stateManager.SetState(StateDisconnected, "read_error")
 			b.reconnect()
 			continue
@@ -1475,6 +1518,11 @@ func (b *Bridge) sendMessage(msg Message) error {
 	if err != nil {
 		b.conn.Close()
 		b.conn = nil
+	} else {
+		// Store in ring buffer for potential replay after reconnection
+		b.msgBuffer.Push(data, time.Now().UnixMilli())
+		// Update last send time for keep-alive timer reset
+		atomic.StoreInt64(&b.lastSendTime, time.Now().UnixMilli())
 	}
 	b.connMu.Unlock()
 
@@ -1498,11 +1546,28 @@ func (b *Bridge) heartbeat() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
+	var lastTickTime time.Time
+
 	for {
 		select {
 		case <-b.done:
 			return
 		case <-ticker.C:
+			// Process suspend detection via wall-clock gap
+			now := time.Now()
+			if !lastTickTime.IsZero() {
+				gap := now.Sub(lastTickTime)
+				if gap > 60*time.Second {
+					b.logInfo("[%s] System suspend detected (gap: %v), triggering reconnect", logger.ModBridge, gap)
+					// Reset reconnect time budget on suspend recovery
+					b.reconnectStrategy.ResetBudget()
+					b.reconnect()
+					lastTickTime = now
+					continue
+				}
+			}
+			lastTickTime = now
+
 			b.connMu.Lock()
 			if b.conn != nil {
 				b.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
@@ -1512,6 +1577,81 @@ func (b *Bridge) heartbeat() {
 			// Update last_seen via API heartbeat
 			go b.updateLastSeen()
 		}
+	}
+}
+
+// keepAliveLoop sends periodic keep-alive data frames to prevent proxy idle timeout.
+// Sends a JSON frame every 5 minutes, resetting the timer on business message sends.
+func (b *Bridge) keepAliveLoop() {
+	ticker := time.NewTicker(1 * time.Minute) // Check every minute
+	defer ticker.Stop()
+
+	interval := 5 * time.Minute
+	lastKeepAlive := time.Now()
+
+	for {
+		select {
+		case <-b.done:
+			return
+		case <-b.keepAliveDone:
+			return
+		case <-ticker.C:
+			// Check if we've sent any business message recently
+			lastSend := atomic.LoadInt64(&b.lastSendTime)
+			if lastSend > 0 {
+				lastSendTime := time.UnixMilli(lastSend)
+				if time.Since(lastSendTime) < interval {
+					// Business message sent recently, reset keep-alive timer
+					lastKeepAlive = lastSendTime
+					continue
+				}
+			}
+
+			// Send keep-alive if interval has passed since last activity
+			if time.Since(lastKeepAlive) >= interval {
+				b.connMu.Lock()
+				if b.conn != nil {
+					keepAliveMsg := map[string]interface{}{
+						"type":      "keep_alive",
+						"timestamp": time.Now().UnixMilli(),
+					}
+					data, err := json.Marshal(keepAliveMsg)
+					if err == nil {
+						b.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+						writeErr := b.conn.WriteMessage(websocket.TextMessage, data)
+						if writeErr != nil {
+							b.logDebug("[%s] Keep-alive send failed: %v", logger.ModBridge, writeErr)
+						} else {
+							b.logDebug("[%s] Keep-alive frame sent", logger.ModBridge)
+						}
+					}
+				}
+				b.connMu.Unlock()
+				lastKeepAlive = time.Now()
+			}
+		}
+	}
+}
+
+// startKeepAlive starts the keep-alive loop.
+func (b *Bridge) startKeepAlive() {
+	select {
+	case <-b.keepAliveDone:
+		// Channel was closed, create new one
+		b.keepAliveDone = make(chan struct{})
+	default:
+		// Channel is open, keep-alive may already be running
+	}
+	go b.keepAliveLoop()
+}
+
+// stopKeepAlive stops the keep-alive loop.
+func (b *Bridge) stopKeepAlive() {
+	select {
+	case <-b.keepAliveDone:
+		// Already stopped
+	default:
+		close(b.keepAliveDone)
 	}
 }
 
@@ -1573,8 +1713,8 @@ func (b *Bridge) reconnect() {
 	b.stateManager.SetState(StateReconnecting, "initiating_reconnect")
 	alert.WebSocketDisconnected("connection lost")
 
-	b.logInfo("[%s] Reconnecting (attempt %d/%d)...",
-		logger.ModBridge, b.reconnectStrategy.Attempts()+1, b.reconnectStrategy.MaxAttempts())
+	b.logInfo("[%s] Reconnecting (attempt %d)...",
+		logger.ModBridge, b.reconnectStrategy.Attempts()+1)
 
 	// The actual reconnection will happen in readLoop with exponential backoff
 }
@@ -1655,6 +1795,13 @@ func (b *Bridge) bufferOffline(msg Message) {
 		b.offlineBuf = b.offlineBuf[offlineMaxMessages/2:]
 	}
 	b.offlineBuf = append(b.offlineBuf, msg)
+
+	// Also push to ring buffer for replay after reconnection
+	data, err := json.Marshal(msg)
+	if err == nil {
+		b.msgBuffer.Push(data, time.Now().UnixMilli())
+	}
+
 	b.logDebug("[%s] Buffered offline: %s (buf: %d)", logger.ModBridge, msg.Type, len(b.offlineBuf))
 }
 
@@ -1679,6 +1826,39 @@ func (b *Bridge) flushOffline() {
 			return
 		}
 	}
+}
+
+// WebSocket close code classification
+var permanentCloseCodes = map[int]bool{
+	1002: true, // Protocol Error
+	1008: true, // Policy Violation
+	4001: true, // Session Expired
+	4003: true, // Unauthorized
+}
+
+var temporaryCloseCodes = map[int]bool{
+	1001: true, // Going Away
+	1005: true, // No Status Received
+	1006: true, // Abnormal Closure
+}
+
+// extractCloseCode extracts the WebSocket close code from a ReadMessage error.
+func (b *Bridge) extractCloseCode(err error) int {
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		return closeErr.Code
+	}
+	return 1006 // Default: abnormal closure
+}
+
+// isPermanentCloseCode returns true for close codes that should not trigger reconnection.
+func (b *Bridge) isPermanentCloseCode(code int) bool {
+	return permanentCloseCodes[code]
+}
+
+// isTemporaryCloseCode returns true for known temporary close codes.
+func isTemporaryCloseCode(code int) bool {
+	return temporaryCloseCodes[code]
 }
 
 func getDeviceName() string {
