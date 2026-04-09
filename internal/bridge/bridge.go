@@ -100,6 +100,10 @@ type Bridge struct {
 	permSessionMap map[string]string
 	permSessionMu  sync.RWMutex
 
+	// Pending questions for human-in-the-loop (taskId -> answer channel)
+	pendingQuestions   map[string]chan string
+	pendingQuestionsMu sync.RWMutex
+
 	// Task metadata for workflow tasks (sessionID -> taskMeta)
 	taskMeta   map[string]*taskMeta
 	taskMetaMu sync.RWMutex
@@ -181,6 +185,7 @@ func New(cfg *config.Config) (*Bridge, error) {
 		scanner:           scanner.New(),
 		loopDetectors:     make(map[string]*loopdetect.Detector),
 		permSessionMap:    make(map[string]string),
+		pendingQuestions:  make(map[string]chan string),
 		taskMeta:          make(map[string]*taskMeta),
 		reconnectStrategy: reconnect.NewStrategy(),
 		stateManager:      NewStateManager(),
@@ -625,6 +630,9 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 		if sess != nil && sess.JobID != "" && sess.TaskID != "" {
 			if contentStr, ok := msg.Content.(string); ok {
 				b.sendTaskOutput(sess.JobID, sess.TaskID, "stdout", contentStr)
+
+				// Detect [QUESTION] marker for human-in-the-loop
+				b.handleQuestionMarker(sessionID, sess, contentStr)
 			}
 		}
 
@@ -837,6 +845,10 @@ func (b *Bridge) handleMessage(msg Message) {
 		b.handleWorkflowTaskAssign(msg)
 	case "workflow:task_cleanup":
 		b.handleWorkflowTaskCleanup(msg)
+	case "workflow:task_answer":
+		b.handleWorkflowTaskAnswer(msg)
+	case "workflow:task_guidance":
+		b.handleWorkflowTaskGuidance(msg)
 	case "workflow:task_merge":
 		b.handleWorkflowTaskMerge(msg)
 	case "workflow:merge_all":
@@ -2187,8 +2199,9 @@ func (b *Bridge) startTaskSession(jobId, taskId, agent, title, description, cont
 func buildTaskPrompt(title, description, context string) string {
 	prompt := title + "\n\n" + description
 	if context != "" {
-		prompt += "\n\n--- 上游任务输出 ---\n" + context
+		prompt += "\n\n--- Upstream task output ---\n" + context
 	}
+	prompt += "\n\n--- Instruction ---\nIf you need to ask the user a question during execution, output a line starting with [QUESTION] followed by your question. Example: [QUESTION] Should I use JWT or session-based authentication?"
 	return prompt
 }
 
@@ -2432,6 +2445,117 @@ func (b *Bridge) handleSessionExit(sessionID string, exitCode int, output []byte
 		} else {
 			b.callbackManager.SendTaskResult(result)
 		}
+	}
+}
+
+// handleQuestionMarker detects [QUESTION] markers in CLI output and triggers human-in-the-loop
+func (b *Bridge) handleQuestionMarker(sessionID string, sess *session.Session, content string) {
+	if !strings.Contains(content, "[QUESTION]") {
+		return
+	}
+
+	// Extract question text from lines containing [QUESTION]
+	var questionParts []string
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.Contains(trimmed, "[QUESTION]") {
+			q := strings.TrimSpace(strings.SplitN(trimmed, "[QUESTION]", 2)[1])
+			if q != "" {
+				questionParts = append(questionParts, q)
+			}
+		}
+	}
+	question := strings.Join(questionParts, " ")
+	if question == "" {
+		question = "Agent is asking a question"
+	}
+
+	b.logInfo("[%s] Task %s asking question: %s", logger.ModWorkflow, sess.TaskID, question)
+
+	// Send question to frontend via WebSocket
+	b.sendMessage(Message{
+		Type: "workflow:task_question",
+		Payload: map[string]interface{}{
+			"missionId": sess.JobID,
+			"taskId":    sess.TaskID,
+			"question":  question,
+			"deviceId":  b.config.DeviceID,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+
+	// Create channel to wait for answer (5 min timeout)
+	answerCh := make(chan string, 1)
+	b.pendingQuestionsMu.Lock()
+	// Clean up any existing pending question for this task
+	if oldCh, exists := b.pendingQuestions[sess.TaskID]; exists {
+		close(oldCh)
+	}
+	b.pendingQuestions[sess.TaskID] = answerCh
+	b.pendingQuestionsMu.Unlock()
+
+	// Wait for answer asynchronously
+	go func() {
+		select {
+		case answer := <-answerCh:
+			b.logInfo("[%s] Received answer for task %s, injecting into session", logger.ModWorkflow, sess.TaskID)
+			answerPrompt := fmt.Sprintf("User answered your question:\n%s\n\nContinue with this information.", answer)
+			if s := b.sessions.Get(sessionID); s != nil {
+				s.Send(answerPrompt)
+			}
+		case <-time.After(5 * time.Minute):
+			b.logInfo("[%s] Task %s question timed out (5min), continuing", logger.ModWorkflow, sess.TaskID)
+			b.pendingQuestionsMu.Lock()
+			delete(b.pendingQuestions, sess.TaskID)
+			b.pendingQuestionsMu.Unlock()
+		}
+	}()
+}
+
+// handleWorkflowTaskAnswer handles user answers to agent questions
+func (b *Bridge) handleWorkflowTaskAnswer(msg Message) {
+	payload, ok := msg.Payload.(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	taskId := getString(payload, "taskId")
+	answer := getString(payload, "answer")
+
+	b.logInfo("[%s] Received task answer for %s", logger.ModWorkflow, taskId)
+
+	b.pendingQuestionsMu.RLock()
+	ch, exists := b.pendingQuestions[taskId]
+	b.pendingQuestionsMu.RUnlock()
+
+	if exists {
+		ch <- answer
+		b.pendingQuestionsMu.Lock()
+		delete(b.pendingQuestions, taskId)
+		b.pendingQuestionsMu.Unlock()
+	} else {
+		// No pending question — inject directly as guidance
+		b.logInfo("[%s] No pending question for task %s, injecting as direct message", logger.ModWorkflow, taskId)
+		if sess := b.sessions.Get(taskId); sess != nil {
+			sess.Send(fmt.Sprintf("User guidance:\n%s", answer))
+		}
+	}
+}
+
+// handleWorkflowTaskGuidance handles proactive user guidance during task execution
+func (b *Bridge) handleWorkflowTaskGuidance(msg Message) {
+	payload, ok := msg.Payload.(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	taskId := getString(payload, "taskId")
+	guidance := getString(payload, "guidance")
+
+	b.logInfo("[%s] Received task guidance for %s", logger.ModWorkflow, taskId)
+
+	if sess := b.sessions.Get(taskId); sess != nil {
+		sess.Send(fmt.Sprintf("User guidance:\n%s", guidance))
 	}
 }
 
