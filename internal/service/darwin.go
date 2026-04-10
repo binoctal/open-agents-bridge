@@ -18,6 +18,8 @@ const launchdPlist = `<?xml version="1.0" encoding="UTF-8"?>
     <array>
         <string>%s</string>
         <string>start</string>
+        <string>-d</string>
+        <string>%s</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -43,7 +45,11 @@ func (s *DarwinService) logDir() string {
 	return filepath.Join(os.Getenv("HOME"), "Library", "Logs", "open-agents-bridge")
 }
 
-func (s *DarwinService) Install() error {
+func (s *DarwinService) Install(device string) error {
+	if device == "" {
+		return fmt.Errorf("device name is required: -d <device>")
+	}
+
 	exePath, err := os.Executable()
 	if err != nil {
 		return err
@@ -54,7 +60,7 @@ func (s *DarwinService) Install() error {
 	os.MkdirAll(logDir, 0755)
 	os.MkdirAll(filepath.Dir(s.plistPath()), 0755)
 
-	content := fmt.Sprintf(launchdPlist, exePath, logDir, logDir)
+	content := fmt.Sprintf(launchdPlist, exePath, device, logDir, logDir)
 	return os.WriteFile(s.plistPath(), []byte(content), 0644)
 }
 
