@@ -7,6 +7,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var serviceDevice string
+
 var serviceCmd = &cobra.Command{
 	Use:   "service",
 	Short: "Manage the bridge as a system service",
@@ -17,7 +19,7 @@ var serviceInstallCmd = &cobra.Command{
 	Short: "Install the bridge as a system service",
 	Run: func(cmd *cobra.Command, args []string) {
 		mgr := service.New()
-		if err := mgr.Install(); err != nil {
+		if err := mgr.Install(serviceDevice); err != nil {
 			fmt.Printf("Failed to install: %v\n", err)
 			return
 		}
@@ -75,6 +77,7 @@ var serviceStatusCmd = &cobra.Command{
 }
 
 func init() {
+	serviceInstallCmd.Flags().StringVarP(&serviceDevice, "device", "d", "", "Device name (required)")
 	serviceCmd.AddCommand(serviceInstallCmd)
 	serviceCmd.AddCommand(serviceStartCmd)
 	serviceCmd.AddCommand(serviceStopCmd)

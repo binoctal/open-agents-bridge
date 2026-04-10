@@ -12,7 +12,11 @@ const serviceName_win = "OpenAgentsBridge"
 
 type WindowsService struct{}
 
-func (s *WindowsService) Install() error {
+func (s *WindowsService) Install(device string) error {
+	if device == "" {
+		return fmt.Errorf("device name is required: -d <device>")
+	}
+
 	exePath, err := os.Executable()
 	if err != nil {
 		return err
@@ -21,7 +25,7 @@ func (s *WindowsService) Install() error {
 
 	// Use sc.exe to create service
 	cmd := exec.Command("sc", "create", serviceName_win,
-		"binPath=", fmt.Sprintf(`"%s" start`, exePath),
+		"binPath=", fmt.Sprintf(`"%s" start -d %s`, exePath, device),
 		"start=", "auto",
 		"DisplayName=", "Open Agents Bridge")
 
