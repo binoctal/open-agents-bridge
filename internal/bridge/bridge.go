@@ -408,6 +408,18 @@ func (b *Bridge) connect() error {
 	q.Set("type", "bridge")
 	q.Set("deviceId", b.config.DeviceID)
 	q.Set("token", b.config.DeviceToken)
+	// Report CLI capabilities so the server knows which agents are available
+	if len(b.config.CLIEnabled) > 0 {
+		cliNames := make([]string, 0, len(b.config.CLIEnabled))
+		for cli, enabled := range b.config.CLIEnabled {
+			if enabled {
+				cliNames = append(cliNames, cli)
+			}
+		}
+		if len(cliNames) > 0 {
+			q.Set("cliEnabled", strings.Join(cliNames, ","))
+		}
+	}
 	u.RawQuery = q.Encode()
 	u.Path = fmt.Sprintf("/ws/%s", b.config.UserID)
 
