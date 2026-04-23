@@ -24,6 +24,7 @@ type Config struct {
 	// v1.1: Device config synced from Web
 	EnvVars     map[string]string `json:"envVars,omitempty"`
 	CLIEnabled  map[string]bool   `json:"cliEnabled,omitempty"`
+	CLIDetected map[string]bool   `json:"cliDetected,omitempty"` // auto-detected installed CLIs
 	Permissions map[string]bool   `json:"permissions,omitempty"`
 
 	// v1.1: Auto-approval rules
@@ -78,6 +79,25 @@ func (c *Config) GetEnvironment() string {
 		return "development"
 	}
 	return "production"
+}
+
+// GetEffectiveFallbacks returns custom ModelFallbacks if configured,
+// otherwise filters the built-in default chain by detected CLIs.
+func (c *Config) GetEffectiveFallbacks() []ModelFallback {
+	if len(c.ModelFallbacks) > 0 {
+		return c.ModelFallbacks
+	}
+	defaults := DefaultFallbackChain()
+	if len(c.CLIDetected) == 0 {
+		return defaults
+	}
+	var result []ModelFallback
+	for _, fb := range defaults {
+		if c.CLIDetected[fb.Fallback] {
+			result = append(result, fb)
+		}
+	}
+	return result
 }
 
 type ModelFallback struct {

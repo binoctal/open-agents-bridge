@@ -266,6 +266,19 @@ func New(cfg *config.Config) (*Bridge, error) {
 	b.sessions.StartCleanupWorker(5*time.Minute, 30*time.Minute)
 	logger.Info("Session cleanup worker started (interval: 5m, max idle: 30m)")
 
+	// Auto-detect installed CLI tools
+	cfg.CLIDetected = config.DetectInstalledCLIs()
+
+	// If cliEnabled is empty, auto-enable all detected CLIs
+	if cfg.CLIEnabled == nil || len(cfg.CLIEnabled) == 0 {
+		cfg.CLIEnabled = make(map[string]bool, len(cfg.CLIDetected))
+		for cli, installed := range cfg.CLIDetected {
+			if installed {
+				cfg.CLIEnabled[cli] = true
+			}
+		}
+	}
+
 	return b, nil
 }
 
@@ -418,6 +431,18 @@ func (b *Bridge) connect() error {
 		}
 		if len(cliNames) > 0 {
 			q.Set("cliEnabled", strings.Join(cliNames, ","))
+		}
+	}
+	// Report auto-detected installed CLIs
+	if len(b.config.CLIDetected) > 0 {
+		detected := make([]string, 0, len(b.config.CLIDetected))
+		for cli, installed := range b.config.CLIDetected {
+			if installed {
+				detected = append(detected, cli)
+			}
+		}
+		if len(detected) > 0 {
+			q.Set("cliDetected", strings.Join(detected, ","))
 		}
 	}
 	u.RawQuery = q.Encode()
@@ -761,9 +786,10 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 	case protocol.MessageTypeError:
 		metrics.RecordError(sessionID, "protocol")
 
-		if b.config.ModelFallbacks != nil {
+		effectiveFallbacks := b.config.GetEffectiveFallbacks()
+		if len(effectiveFallbacks) > 0 {
 			if sess := b.sessions.Get(sessionID); sess != nil {
-				fallback := b.sessions.GetFallbackCLI(sess.CLIType, toFallbackConfigs(b.config.ModelFallbacks))
+				fallback := b.sessions.GetFallbackCLI(sess.CLIType, toFallbackConfigs(effectiveFallbacks))
 				if fallback != "" {
 					b.logInfo("[%s] Attempting fallback from %s to %s for session %s", logger.ModSession, sess.CLIType, fallback, sessionID)
 					b.sendMessage(Message{
