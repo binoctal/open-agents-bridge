@@ -409,7 +409,8 @@ func (a *ACPAdapter) readMessages() {
 	}
 }
 
-// readErrors reads stderr and forwards important messages
+// readErrors reads stderr and only forwards actionable errors.
+// CLI debug output (object dumps, stack traces) is logged locally but not sent to the Web UI.
 func (a *ACPAdapter) readErrors() {
 	scanner := bufio.NewScanner(a.stderr)
 	for scanner.Scan() {
@@ -428,7 +429,17 @@ func (a *ACPAdapter) readErrors() {
 			continue
 		}
 
-		// Forward stderr to Web UI as error messages
+		// Skip claude-code-acp debug dumps: indented object lines and multiline error headers
+		// e.g. "Error handling request {", "  method: 'session/prompt',", "    sessionId: '...'", "}"
+		if strings.HasPrefix(line, "Error handling request") ||
+			strings.HasPrefix(line, "  ") ||
+			line == "}" ||
+			line == "{" {
+			logger.Debug("[%s] stderr (suppressed): %s", logger.ModACP, line)
+			continue
+		}
+
+		// Forward genuine stderr errors to Web UI
 		a.emitMessage(Message{
 			Type:    MessageTypeError,
 			Content: line,
@@ -1105,11 +1116,17 @@ func (a *ACPAdapter) handleError(msg map[string]interface{}) {
 	code, _ := errObj["code"].(float64)
 	message, _ := errObj["message"].(string)
 
-	logger.Error("[%s] Error %d: %s", logger.ModACP, int(code), message)
+	// Include error.data for richer diagnostics (e.g. 429 rate-limit details)
+	detail := message
+	if data, ok := errObj["data"].(string); ok && data != "" {
+		detail = message + ": " + data
+	}
+
+	logger.Error("[%s] Error %d: %s", logger.ModACP, int(code), detail)
 
 	a.emitMessage(Message{
 		Type:    MessageTypeError,
-		Content: message,
+		Content: detail,
 		Meta: map[string]interface{}{
 			"protocol": "acp",
 			"code":     int(code),
