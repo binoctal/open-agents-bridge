@@ -1760,6 +1760,9 @@ func (b *Bridge) reconnect() {
 	}
 	b.connMu.Unlock()
 
+	// Reset reconnect time budget so we get a fresh 10-minute window
+	b.reconnectStrategy.ResetBudget()
+
 	b.stateManager.SetState(StateReconnecting, "initiating_reconnect")
 	alert.WebSocketDisconnected("connection lost")
 
