@@ -786,25 +786,33 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 	case protocol.MessageTypeError:
 		metrics.RecordError(sessionID, "protocol")
 
+		// Only trigger fallback if the session's protocol is actually disconnected.
+		// Non-fatal errors (e.g. ENOSPC inotify warnings in stderr) should NOT
+		// trigger a fallback because the CLI is still running and usable.
 		effectiveFallbacks := b.config.GetEffectiveFallbacks()
 		if len(effectiveFallbacks) > 0 {
 			if sess := b.sessions.Get(sessionID); sess != nil {
-				fallback := b.sessions.GetFallbackCLI(sess.CLIType, toFallbackConfigs(effectiveFallbacks))
-				if fallback != "" {
-					b.logInfo("[%s] Attempting fallback from %s to %s for session %s", logger.ModSession, sess.CLIType, fallback, sessionID)
-					b.sendMessage(Message{
-						Type: "session:output",
-						Payload: map[string]interface{}{
-							"sessionId":  sessionID,
-							"deviceId":   b.config.DeviceID,
-							"outputType": "stderr",
-							"content":    fmt.Sprintf("[fallback] %s failed, switching to %s", sess.CLIType, fallback),
-						},
-						Timestamp: time.Now().UnixMilli(),
-					})
-					_ = b.sessions.Stop(sessionID)
-					_, _ = b.sessions.CreateWithIDAndSize(fallback, sess.WorkDir, sessionID+"-fb", 120, 30, sess.PermissionMode)
-					return
+				protocolAlive := sess.Protocol != nil && sess.Protocol.IsConnected()
+				if protocolAlive {
+					b.logInfo("[%s] Non-fatal error on session %s, skipping fallback (protocol still connected)", logger.ModSession, sessionID)
+				} else {
+					fallback := b.sessions.GetFallbackCLI(sess.CLIType, toFallbackConfigs(effectiveFallbacks))
+					if fallback != "" {
+						b.logInfo("[%s] Session %s disconnected, attempting fallback from %s to %s", logger.ModSession, sessionID, sess.CLIType, fallback)
+						b.sendMessage(Message{
+							Type: "session:output",
+							Payload: map[string]interface{}{
+								"sessionId":  sessionID,
+								"deviceId":   b.config.DeviceID,
+								"outputType": "stderr",
+								"content":    fmt.Sprintf("[fallback] %s failed, switching to %s", sess.CLIType, fallback),
+							},
+							Timestamp: time.Now().UnixMilli(),
+						})
+						_ = b.sessions.Stop(sessionID)
+						_, _ = b.sessions.CreateWithIDAndSize(fallback, sess.WorkDir, sessionID+"-fb", 120, 30, sess.PermissionMode)
+						return
+					}
 				}
 			}
 		}
