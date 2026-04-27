@@ -65,6 +65,7 @@ type Logger struct {
 	size         int64
 	level        int
 	consoleLevel int // minimum level for console (stderr) output
+	skipConsole  bool // true when stderr points to the log file (avoid duplicates)
 	mu           sync.Mutex
 }
 
@@ -79,6 +80,10 @@ func New() (*Logger, error) {
 	if err := l.openFile(); err != nil {
 		return nil, err
 	}
+
+	// Detect if stderr points to the same file as the log file
+	// (common when bridge is started with stderr redirected to the log)
+	l.skipConsole = sameFile(os.Stderr, l.file)
 
 	globalLogger = l
 	return l, nil
@@ -140,7 +145,8 @@ func (l *Logger) log(level int, format string, args ...interface{}) {
 
 	// Write to console (stderr) for levels >= console level
 	// Debug never goes to console to avoid terminal noise
-	if level >= l.consoleLevel && level > LevelDebug {
+	// Skip if stderr points to the same file as the log file to avoid duplicates
+	if !l.skipConsole && level >= l.consoleLevel && level > LevelDebug {
 		fmt.Fprint(os.Stderr, line)
 	}
 }
@@ -507,6 +513,22 @@ func (l *IOLogger) ShouldLog(msgType string) bool {
 		return false
 	}
 	return l.types[msgType]
+}
+
+// sameFile checks if two files point to the same inode (same file)
+func sameFile(a, b *os.File) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	aInfo, err := a.Stat()
+	if err != nil {
+		return false
+	}
+	bInfo, err := b.Stat()
+	if err != nil {
+		return false
+	}
+	return os.SameFile(aInfo, bInfo)
 }
 
 // Truncate truncates a string to maxLen characters, appending "..." if truncated.

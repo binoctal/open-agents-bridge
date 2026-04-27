@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/open-agents/open-agents-bridge/internal/command"
@@ -83,10 +84,12 @@ func (a *ACPAdapter) Connect(config AdapterConfig) error {
 	// Store work directory for session/new
 	a.workDir = config.WorkDir
 
-	// Start CLI process
+	// Start CLI process in its own process group so we can kill
+	// the entire tree (npx → sh → node) on disconnect
 	a.cmd = exec.Command(config.Command, config.Args...)
 	a.cmd.Dir = config.WorkDir
 	a.cmd.Env = os.Environ()
+	a.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	// Add custom env vars
 	for k, v := range config.Env {
@@ -173,7 +176,12 @@ func (a *ACPAdapter) Disconnect() error {
 		a.stdin.Close()
 	}
 	if a.cmd != nil && a.cmd.Process != nil {
-		a.cmd.Process.Kill()
+		// Kill the entire process group (npx → sh → node)
+		// Negative PID sends signal to all processes in the group
+		if err := syscall.Kill(-a.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			// Fallback: kill just the direct child
+			a.cmd.Process.Kill()
+		}
 	}
 
 	return nil
@@ -387,7 +395,12 @@ func (a *ACPAdapter) monitorProcess() {
 	a.connected.Store(false)
 
 	if err != nil {
-		logger.Warn("[%s] Process exited with error: %v", logger.ModACP, err)
+		// "signal: killed" is expected when Disconnect() kills the process
+		if strings.Contains(err.Error(), "signal: killed") {
+			logger.Debug("[%s] Process killed (expected during disconnect)", logger.ModACP)
+		} else {
+			logger.Warn("[%s] Process exited with error: %v", logger.ModACP, err)
+		}
 	}
 }
 
@@ -413,7 +426,12 @@ func (a *ACPAdapter) readMessages() {
 	}
 
 	if err := scanner.Err(); err != nil {
-		logger.Warn("[%s] Scanner error: %v", logger.ModACP, err)
+		// Expected when Disconnect() kills the process — not a real error
+		if a.connected.Load() {
+			logger.Warn("[%s] Scanner error: %v", logger.ModACP, err)
+		} else {
+			logger.Debug("[%s] Scanner closed (expected during disconnect): %v", logger.ModACP, err)
+		}
 	}
 }
 
@@ -439,10 +457,18 @@ func (a *ACPAdapter) readErrors() {
 
 		// Skip claude-code-acp debug dumps: indented object lines and multiline error headers
 		// e.g. "Error handling request {", "  method: 'session/prompt',", "    sessionId: '...'", "}"
+		// Also skip JS object fragments like "} {" that appear in multi-line error dumps
+		trimmed := strings.TrimSpace(line)
+		isStructural := true
+		for _, r := range trimmed {
+			if r != '{' && r != '}' && r != '[' && r != ']' && r != ',' && r != ':' {
+				isStructural = false
+				break
+			}
+		}
 		if strings.HasPrefix(line, "Error handling request") ||
 			strings.HasPrefix(line, "  ") ||
-			line == "}" ||
-			line == "{" {
+			(len(trimmed) <= 6 && isStructural) {
 			logger.Debug("[%s] stderr (suppressed): %s", logger.ModACP, line)
 			continue
 		}

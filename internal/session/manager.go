@@ -416,16 +416,19 @@ func (m *Manager) StopWithExitCode(id string, exitCode int) error {
 	return nil
 }
 
-func (m *Manager) StopAll() {
+func (m *Manager) StopAll() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for _, sess := range m.sessions {
+	ids := make([]string, 0, len(m.sessions))
+	for id, sess := range m.sessions {
+		ids = append(ids, id)
 		if sess.Protocol != nil {
 			sess.Protocol.Disconnect()
 		}
 	}
 	m.sessions = make(map[string]*Session)
+	return ids
 }
 
 func (s *Session) Send(input string) error {
