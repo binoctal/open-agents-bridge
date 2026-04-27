@@ -78,6 +78,12 @@ func (m *Manager) ActiveCount() int {
 	return count
 }
 
+func (m *Manager) Count() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.sessions)
+}
+
 func (m *Manager) MaxConcurrent() int {
 	return m.maxConcurrent
 }
