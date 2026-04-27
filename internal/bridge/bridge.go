@@ -1768,6 +1768,13 @@ func (b *Bridge) reconnect() {
 	}
 	b.connMu.Unlock()
 
+	// Clean up all sessions — they belong to the old connection and will
+	// be stale/zombie after reconnect. New messages will auto-create sessions.
+	if count := b.sessions.Count(); count > 0 {
+		b.logInfo("[%s] Cleaning up %d stale session(s) before reconnect", logger.ModBridge, count)
+		b.sessions.StopAll()
+	}
+
 	// Reset reconnect time budget so we get a fresh 10-minute window
 	b.reconnectStrategy.ResetBudget()
 
