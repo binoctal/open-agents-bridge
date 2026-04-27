@@ -109,6 +109,8 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 		}
 	})
 
+	// Register session to map EARLY so it's visible while Connect() is in progress
+	m.sessions[sess.ID] = sess
 	m.mu.Unlock()
 	// --- End of locked phase ---
 
@@ -131,16 +133,15 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 	m.applyPermissionMode(permissionMode, cliType, &config)
 
 	if err := protocolMgr.Connect(config); err != nil {
+		// Connect failed — remove from map
+		m.mu.Lock()
+		delete(m.sessions, sess.ID)
+		m.mu.Unlock()
 		return nil, err
 	}
 
-	// --- Phase 3: register in map under lock ---
 	sess.Config = config
 	sess.LastActiveAt = time.Now()
-
-	m.mu.Lock()
-	m.sessions[sess.ID] = sess
-	m.mu.Unlock()
 
 	logger.Info("[%s] Session %s connected using protocol: %s", logger.ModSession, sessionID, protocolMgr.GetProtocolName())
 	logger.Debug("[%s] Config stored for reconnection capability", logger.ModSession)

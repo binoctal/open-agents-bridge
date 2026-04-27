@@ -582,23 +582,27 @@ func (b *Bridge) readLoop() {
 		b.logDebug("[%s] Parsed message: type=%s", logger.ModBridge, msg.Type)
 
 		// Queue message for ordered processing without blocking readLoop.
-		// Non-blocking send: if the queue is full (messageWorker is slow),
-		// drop the oldest pending message and log a warning so readLoop
-		// never stalls and the WebSocket stays healthy.
+		// Non-blocking send: if queue is full, drain oldest and enqueue new.
 		select {
 		case b.messageQueue <- msg:
 			b.logDebug("[%s] Message queued successfully: type=%s", logger.ModBridge, msg.Type)
 		case <-b.done:
 			return
 		default:
-			// Queue full — drain one stale message then enqueue the new one
+			// Queue full — drain one stale message then enqueue the new one (non-blocking)
 			select {
 			case stale := <-b.messageQueue:
 				b.logWarn("[%s] Message queue full, dropping stale message: type=%s", logger.ModBridge, stale.Type)
 			default:
 			}
-			b.messageQueue <- msg
-			b.logWarn("[%s] Message queue was full, replaced oldest with: type=%s", logger.ModBridge, msg.Type)
+			select {
+			case b.messageQueue <- msg:
+				b.logDebug("[%s] Message queued after drain: type=%s", logger.ModBridge, msg.Type)
+			case <-b.done:
+				return
+			default:
+				b.logWarn("[%s] Message dropped (queue full): type=%s", logger.ModBridge, msg.Type)
+			}
 		}
 	}
 }
@@ -638,7 +642,7 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 
 	b.logDebug("[%s] Forwarding: session=%s, type=%s", logger.ModBridge, sessionID, msg.Type)
 
-	// Get session to check protocol
+	// Get session to check protocol — early return if session no longer exists
 	sess := b.sessions.Get(sessionID)
 	if sess == nil {
 		b.logWarn("[%s] Session %s not found in forwardSessionOutput, dropping message type=%s", logger.ModSession, sessionID, msg.Type)
@@ -801,32 +805,29 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 		// Only trigger fallback if the session's protocol is actually disconnected.
 		// Non-fatal errors (e.g. ENOSPC inotify warnings in stderr) should NOT
 		// trigger a fallback because the CLI is still running and usable.
+		protocolAlive := sess.Protocol != nil && sess.Protocol.IsConnected()
 		effectiveFallbacks := b.config.GetEffectiveFallbacks()
-		if len(effectiveFallbacks) > 0 {
-			if sess := b.sessions.Get(sessionID); sess != nil {
-				protocolAlive := sess.Protocol != nil && sess.Protocol.IsConnected()
-				if protocolAlive {
-					b.logInfo("[%s] Non-fatal error on session %s, skipping fallback (protocol still connected)", logger.ModSession, sessionID)
-				} else {
-					fallback := b.sessions.GetFallbackCLI(sess.CLIType, toFallbackConfigs(effectiveFallbacks))
-					if fallback != "" {
-						b.logInfo("[%s] Session %s disconnected, attempting fallback from %s to %s", logger.ModSession, sessionID, sess.CLIType, fallback)
-						b.sendMessage(Message{
-							Type: "session:output",
-							Payload: map[string]interface{}{
-								"sessionId":  sessionID,
-								"deviceId":   b.config.DeviceID,
-								"outputType": "stderr",
-								"content":    fmt.Sprintf("[fallback] %s failed, switching to %s", sess.CLIType, fallback),
-							},
-							Timestamp: time.Now().UnixMilli(),
-						})
-						_ = b.sessions.Stop(sessionID)
-						_, _ = b.sessions.CreateWithIDAndSize(fallback, sess.WorkDir, sessionID+"-fb", 120, 30, sess.PermissionMode)
-						return
-					}
-				}
+
+		if !protocolAlive && len(effectiveFallbacks) > 0 {
+			fallback := b.sessions.GetFallbackCLI(sess.CLIType, toFallbackConfigs(effectiveFallbacks))
+			if fallback != "" {
+				b.logInfo("[%s] Session %s disconnected, attempting fallback from %s to %s", logger.ModSession, sessionID, sess.CLIType, fallback)
+				b.sendMessage(Message{
+					Type: "session:output",
+					Payload: map[string]interface{}{
+						"sessionId":  sessionID,
+						"deviceId":   b.config.DeviceID,
+						"outputType": "stderr",
+						"content":    fmt.Sprintf("[fallback] %s failed, switching to %s", sess.CLIType, fallback),
+					},
+					Timestamp: time.Now().UnixMilli(),
+				})
+				_ = b.sessions.Stop(sessionID)
+				_, _ = b.sessions.CreateWithIDAndSize(fallback, sess.WorkDir, sessionID+"-fb", 120, 30, sess.PermissionMode)
+				return
 			}
+		} else if protocolAlive {
+			b.logInfo("[%s] Non-fatal error on session %s, skipping fallback (protocol still connected)", logger.ModSession, sessionID)
 		}
 
 		b.sendMessage(Message{
@@ -1793,8 +1794,9 @@ func (b *Bridge) reconnect() {
 	b.stateManager.SetState(StateReconnecting, "initiating_reconnect")
 	alert.WebSocketDisconnected("connection lost")
 
-	b.logInfo("[%s] Reconnecting (attempt %d)...",
-		logger.ModBridge, b.reconnectStrategy.Attempts()+1)
+	activeSessions := b.sessions.ActiveCount()
+	b.logInfo("[%s] Reconnecting (attempt %d), active sessions: %d",
+		logger.ModBridge, b.reconnectStrategy.Attempts()+1, activeSessions)
 
 	// The actual reconnection will happen in readLoop with exponential backoff
 }
