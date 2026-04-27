@@ -109,6 +109,14 @@ func (a *ACPAdapter) Connect(config AdapterConfig) error {
 		}
 	}
 
+	// Set polling mode for file watchers to avoid ENOSPC (inotify watch limit)
+	// This prevents CLI tools using chokidar from crashing when the system
+	// has too many inotify watches (common on Linux with limited fs.inotify.max_user_watches)
+	a.cmd.Env = append(a.cmd.Env,
+		"CHOKIDAR_USEPOLLING=true",
+		"CHOKIDAR_INTERVAL=1000",
+	)
+
 	// Setup pipes
 	var err error
 	a.stdin, err = a.cmd.StdinPipe()
