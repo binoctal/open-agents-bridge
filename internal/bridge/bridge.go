@@ -581,13 +581,24 @@ func (b *Bridge) readLoop() {
 
 		b.logDebug("[%s] Parsed message: type=%s", logger.ModBridge, msg.Type)
 
-		// Queue message for ordered processing without blocking readLoop
-		// The messageWorker will process messages sequentially
+		// Queue message for ordered processing without blocking readLoop.
+		// Non-blocking send: if the queue is full (messageWorker is slow),
+		// drop the oldest pending message and log a warning so readLoop
+		// never stalls and the WebSocket stays healthy.
 		select {
 		case b.messageQueue <- msg:
 			b.logDebug("[%s] Message queued successfully: type=%s", logger.ModBridge, msg.Type)
 		case <-b.done:
 			return
+		default:
+			// Queue full — drain one stale message then enqueue the new one
+			select {
+			case stale := <-b.messageQueue:
+				b.logWarn("[%s] Message queue full, dropping stale message: type=%s", logger.ModBridge, stale.Type)
+			default:
+			}
+			b.messageQueue <- msg
+			b.logWarn("[%s] Message queue was full, replaced oldest with: type=%s", logger.ModBridge, msg.Type)
 		}
 	}
 }
@@ -629,10 +640,11 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 
 	// Get session to check protocol
 	sess := b.sessions.Get(sessionID)
-	protocolName := "unknown"
-	if sess != nil {
-		protocolName = sess.GetProtocolName()
+	if sess == nil {
+		b.logWarn("[%s] Session %s not found in forwardSessionOutput, dropping message type=%s", logger.ModSession, sessionID, msg.Type)
+		return
 	}
+	protocolName := sess.GetProtocolName()
 
 	// Security scan output content
 	if contentStr, ok := msg.Content.(string); ok {
