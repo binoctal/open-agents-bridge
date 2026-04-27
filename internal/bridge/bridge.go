@@ -130,6 +130,9 @@ type Bridge struct {
 	// Ring buffer for message replay after reconnection
 	msgBuffer *MessageBuffer
 
+	// Session IDs cleaned up during reconnect; notified after reconnection succeeds
+	staleSessionIDs []string
+
 	// Keep-alive data frame for preventing proxy idle timeout
 	keepAliveDone chan struct{}
 	lastSendTime  int64 // unix milliseconds of last business message send
@@ -526,6 +529,7 @@ func (b *Bridge) readLoop() {
 			b.reconnectStrategy.Reset()
 			b.stateManager.SetState(StateConnected, "connection_established")
 			b.flushOffline() // Send buffered messages from offline period
+			b.notifyStaleSessionsStopped()
 			b.reconnectCallback.Notify(reconnect.Event{
 				Type:      reconnect.EventSuccess,
 				Attempts:  b.reconnectStrategy.Attempts(),
@@ -1785,7 +1789,9 @@ func (b *Bridge) reconnect() {
 	// be stale/zombie after reconnect. New messages will auto-create sessions.
 	if count := b.sessions.Count(); count > 0 {
 		b.logInfo("[%s] Cleaning up %d stale session(s) before reconnect", logger.ModBridge, count)
-		b.sessions.StopAll()
+		b.staleSessionIDs = b.sessions.StopAll()
+	} else {
+		b.staleSessionIDs = nil
 	}
 
 	// Reset reconnect time budget so we get a fresh 10-minute window
@@ -1799,6 +1805,28 @@ func (b *Bridge) reconnect() {
 		logger.ModBridge, b.reconnectStrategy.Attempts()+1, activeSessions)
 
 	// The actual reconnection will happen in readLoop with exponential backoff
+}
+
+// notifyStaleSessionsStopped sends session:stopped for sessions that were
+// cleaned up during reconnect. Must be called only after the new WebSocket
+// connection is established.
+func (b *Bridge) notifyStaleSessionsStopped() {
+	if len(b.staleSessionIDs) == 0 {
+		return
+	}
+
+	for _, sessionID := range b.staleSessionIDs {
+		b.logInfo("[%s] Notifying stale session stopped: %s", logger.ModSession, sessionID)
+		b.sendMessage(Message{
+			Type: "session:stopped",
+			Payload: map[string]interface{}{
+				"sessionId": sessionID,
+				"deviceId":  b.config.DeviceID,
+			},
+			Timestamp: time.Now().UnixMilli(),
+		})
+	}
+	b.staleSessionIDs = nil
 }
 
 // batchContent accumulates small content chunks for a session, flushing them
