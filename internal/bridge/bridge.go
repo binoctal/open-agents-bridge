@@ -876,6 +876,8 @@ func (b *Bridge) handleMessage(msg Message) {
 		b.handleSessionCancel(msg)
 	case "session:resize":
 		b.handleSessionResize(msg)
+	case "session:changeDir":
+		b.handleSessionChangeDir(msg)
 	case "chat:send":
 		b.handleChatSend(msg)
 	case "permission:response":
@@ -1279,6 +1281,71 @@ func (b *Bridge) handleSessionResize(msg Message) {
 	if err := b.sessions.Resize(sessionID, cols, rows); err != nil {
 		b.logWarn("[%s] Failed to resize session: %v", logger.ModSession, err)
 	}
+}
+
+func (b *Bridge) handleSessionChangeDir(msg Message) {
+	payload, ok := msg.Payload.(map[string]interface{})
+	if !ok {
+		b.logError("[%s] handleSessionChangeDir: invalid payload type", logger.ModSession)
+		return
+	}
+
+	sessionID, _ := payload["sessionId"].(string)
+	path, _ := payload["path"].(string)
+
+	if sessionID == "" || path == "" {
+		b.sendMessage(Message{
+			Type: "session:error",
+			Payload: map[string]interface{}{
+				"error": "sessionId and path are required",
+			},
+			Timestamp: time.Now().UnixMilli(),
+		})
+		return
+	}
+
+	sess := b.sessions.Get(sessionID)
+	if sess == nil || sess.Status != "active" {
+		b.sendMessage(Message{
+			Type: "session:error",
+			Payload: map[string]interface{}{
+				"sessionId": sessionID,
+				"error":     "Session not found or inactive",
+			},
+			Timestamp: time.Now().UnixMilli(),
+		})
+		return
+	}
+
+	protocolName := sess.Protocol.GetProtocolName()
+	if protocolName == "acp" {
+		b.sendMessage(Message{
+			Type: "session:error",
+			Payload: map[string]interface{}{
+				"sessionId": sessionID,
+				"error":     "ACP sessions do not support runtime directory changes",
+			},
+			Timestamp: time.Now().UnixMilli(),
+		})
+		return
+	}
+
+	// PTY: send cd command to the process
+	sess.Send("cd " + path)
+	if err := b.sessions.UpdateWorkDir(sessionID, path); err != nil {
+		b.logError("[%s] Failed to update workDir for session %s: %v", logger.ModSession, sessionID, err)
+		return
+	}
+
+	b.logInfo("[%s] Changed directory for session %s to %s", logger.ModSession, sessionID, path)
+	b.sendMessage(Message{
+		Type: "session:dirChanged",
+		Payload: map[string]interface{}{
+			"sessionId": sessionID,
+			"workDir":   path,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
 }
 
 func (b *Bridge) handlePermissionResponse(msg Message) {
