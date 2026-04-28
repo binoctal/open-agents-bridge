@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -495,6 +496,18 @@ type FallbackConfig struct {
 	CLIType  string
 	Fallback string
 	OnError  string // "rate_limit", "timeout", "any"
+}
+
+// UpdateWorkDir updates the working directory for a session
+func (m *Manager) UpdateWorkDir(sessionID, newDir string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sess, ok := m.sessions[sessionID]
+	if !ok {
+		return fmt.Errorf("session not found")
+	}
+	sess.WorkDir = newDir
+	return nil
 }
 
 // GetFallbackCLI returns the fallback CLI type for a given CLI, or empty string if none
