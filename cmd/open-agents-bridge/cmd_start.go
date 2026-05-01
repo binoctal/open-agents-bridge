@@ -32,10 +32,10 @@ You must specify a device name with --device.
 
 Examples:
   # Start a specific device
-  open-agents start -d work-pc
+  open-agents-bridge start -d work-pc
 
   # Start with debug logging
-  open-agents start -d work-pc --log-level debug`,
+  open-agents-bridge start -d work-pc --log-level debug`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Determine which device to use
 		targetDevice := deviceName
@@ -45,11 +45,11 @@ Examples:
 
 		if targetDevice == "" {
 			fmt.Fprintln(os.Stderr, "Error: device name is required.")
-			fmt.Fprintln(os.Stderr, "Usage: open-agents start -d <device>")
+			fmt.Fprintln(os.Stderr, "Usage: open-agents-bridge start -d <device>")
 			fmt.Fprintln(os.Stderr)
 			names, _ := config.ListDevices()
 			if len(names) == 0 {
-				fmt.Fprintln(os.Stderr, "No devices paired yet. Run 'open-agents pair' first.")
+				fmt.Fprintln(os.Stderr, "No devices paired yet. Run 'open-agents-bridge pair' first.")
 			} else {
 				fmt.Fprintln(os.Stderr, "Available devices:")
 				for _, n := range names {
@@ -79,7 +79,7 @@ Examples:
 		cfg, err = config.LoadDevice(targetDevice)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: device '%s' not found.\n", targetDevice)
-			fmt.Fprintln(os.Stderr, "Run 'open-agents devices' to see available devices.")
+			fmt.Fprintln(os.Stderr, "Run 'open-agents-bridge devices' to see available devices.")
 			os.Exit(1)
 		}
 

@@ -18,7 +18,7 @@
 ps aux | grep open-agents
 
 # 停止进程
-pkill -f "open-agents start"
+pkill -f "open-agents-bridge start"
 
 # 或者手动 kill
 kill <PID>
@@ -28,21 +28,21 @@ kill <PID>
 
 ```bash
 cd bridge
-go build -o build/open-agents ./cmd/open-agents/
+go build -o build/open-agents-bridge ./cmd/open-agents-bridge/
 ```
 
 ### 3. 启动新 Bridge
 
 ```bash
 cd bridge
-./build/open-agents start
+./build/open-agents-bridge start
 ```
 
 ### 4. 验证
 
 ```bash
 # 检查日志，应该看到新的协议消息
-tail -f ~/.open-agents/logs/bridge.log
+tail -f ~/.open-agents-bridge/logs/bridge.log
 
 # 应该看到类似：
 # [SessionManager] Message received: type=content
@@ -99,7 +99,7 @@ A: 检查日志中是否有：
 ### Q: 重启后还是不行？
 
 A: 检查：
-1. 是否使用了正确的二进制文件（`./build/open-agents`）
+1. 是否使用了正确的二进制文件（`./build/open-agents-bridge`）
 2. 是否有多个 Bridge 进程在运行
 3. Web UI 是否连接到正确的 WebSocket
 
@@ -113,23 +113,23 @@ cd bridge
 
 # 1. 停止旧进程
 echo "🛑 Stopping old Bridge..."
-pkill -f "open-agents start"
+pkill -f "open-agents-bridge start"
 sleep 2
 
 # 2. 重新编译
 echo "🔨 Rebuilding..."
-go build -o build/open-agents ./cmd/open-agents/
+go build -o build/open-agents-bridge ./cmd/open-agents-bridge/
 
 # 3. 启动新进程
 echo "🚀 Starting new Bridge..."
-./build/open-agents start &
+./build/open-agents-bridge start &
 
 # 4. 等待启动
 sleep 2
 
 # 5. 检查状态
 echo "✅ Bridge restarted"
-ps aux | grep '[o]pen-agents start'
+ps aux | grep '[o]pen-agents-bridge start'
 ```
 
 保存为 `scripts/full-restart.sh` 并运行：

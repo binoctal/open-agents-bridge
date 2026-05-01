@@ -44,13 +44,13 @@ var pairCmd = &cobra.Command{
 
 Examples:
   # Use default production server
-  open-agents pair
+  open-agents-bridge pair
 
   # Local development
-  open-agents pair --server http://localhost:8787
+  open-agents-bridge pair --server http://localhost:8787
 
   # Dev mode: auto-create test user and device (localhost only)
-  open-agents pair --dev --server http://localhost:8787`,
+  open-agents-bridge pair --dev --server http://localhost:8787`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// --staging and --server are mutually exclusive
 		if pairStagingMode && pairServerURL != "" {
@@ -171,7 +171,7 @@ Examples:
 			deviceName = displayName
 			startCmd.Run(cmd, args)
 		} else {
-			fmt.Printf("Run 'open-agents start -d %s' to start the bridge.\n", displayName)
+			fmt.Printf("Run 'open-agents-bridge start -d %s' to start the bridge.\n", displayName)
 		}
 	},
 }
@@ -181,7 +181,7 @@ func runDevPair(cmd *cobra.Command, args []string) {
 	// Safety check: only allow dev mode with localhost
 	if !strings.Contains(pairServerURL, "localhost") && !strings.Contains(pairServerURL, "127.0.0.1") {
 		fmt.Fprintln(os.Stderr, "Error: --dev mode is only allowed with localhost servers")
-		fmt.Fprintln(os.Stderr, "Use: open-agents pair --dev --server http://localhost:8787")
+		fmt.Fprintln(os.Stderr, "Use: open-agents-bridge pair --dev --server http://localhost:8787")
 		os.Exit(1)
 	}
 
@@ -258,7 +258,7 @@ func runDevPair(cmd *cobra.Command, args []string) {
 		if devName == "" {
 			devName = "default"
 		}
-		fmt.Printf("Run 'open-agents start -d %s' to start the bridge.\n", devName)
+		fmt.Printf("Run 'open-agents-bridge start -d %s' to start the bridge.\n", devName)
 	}
 }
 
