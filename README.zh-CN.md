@@ -17,6 +17,10 @@
 
 ## 安装
 
+```bash
+npm i -g @binoctal/open-agents-bridge
+```
+
 ### 从源码构建
 
 ```bash
@@ -35,47 +39,47 @@ make install
 
 ```bash
 # 交互式配对
-open-agents pair
+open-agents-bridge pair
 
 # 指定设备名称
-open-agents pair --name work-pc
+open-agents-bridge pair --name work-pc
 ```
 
 ### 启动 Bridge
 
 ```bash
 # 启动设备
-open-agents start --device work-pc
+open-agents-bridge start --device work-pc
 
 # 指定日志级别
-open-agents start --device work-pc --log-level debug
+open-agents-bridge start --device work-pc --log-level debug
 ```
 
 ### 管理设备
 
 ```bash
 # 列出所有设备
-open-agents devices
+open-agents-bridge devices
 
 # 查看设备详情
-open-agents device work-pc
+open-agents-bridge device work-pc
 ```
 
 ### 安装为系统服务
 
 ```bash
-open-agents service install   # 安装服务
-open-agents service start     # 启动服务
-open-agents service stop      # 停止服务
-open-agents service uninstall # 卸载服务
+open-agents-bridge service install   # 安装服务
+open-agents-bridge service start     # 启动服务
+open-agents-bridge service stop      # 停止服务
+open-agents-bridge service uninstall # 卸载服务
 ```
 
 ## 配置文件
 
-配置文件存储在 `~/.open-agents/`：
+配置文件存储在 `~/.open-agents-bridge/`：
 
 ```
-~/.open-agents/
+~/.open-agents-bridge/
 ├── config.json           # 全局配置
 ├── devices/              # 设备配置
 │   ├── work-pc.json

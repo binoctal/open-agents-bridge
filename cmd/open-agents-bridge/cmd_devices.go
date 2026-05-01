@@ -19,10 +19,10 @@ var devicesCmd = &cobra.Command{
 
 Examples:
   # List devices
-  open-agents devices
+  open-agents-bridge devices
 
   # JSON output for scripting
-  open-agents devices --json`,
+  open-agents-bridge devices --json`,
 	Run: func(cmd *cobra.Command, args []string) {
 		type deviceInfo struct {
 			Name        string `json:"name"`
@@ -39,7 +39,7 @@ Examples:
 
 		if len(names) == 0 {
 			fmt.Println("No devices paired yet.")
-			fmt.Println("Run 'open-agents pair' to pair your first device.")
+			fmt.Println("Run 'open-agents-bridge pair' to pair your first device.")
 			return
 		}
 

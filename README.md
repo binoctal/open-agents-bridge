@@ -17,6 +17,10 @@ Local Bridge CLI that connects AI coding tools with the OpenAgents cloud platfor
 
 ## Install
 
+```bash
+npm i -g @binoctal/open-agents-bridge
+```
+
 ### Build from source
 
 ```bash
@@ -35,47 +39,47 @@ make install
 
 ```bash
 # Interactive pairing
-open-agents pair
+open-agents-bridge pair
 
 # With device name
-open-agents pair --name work-pc
+open-agents-bridge pair --name work-pc
 ```
 
 ### Start the bridge
 
 ```bash
 # Start a device
-open-agents start --device work-pc
+open-agents-bridge start --device work-pc
 
 # With debug logging
-open-agents start --device work-pc --log-level debug
+open-agents-bridge start --device work-pc --log-level debug
 ```
 
 ### Manage devices
 
 ```bash
 # List all devices
-open-agents devices
+open-agents-bridge devices
 
 # View device details
-open-agents device work-pc
+open-agents-bridge device work-pc
 ```
 
 ### System service
 
 ```bash
-open-agents service install   # Install as system service
-open-agents service start     # Start service
-open-agents service stop      # Stop service
-open-agents service uninstall # Uninstall service
+open-agents-bridge service install   # Install as system service
+open-agents-bridge service start     # Start service
+open-agents-bridge service stop      # Stop service
+open-agents-bridge service uninstall # Uninstall service
 ```
 
 ## Configuration
 
-Config files are stored in `~/.open-agents/`:
+Config files are stored in `~/.open-agents-bridge/`:
 
 ```
-~/.open-agents/
+~/.open-agents-bridge/
 ├── config.json           # Global config
 ├── devices/              # Device configs
 │   ├── work-pc.json

@@ -24,7 +24,7 @@ var statusCmd = &cobra.Command{
 			fmt.Fprintln(os.Stderr, "Error: device name is required (--device or OPEN_AGENTS_DEVICE)")
 			names, _ := config.ListDevices()
 			if len(names) == 0 {
-				fmt.Fprintln(os.Stderr, "No devices paired yet. Run 'open-agents pair' first.")
+				fmt.Fprintln(os.Stderr, "No devices paired yet. Run 'open-agents-bridge pair' first.")
 			} else {
 				fmt.Fprintln(os.Stderr, "Available devices:")
 				for _, n := range names {
@@ -51,7 +51,7 @@ var statusCmd = &cobra.Command{
 
 		// TODO: Check if bridge is running
 		fmt.Println("Status: Configured (not running)")
-		fmt.Printf("Run 'open-agents start -d %s' to start the bridge.\n", device)
+		fmt.Printf("Run 'open-agents-bridge start -d %s' to start the bridge.\n", device)
 	},
 }
 

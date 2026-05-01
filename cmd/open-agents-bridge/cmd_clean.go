@@ -22,13 +22,13 @@ var cleanCmd = &cobra.Command{
 
 Examples:
   # Remove a specific device
-  open-agents clean my-device
+  open-agents-bridge clean my-device
 
   # Remove all devices
-  open-agents clean --all
+  open-agents-bridge clean --all
 
   # Skip confirmation prompt
-  open-agents clean --all --force`,
+  open-agents-bridge clean --all --force`,
 	Args: cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		if cleanAll {
@@ -38,7 +38,7 @@ Examples:
 
 		if len(args) == 0 {
 			fmt.Fprintln(os.Stderr, "Error: specify a device name, or use --all")
-			fmt.Fprintln(os.Stderr, "Run 'open-agents devices' to see paired devices.")
+			fmt.Fprintln(os.Stderr, "Run 'open-agents-bridge devices' to see paired devices.")
 			os.Exit(1)
 		}
 
@@ -49,7 +49,7 @@ Examples:
 func cleanDevice(name string) {
 	if !config.DeviceExists(name) {
 		fmt.Fprintf(os.Stderr, "Error: device '%s' not found\n", name)
-		fmt.Fprintln(os.Stderr, "Run 'open-agents devices' to see paired devices.")
+		fmt.Fprintln(os.Stderr, "Run 'open-agents-bridge devices' to see paired devices.")
 		os.Exit(1)
 	}
 
@@ -117,7 +117,7 @@ func cleanAllDevices() {
 	}
 
 	fmt.Println()
-	fmt.Println("All devices removed. Run 'open-agents pair' to pair a new device.")
+	fmt.Println("All devices removed. Run 'open-agents-bridge pair' to pair a new device.")
 }
 
 func init() {

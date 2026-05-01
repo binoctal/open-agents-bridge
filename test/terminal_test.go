@@ -12,7 +12,7 @@ import (
 
 func TestTerminalCreate(t *testing.T) {
 	// Test that the bridge binary exists
-	binaryPath := "./build/open-agents"
+	binaryPath := "./build/open-agents-bridge"
 	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
 		t.Skipf("Bridge binary not found at %s", binaryPath)
 	}
