@@ -41,7 +41,8 @@ type Config struct {
 	Prompts interface{} `json:"prompts,omitempty"`
 
 	// v2.2: Model fallback chain
-	ModelFallbacks []ModelFallback `json:"modelFallbacks,omitempty"`
+	FallbackEnabled bool            `json:"fallbackEnabled,omitempty"`
+	ModelFallbacks  []ModelFallback `json:"modelFallbacks,omitempty"`
 
 	// v2.3: Security scanner
 	ScannerEnabled *bool `json:"scannerEnabled,omitempty"` // nil = default (true)
@@ -81,9 +82,12 @@ func (c *Config) GetEnvironment() string {
 	return "production"
 }
 
-// GetEffectiveFallbacks returns custom ModelFallbacks if configured,
-// otherwise filters the built-in default chain by detected CLIs.
+// GetEffectiveFallbacks returns custom ModelFallbacks if fallback is enabled
+// and configured. Returns empty slice when fallback is disabled (default).
 func (c *Config) GetEffectiveFallbacks() []ModelFallback {
+	if !c.FallbackEnabled {
+		return nil
+	}
 	if len(c.ModelFallbacks) > 0 {
 		return c.ModelFallbacks
 	}
@@ -221,12 +225,21 @@ func saveFile(fc *fileConfig) error {
 }
 
 // initConfig initializes default maps on a Config.
+// CLIEnabled defaults are set from auto-detected installed CLIs,
+// not hardcoded to true for all types.
 func initConfig(cfg *Config) {
 	if cfg.EnvVars == nil {
 		cfg.EnvVars = make(map[string]string)
 	}
 	if cfg.CLIEnabled == nil {
-		cfg.CLIEnabled = map[string]bool{"kiro": true, "claude": true, "cline": true, "codex": true, "gemini": true}
+		cfg.CLIEnabled = make(map[string]bool)
+	}
+	// If cliDetected was auto-detected, use it to initialize cliEnabled
+	// so only actually installed CLIs are enabled by default.
+	if len(cfg.CLIDetected) > 0 && len(cfg.CLIEnabled) == 0 {
+		for cli, installed := range cfg.CLIDetected {
+			cfg.CLIEnabled[cli] = installed
+		}
 	}
 	if cfg.Permissions == nil {
 		cfg.Permissions = map[string]bool{"fs_read": true, "fs_write": true, "execute_bash": true, "network": false}
