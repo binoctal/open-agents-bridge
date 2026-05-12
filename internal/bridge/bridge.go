@@ -19,6 +19,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/open-agents/open-agents-bridge/internal/alert"
 	"github.com/open-agents/open-agents-bridge/internal/api"
+	"github.com/open-agents/open-agents-bridge/internal/command"
 	"github.com/open-agents/open-agents-bridge/internal/config"
 	"github.com/open-agents/open-agents-bridge/internal/crypto"
 	"github.com/open-agents/open-agents-bridge/internal/logger"
@@ -207,6 +208,9 @@ func New(cfg *config.Config) (*Bridge, error) {
 	if cfg.ScannerEnabled != nil {
 		b.scanner.SetEnabled(*cfg.ScannerEnabled)
 	}
+
+	// Initialize effective whitelist from config
+	command.SetEffectiveWhitelist(command.BuildEffectiveWhitelist(cfg.CommandWhitelist))
 	b.scanner.LoadCustomRules(config.ConfigDir())
 
 	// Initialize S3 uploader if configured
@@ -1484,6 +1488,19 @@ func (b *Bridge) handleConfigSync(msg Message) {
 			}
 		}
 		b.logDebug("[%s] Synced permissions: %v", logger.ModBridge, b.config.Permissions)
+	}
+
+	// Sync command whitelist (user-configured extras)
+	if wlRaw, ok := payload["commandWhitelist"].([]interface{}); ok {
+		var wl []string
+		for _, v := range wlRaw {
+			if s, ok := v.(string); ok && s != "" {
+				wl = append(wl, s)
+			}
+		}
+		b.config.CommandWhitelist = wl
+		command.SetEffectiveWhitelist(command.BuildEffectiveWhitelist(wl))
+		b.logInfo("[%s] Synced command whitelist: %d custom commands", logger.ModBridge, len(wl))
 	}
 
 	// Save config

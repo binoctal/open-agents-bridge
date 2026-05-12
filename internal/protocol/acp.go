@@ -908,8 +908,8 @@ func (a *ACPAdapter) handleTerminalCreate(msg map[string]interface{}) {
 
 // executeTerminalCommand runs a command and stores the result
 func (a *ACPAdapter) executeTerminalCommand(terminalID, cmdStr string, env []string, outputLimit int) {
-	// Validate command through security module
-	if err := command.ValidateCommand(cmdStr); err != nil {
+	// Validate command through security module (relaxed mode for ACP: allows pipes)
+	if err := command.ValidateCommandRelaxed(cmdStr); err != nil {
 		logger.Warn("[%s] SECURITY: command_reject cmd=%q reason=%q", logger.ModACP, cmdStr, err.Error())
 		// Store error as terminal result
 		a.terminalMu.Lock()

@@ -47,6 +47,9 @@ type Config struct {
 	// v2.3: Security scanner
 	ScannerEnabled *bool `json:"scannerEnabled,omitempty"` // nil = default (true)
 
+	// v2.7: Command whitelist (user-configured extras merged with defaults)
+	CommandWhitelist []string `json:"commandWhitelist,omitempty"`
+
 	// v2.4: Environment setting (optional, auto-detected if not set)
 	Environment string `json:"environment,omitempty"`
 
