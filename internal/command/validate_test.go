@@ -123,3 +123,107 @@ func TestValidateCommand(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateCommandRelaxed(t *testing.T) {
+	// Reset to default whitelist
+	SetEffectiveWhitelist(BuildEffectiveWhitelist(nil))
+
+	tests := []struct {
+		name    string
+		cmd     string
+		wantErr bool
+	}{
+		// Single commands (same as strict)
+		{"allowed command", "git status", false},
+		{"allowed with args", "find /home -name \"*.ts\"", false},
+		{"not in whitelist", "sudo apt install foo", true},
+		{"empty command", "", true},
+
+		// Pipes allowed when all segments are whitelisted
+		{"legal pipe find|head", "find /home -name \"*.ts\" | head -20", false},
+		{"legal pipe ls|grep", "ls -la | grep foo", false},
+		{"multi-stage pipe", "grep \"error\" log.txt | sort | uniq -c | sort -rn | head -10", false},
+
+		// Pipes blocked when a segment is not whitelisted
+		{"pipe with non-whitelisted cmd", "cat /etc/passwd | hackertool", true},
+
+		// Dangerous metacharacters still blocked
+		{"command substitution", "echo $(cat /etc/passwd)", true},
+		{"backtick", "echo `cat /etc/passwd`", true},
+		{"redirect write", "cat secret.txt > /tmp/stolen", true},
+		{"redirect append", "cat secret.txt >> /tmp/stolen", true},
+		{"redirect read", "sort < input.txt", true},
+		{"semicolon", "ls; cat /etc/passwd", true},
+		{"ampersand", "sleep 10 &", true},
+
+		// Quoted pipe is literal (not a pipe operator)
+		{"quoted pipe in args", `echo "a | b"`, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateCommandRelaxed(tt.cmd)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateCommandRelaxed(%q) error = %v, wantErr %v", tt.cmd, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateCommandRelaxedWithCustomWhitelist(t *testing.T) {
+	// Add custom commands
+	SetEffectiveWhitelist(BuildEffectiveWhitelist([]string{"gh", "code", "mytool"}))
+
+	tests := []struct {
+		name    string
+		cmd     string
+		wantErr bool
+	}{
+		{"custom command gh", "gh pr list", false},
+		{"custom command code", "code .", false},
+		{"custom command mytool", "mytool --flag", false},
+		{"pipe with custom cmd", "find . -name '*.ts' | gh api", false},
+		{"default command still works", "git status", false},
+		{"non-whitelisted still blocked", "unknown_cmd", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateCommandRelaxed(tt.cmd)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateCommandRelaxed(%q) error = %v, wantErr %v", tt.cmd, err, tt.wantErr)
+			}
+		})
+	}
+
+	// Reset
+	SetEffectiveWhitelist(BuildEffectiveWhitelist(nil))
+}
+
+func TestBuildEffectiveWhitelist(t *testing.T) {
+	wl := BuildEffectiveWhitelist([]string{"gh", "code"})
+	if !wl["git"] {
+		t.Error("default command 'git' should be in effective whitelist")
+	}
+	if !wl["gh"] {
+		t.Error("custom command 'gh' should be in effective whitelist")
+	}
+	if !wl["code"] {
+		t.Error("custom command 'code' should be in effective whitelist")
+	}
+	if wl["rm"] {
+		t.Error("'rm' should not be in effective whitelist")
+	}
+
+	// Empty extras
+	wl2 := BuildEffectiveWhitelist(nil)
+	if len(wl2) != DefaultWhitelistCount() {
+		t.Errorf("empty extras: got %d commands, want %d", len(wl2), DefaultWhitelistCount())
+	}
+
+	// Duplicates ignored
+	wl3 := BuildEffectiveWhitelist([]string{"git", "git"})
+	if wl3["git"] != true {
+		t.Error("duplicate 'git' should still be true")
+	}
+}

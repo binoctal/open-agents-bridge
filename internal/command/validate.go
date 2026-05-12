@@ -126,9 +126,159 @@ func ExtractBaseCommand(cmd string) string {
 	return filepath.Base(base)
 }
 
-// IsAllowed checks if a base command is in the whitelist.
+// IsAllowed checks if a base command is in the default whitelist.
 func IsAllowed(baseCmd string) bool {
 	return allowedCommands[baseCmd]
+}
+
+// relaxedBlacklist are the metacharacters still banned in relaxed (ACP) mode.
+// Pipe | is allowed; everything else is blocked.
+var relaxedBlacklist = []struct {
+	char string
+	name string
+}{
+	{"$(", "command_substitution"},
+	{"`", "backtick"},
+	{">>", "redirect_append"},
+	{">", "redirect_write"},
+	{"<", "redirect_read"},
+	{";", "semicolon"},
+	{"&", "ampersand"},
+}
+
+// DefaultWhitelistCount returns the number of commands in the default whitelist.
+func DefaultWhitelistCount() int {
+	return len(allowedCommands)
+}
+
+// BuildEffectiveWhitelist merges the default whitelist with user-configured extras.
+func BuildEffectiveWhitelist(extras []string) map[string]bool {
+	effective := make(map[string]bool, len(allowedCommands)+len(extras))
+	for cmd := range allowedCommands {
+		effective[cmd] = true
+	}
+	for _, cmd := range extras {
+		if cmd = strings.TrimSpace(cmd); cmd != "" {
+			effective[cmd] = true
+		}
+	}
+	return effective
+}
+
+// effectiveWhitelist is the runtime whitelist used by ValidateCommandRelaxed.
+// Initialized to the default whitelist; updated via SetEffectiveWhitelist.
+var effectiveWhitelist = BuildEffectiveWhitelist(nil)
+
+// SetEffectiveWhitelist replaces the runtime effective whitelist.
+func SetEffectiveWhitelist(wl map[string]bool) {
+	effectiveWhitelist = wl
+}
+
+// ValidateCommandRelaxed performs ACP-mode validation:
+//  1. Check for dangerous metacharacters (pipe is allowed, but $(), >, <, ;, & are blocked)
+//  2. Split by pipe and validate each segment's base command against the effective whitelist
+func ValidateCommandRelaxed(cmd string) error {
+	if strings.TrimSpace(cmd) == "" {
+		return fmt.Errorf("empty command")
+	}
+
+	// Step 1: Check dangerous metacharacters (pipe NOT included)
+	if has, name := hasRelaxedMetacharacters(cmd); has {
+		return fmt.Errorf("shell metacharacter detected: %s", name)
+	}
+
+	// Step 2: Split by pipe, validate each segment
+	segments := splitByPipe(cmd)
+	for _, seg := range segments {
+		seg = strings.TrimSpace(seg)
+		if seg == "" {
+			continue
+		}
+		baseCmd := ExtractBaseCommand(seg)
+		if baseCmd == "" {
+			return fmt.Errorf("could not extract base command")
+		}
+		if !effectiveWhitelist[baseCmd] {
+			return fmt.Errorf("command not allowed: %s", baseCmd)
+		}
+	}
+
+	return nil
+}
+
+// hasRelaxedMetacharacters checks for metacharacters banned in relaxed mode (pipe allowed).
+func hasRelaxedMetacharacters(cmd string) (bool, string) {
+	inSingle := false
+	inDouble := false
+
+	for i := 0; i < len(cmd); i++ {
+		ch := cmd[i]
+
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+		if inSingle || inDouble {
+			continue
+		}
+		if ch == '\\' && i+1 < len(cmd) {
+			i++
+			continue
+		}
+
+		remaining := cmd[i:]
+		for _, mc := range relaxedBlacklist {
+			if strings.HasPrefix(remaining, mc.char) {
+				return true, mc.name
+			}
+		}
+	}
+
+	return false, ""
+}
+
+// splitByPipe splits a command by pipe | outside of quotes.
+func splitByPipe(cmd string) []string {
+	var segments []string
+	var current strings.Builder
+	inSingle := false
+	inDouble := false
+
+	for i := 0; i < len(cmd); i++ {
+		ch := cmd[i]
+
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			current.WriteByte(ch)
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			current.WriteByte(ch)
+			continue
+		}
+		if ch == '\\' && i+1 < len(cmd) {
+			current.WriteByte(ch)
+			i++
+			current.WriteByte(cmd[i])
+			continue
+		}
+
+		if ch == '|' && !inSingle && !inDouble {
+			segments = append(segments, current.String())
+			current.Reset()
+			continue
+		}
+
+		current.WriteByte(ch)
+	}
+	segments = append(segments, current.String())
+
+	return segments
 }
 
 // ValidateCommand performs full command validation:
