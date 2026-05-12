@@ -813,9 +813,13 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 		effectiveFallbacks := b.config.GetEffectiveFallbacks()
 
 		if !protocolAlive && len(effectiveFallbacks) > 0 {
+			// Count fallback depth by counting "-fb" suffixes in session ID
+			fallbackDepth := strings.Count(sessionID, "-fb")
+			const maxFallbackDepth = 2
+
 			fallback := b.sessions.GetFallbackCLI(sess.CLIType, toFallbackConfigs(effectiveFallbacks))
-			if fallback != "" {
-				b.logInfo("[%s] Session %s disconnected, attempting fallback from %s to %s", logger.ModSession, sessionID, sess.CLIType, fallback)
+			if fallback != "" && fallbackDepth < maxFallbackDepth {
+				b.logInfo("[%s] Session %s disconnected, attempting fallback from %s to %s (depth: %d/%d)", logger.ModSession, sessionID, sess.CLIType, fallback, fallbackDepth, maxFallbackDepth)
 				b.sendMessage(Message{
 					Type: "session:output",
 					Payload: map[string]interface{}{
@@ -829,6 +833,8 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 				_ = b.sessions.Stop(sessionID)
 				_, _ = b.sessions.CreateWithIDAndSize(fallback, sess.WorkDir, sessionID+"-fb", 120, 30, sess.PermissionMode)
 				return
+			} else if fallbackDepth >= maxFallbackDepth {
+				b.logWarn("[%s] Max fallback depth (%d) reached for session %s, stopping fallback chain", logger.ModSession, maxFallbackDepth, sessionID)
 			}
 		} else if protocolAlive {
 			b.logInfo("[%s] Non-fatal error on session %s, skipping fallback (protocol still connected)", logger.ModSession, sessionID)
