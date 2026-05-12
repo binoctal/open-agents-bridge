@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/open-agents/open-agents-bridge/internal/command"
@@ -89,7 +88,7 @@ func (a *ACPAdapter) Connect(config AdapterConfig) error {
 	a.cmd = exec.Command(config.Command, config.Args...)
 	a.cmd.Dir = config.WorkDir
 	a.cmd.Env = os.Environ()
-	a.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(a.cmd)
 
 	// Add custom env vars
 	for k, v := range config.Env {
@@ -176,12 +175,7 @@ func (a *ACPAdapter) Disconnect() error {
 		a.stdin.Close()
 	}
 	if a.cmd != nil && a.cmd.Process != nil {
-		// Kill the entire process group (npx → sh → node)
-		// Negative PID sends signal to all processes in the group
-		if err := syscall.Kill(-a.cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			// Fallback: kill just the direct child
-			a.cmd.Process.Kill()
-		}
+		killProcessGroup(a.cmd)
 	}
 
 	return nil
