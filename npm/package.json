@@ -1,6 +1,6 @@
 {
   "name": "@binoctal/open-agents-bridge",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Bridge CLI for Open Agents - connect your devices to the agent network",
   "bin": {
     "open-agents-bridge": "./run.js"
