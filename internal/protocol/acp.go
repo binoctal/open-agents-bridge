@@ -376,29 +376,29 @@ func (a *ACPAdapter) initialize() error {
 	return a.sendJSONRPC(sessionReq)
 }
 
-// monitorProcess watches for process exit and updates connection status
+// monitorProcess watches for process exit. For ACP launched via wrappers like npx,
+// the parent process may exit while the child (actual ACP agent) keeps running via
+// inherited pipes. Therefore we do NOT set connected=false here — that decision
+// belongs to readMessages() which detects stdout EOF (the real disconnect signal).
 func (a *ACPAdapter) monitorProcess() {
 	if a.cmd == nil || a.cmd.Process == nil {
 		return
 	}
 
-	// Wait for process to exit
 	err := a.cmd.Wait()
 
-	// Mark as disconnected
-	a.connected.Store(false)
-
 	if err != nil {
-		// "signal: killed" is expected when Disconnect() kills the process
 		if strings.Contains(err.Error(), "signal: killed") {
-			logger.Debug("[%s] Process killed (expected during disconnect)", logger.ModACP)
+			logger.Debug("[%s] Parent process killed (expected during disconnect)", logger.ModACP)
 		} else {
-			logger.Warn("[%s] Process exited with error: %v", logger.ModACP, err)
+			logger.Debug("[%s] Parent process exited: %v (child may still be running)", logger.ModACP, err)
 		}
 	}
 }
 
-// readMessages reads JSON-RPC messages from stdout
+// readMessages reads JSON-RPC messages from stdout.
+// When stdout closes (EOF), the ACP connection is truly dead — this is the
+// authoritative signal for setting connected=false (not monitorProcess).
 func (a *ACPAdapter) readMessages() {
 	scanner := bufio.NewScanner(a.stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer
@@ -419,8 +419,10 @@ func (a *ACPAdapter) readMessages() {
 		a.handleMessage(msg)
 	}
 
+	// stdout EOF — the ACP connection is truly dead
+	a.connected.Store(false)
+
 	if err := scanner.Err(); err != nil {
-		// Expected when Disconnect() kills the process — not a real error
 		if a.connected.Load() {
 			logger.Warn("[%s] Scanner error: %v", logger.ModACP, err)
 		} else {
