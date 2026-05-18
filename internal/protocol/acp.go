@@ -169,6 +169,25 @@ func (a *ACPAdapter) Disconnect() error {
 	}
 
 	logger.Info("[%s] Disconnecting", logger.ModACP)
+
+	// Send session/close before disconnecting
+	if a.sessionID != "" && a.stdin != nil {
+		closeReq := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      a.nextRequestID(),
+			"method":  "session/close",
+			"params": map[string]interface{}{
+				"sessionId": a.sessionID,
+			},
+		}
+		if err := a.sendJSONRPC(closeReq); err != nil {
+			logger.Warn("[%s] Failed to send session/close: %v", logger.ModACP, err)
+		} else {
+			// Brief wait for the close to be processed
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
 	a.connected.Store(false)
 
 	if a.stdin != nil {
@@ -633,31 +652,103 @@ func (a *ACPAdapter) processSessionUpdate(update map[string]interface{}) {
 		})
 
 	case "end_turn":
-		// Send status update
+		// end_turn is NOT a valid session/update type in ACP spec.
+		// It is a stopReason value in session/prompt response.
+		logger.Debug("[%s] Received end_turn as session/update (unexpected, ignoring)", logger.ModACP)
+
+	case "user_message_chunk":
+		contentObj, ok := update["content"].(map[string]interface{})
+		if !ok {
+			return
+		}
+		text, _ := contentObj["text"].(string)
 		a.emitMessage(Message{
-			Type:    MessageTypeStatus,
-			Content: StatusIdle,
+			Type:    MessageTypeContent,
+			Content: text,
+			Meta: map[string]interface{}{
+				"protocol": "acp",
+				"role":     "user",
+			},
+		})
+
+	case "plan":
+		entries, _ := update["entries"].([]interface{})
+		entriesJSON, _ := json.Marshal(entries)
+		a.emitMessage(Message{
+			Type:    MessageTypePlan,
+			Content: string(entriesJSON),
 			Meta: map[string]interface{}{
 				"protocol": "acp",
 			},
 		})
 
-		// Send usage statistics
-		inputTokens := a.inputTokens.Load()
-		outputTokens := a.outputTokens.Load()
+	case "usage_update":
+		used, _ := update["used"].(float64)
+		size, _ := update["size"].(float64)
+		meta := map[string]interface{}{
+			"protocol": "acp",
+		}
+		if cost, ok := update["cost"].(map[string]interface{}); ok {
+			meta["cost"] = cost
+		}
 		a.emitMessage(Message{
 			Type: MessageTypeUsage,
 			Content: UsageStats{
-				InputTokens:   int(inputTokens),
-				OutputTokens:  int(outputTokens),
-				CacheCreation: 0, // Not available from ACP
-				CacheRead:     0, // Not available from ACP
-				ContextSize:   int(inputTokens + outputTokens),
+				InputTokens:   0,
+				OutputTokens:  int(used),
+				CacheCreation: 0,
+				CacheRead:     0,
+				ContextSize:   int(size),
 			},
+			Meta: meta,
+		})
+
+	case "available_commands_update":
+		commands, _ := update["availableCommands"].([]interface{})
+		a.emitMessage(Message{
+			Type:    MessageTypeStatus,
+			Content: "commands_update",
 			Meta: map[string]interface{}{
 				"protocol": "acp",
+				"commands": commands,
 			},
 		})
+
+	case "current_mode_update":
+		modeID, _ := update["currentModeId"].(string)
+		a.emitMessage(Message{
+			Type:    MessageTypeStatus,
+			Content: "mode_update",
+			Meta: map[string]interface{}{
+				"protocol": "acp",
+				"modeId":   modeID,
+			},
+		})
+
+	case "config_option_update":
+		options, _ := update["configOptions"].([]interface{})
+		a.emitMessage(Message{
+			Type:    MessageTypeStatus,
+			Content: "config_update",
+			Meta: map[string]interface{}{
+				"protocol":      "acp",
+				"configOptions": options,
+			},
+		})
+
+	case "session_info_update":
+		title, _ := update["title"].(string)
+		a.emitMessage(Message{
+			Type:    MessageTypeStatus,
+			Content: "session_info_update",
+			Meta: map[string]interface{}{
+				"protocol": "acp",
+				"title":    title,
+			},
+		})
+
+	default:
+		logger.Debug("[%s] Unknown session update type: %s", logger.ModACP, updateType)
 	}
 }
 
@@ -861,7 +952,7 @@ func (a *ACPAdapter) handleTerminalCreate(msg map[string]interface{}) {
 
 	// Parse parameters
 	command, _ := params["command"].(string)
-	_ = params["sessionId"] // consumed by ACP protocol but not used locally
+	_ = params["sessionId"]  // consumed by ACP protocol but not used locally
 	outputByteLimit := 32000 // default
 	if limit, ok := params["outputByteLimit"].(float64); ok {
 		outputByteLimit = int(limit)
@@ -1137,6 +1228,60 @@ func (a *ACPAdapter) handleResponse(msg map[string]interface{}) {
 			close(a.initDone)
 		}
 		return
+	}
+
+	// Handle session/prompt response (contains stopReason)
+	if stopReason, ok := result["stopReason"].(string); ok {
+		logger.Debug("[%s] Prompt response received, stopReason: %s", logger.ModACP, stopReason)
+
+		switch stopReason {
+		case "end_turn", "max_tokens", "max_turn_requests":
+			a.emitMessage(Message{
+				Type:    MessageTypeStatus,
+				Content: StatusIdle,
+				Meta: map[string]interface{}{
+					"protocol":   "acp",
+					"stopReason": stopReason,
+				},
+			})
+
+			inputTokens := a.inputTokens.Load()
+			outputTokens := a.outputTokens.Load()
+			a.emitMessage(Message{
+				Type: MessageTypeUsage,
+				Content: UsageStats{
+					InputTokens:   int(inputTokens),
+					OutputTokens:  int(outputTokens),
+					CacheCreation: 0,
+					CacheRead:     0,
+					ContextSize:   int(inputTokens + outputTokens),
+				},
+				Meta: map[string]interface{}{
+					"protocol":   "acp",
+					"stopReason": stopReason,
+				},
+			})
+
+		case "cancelled":
+			a.emitMessage(Message{
+				Type:    MessageTypeStatus,
+				Content: StatusIdle,
+				Meta: map[string]interface{}{
+					"protocol":   "acp",
+					"stopReason": "cancelled",
+				},
+			})
+
+		case "refusal":
+			a.emitMessage(Message{
+				Type:    MessageTypeError,
+				Content: "Agent refused to continue",
+				Meta: map[string]interface{}{
+					"protocol":   "acp",
+					"stopReason": "refusal",
+				},
+			})
+		}
 	}
 }
 

@@ -35,14 +35,21 @@ type Notification struct {
 
 // ACP Methods
 const (
-	MethodInitialize        = "initialize"
-	MethodAuthenticate      = "authenticate"
-	MethodSessionNew        = "session/new"
-	MethodSessionPrompt     = "session/prompt"
-	MethodSessionUpdate     = "session/update"
-	MethodRequestPermission = "session/request_permission"
-	MethodReadTextFile      = "fs/read_text_file"
-	MethodWriteTextFile     = "fs/write_text_file"
+	MethodInitialize            = "initialize"
+	MethodAuthenticate          = "authenticate"
+	MethodSessionNew            = "session/new"
+	MethodSessionPrompt         = "session/prompt"
+	MethodSessionUpdate         = "session/update"
+	MethodRequestPermission     = "session/request_permission"
+	MethodSessionCancel         = "session/cancel"
+	MethodSessionClose          = "session/close"
+	MethodSessionResume         = "session/resume"
+	MethodSessionList           = "session/list"
+	MethodSessionLoad           = "session/load"
+	MethodSessionSetMode        = "session/set_mode"
+	MethodSessionSetConfigOption = "session/set_config_option"
+	MethodReadTextFile          = "fs/read_text_file"
+	MethodWriteTextFile         = "fs/write_text_file"
 )
 
 // InitializeParams for initialize request
