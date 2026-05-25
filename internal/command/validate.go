@@ -132,18 +132,22 @@ func IsAllowed(baseCmd string) bool {
 }
 
 // relaxedBlacklist are the metacharacters still banned in relaxed (ACP) mode.
-// Pipe | is allowed; everything else is blocked.
+// Pipe | and logical AND && are allowed; everything else is blocked.
+// Note: single & (background execution) is blocked because it acts as an
+// implicit semicolon, allowing command chaining that bypasses per-segment
+// validation.  && is safe because both segments are independently validated.
 var relaxedBlacklist = []struct {
-	char string
-	name string
+	char             string
+	name             string
+	allowWhenDoubled bool // if true, skip when the char appears twice (e.g. &&)
 }{
-	{"$(", "command_substitution"},
-	{"`", "backtick"},
-	{">>", "redirect_append"},
-	{">", "redirect_write"},
-	{"<", "redirect_read"},
-	{";", "semicolon"},
-	{"&", "ampersand"},
+	{"$(", "command_substitution", false},
+	{"`", "backtick", false},
+	{">>", "redirect_append", false},
+	{">", "redirect_write", false},
+	{"<", "redirect_read", false},
+	{";", "semicolon", false},
+	{"&", "ampersand", true}, // single & blocked (background), && allowed (logical AND)
 }
 
 // DefaultWhitelistCount returns the number of commands in the default whitelist.
@@ -187,8 +191,8 @@ func ValidateCommandRelaxed(cmd string) error {
 		return fmt.Errorf("shell metacharacter detected: %s", name)
 	}
 
-	// Step 2: Split by pipe, validate each segment
-	segments := splitByPipe(cmd)
+	// Step 2: Split by pipe and &&, validate each segment
+	segments := splitByOperators(cmd)
 	for _, seg := range segments {
 		seg = strings.TrimSpace(seg)
 		if seg == "" {
@@ -233,6 +237,12 @@ func hasRelaxedMetacharacters(cmd string) (bool, string) {
 		remaining := cmd[i:]
 		for _, mc := range relaxedBlacklist {
 			if strings.HasPrefix(remaining, mc.char) {
+				// Allow doubled form (e.g. "&&") for chars with allowWhenDoubled=true.
+				// Only the single form (e.g. "&" for background execution) is dangerous.
+				if mc.allowWhenDoubled && strings.HasPrefix(remaining, mc.char+mc.char) {
+					i++ // skip both chars (outer loop increments past the second)
+					break
+				}
 				return true, mc.name
 			}
 		}
@@ -243,6 +253,11 @@ func hasRelaxedMetacharacters(cmd string) (bool, string) {
 
 // splitByPipe splits a command by pipe | outside of quotes.
 func splitByPipe(cmd string) []string {
+	return splitByOperators(cmd)
+}
+
+// splitByOperators splits a command by pipe | and logical AND && outside of quotes.
+func splitByOperators(cmd string) []string {
 	var segments []string
 	var current strings.Builder
 	inSingle := false
@@ -268,10 +283,20 @@ func splitByPipe(cmd string) []string {
 			continue
 		}
 
-		if ch == '|' && !inSingle && !inDouble {
-			segments = append(segments, current.String())
-			current.Reset()
-			continue
+		if !inSingle && !inDouble {
+			// Check for pipe |
+			if ch == '|' {
+				segments = append(segments, current.String())
+				current.Reset()
+				continue
+			}
+			// Check for logical AND &&
+			if ch == '&' && i+1 < len(cmd) && cmd[i+1] == '&' {
+				segments = append(segments, current.String())
+				current.Reset()
+				i++ // skip second &
+				continue
+			}
 		}
 
 		current.WriteByte(ch)

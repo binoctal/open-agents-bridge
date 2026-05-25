@@ -158,6 +158,16 @@ func TestValidateCommandRelaxed(t *testing.T) {
 
 		// Quoted pipe is literal (not a pipe operator)
 		{"quoted pipe in args", `echo "a | b"`, false},
+
+		// Logical AND (&&) is allowed when all segments are whitelisted
+		{"logical AND git&&git", "git status && git log --oneline -20", false},
+		{"logical AND git&&grep", "git log | head -20 && grep pattern", false},
+		{"logical AND multi", "git status && git log --oneline -5 && ls -la", false},
+		{"logical AND with non-whitelisted", "git status && hackertool", true},
+
+		// Single & (background) is still blocked
+		{"single ampersand background", "sleep 10 &", true},
+		{"single ampersand chain", "git status & rm -rf /tmp", true},
 	}
 
 	for _, tt := range tests {

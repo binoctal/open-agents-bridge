@@ -48,6 +48,9 @@ type ACPAdapter struct {
 	outputTokens atomic.Int64
 	// Signal channels for initialization sequencing
 	initDone chan struct{} // closed when initialize response received
+	// Agent health tracking
+	consecutiveErrors atomic.Int32
+	isProcessing      atomic.Bool // true while waiting for session/prompt response
 }
 
 // NewACPAdapter creates a new ACP adapter
@@ -217,6 +220,10 @@ func (a *ACPAdapter) IsConnected() bool {
 	return true
 }
 
+func (a *ACPAdapter) IsProcessing() bool {
+	return a.isProcessing.Load()
+}
+
 func (a *ACPAdapter) SendMessage(msg Message) error {
 	if !a.connected.Load() {
 		return fmt.Errorf("not connected")
@@ -242,6 +249,27 @@ func (a *ACPAdapter) SendMessage(msg Message) error {
 
 initialized:
 
+	// Wait for agent to finish processing the previous prompt before sending a new one.
+	// Sending session/prompt while the agent is still processing causes the agent to
+	// silently drop the new request or get stuck.
+	if msg.Type == MessageTypeContent && a.isProcessing.Load() {
+		timeout := time.After(60 * time.Second)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-timeout:
+				return fmt.Errorf("timed out waiting for agent to finish processing")
+			case <-ticker.C:
+				if !a.isProcessing.Load() {
+					goto ready
+				}
+			}
+		}
+	}
+
+ready:
+
 	// Convert unified message to ACP JSON-RPC format
 	switch msg.Type {
 	case MessageTypeContent:
@@ -256,6 +284,7 @@ initialized:
 		a.inputTokens.Add(tokens)
 
 		// ACP session/prompt expects prompt as an array of content objects
+		a.isProcessing.Store(true)
 		req := map[string]interface{}{
 			"jsonrpc": "2.0",
 			"id":      a.nextRequestID(),
@@ -1236,6 +1265,8 @@ func (a *ACPAdapter) handleResponse(msg map[string]interface{}) {
 
 		switch stopReason {
 		case "end_turn", "max_tokens", "max_turn_requests":
+			a.consecutiveErrors.Store(0)
+			a.isProcessing.Store(false) // turn complete, agent is idle
 			a.emitMessage(Message{
 				Type:    MessageTypeStatus,
 				Content: StatusIdle,
@@ -1263,6 +1294,7 @@ func (a *ACPAdapter) handleResponse(msg map[string]interface{}) {
 			})
 
 		case "cancelled":
+			a.isProcessing.Store(false)
 			a.emitMessage(Message{
 				Type:    MessageTypeStatus,
 				Content: StatusIdle,
@@ -1273,6 +1305,7 @@ func (a *ACPAdapter) handleResponse(msg map[string]interface{}) {
 			})
 
 		case "refusal":
+			a.isProcessing.Store(false)
 			a.emitMessage(Message{
 				Type:    MessageTypeError,
 				Content: "Agent refused to continue",
@@ -1298,6 +1331,15 @@ func (a *ACPAdapter) handleError(msg map[string]interface{}) {
 	}
 
 	logger.Error("[%s] Error %d: %s", logger.ModACP, int(code), detail)
+
+	// Track consecutive errors to detect stuck agents
+	errCount := a.consecutiveErrors.Add(1)
+	const maxConsecutiveErrors = 5
+	if errCount >= maxConsecutiveErrors {
+		logger.Warn("[%s] Agent has %d consecutive errors (threshold: %d), marking disconnected",
+			logger.ModACP, errCount, maxConsecutiveErrors)
+		a.connected.Store(false)
+	}
 
 	a.emitMessage(Message{
 		Type:    MessageTypeError,
@@ -1327,9 +1369,11 @@ func (a *ACPAdapter) sendJSONRPC(msg interface{}) error {
 	return err
 }
 
-// nextRequestID generates the next request ID
-func (a *ACPAdapter) nextRequestID() int64 {
-	return a.requestID.Add(1)
+// nextRequestID generates the next request ID as a string with "bridge_" prefix.
+// Using a string prefix avoids collisions with the ACP agent's own integer request IDs,
+// which caused "Got response to unknown request" errors when both sides used plain ints.
+func (a *ACPAdapter) nextRequestID() string {
+	return fmt.Sprintf("bridge_%d", a.requestID.Add(1))
 }
 
 // estimateTokens provides a rough token count estimation
