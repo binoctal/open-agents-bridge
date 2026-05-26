@@ -23,6 +23,9 @@ coverage.txt
 # IDE
 .idea/
 .vscode/
+
+# Serena MCP
+.serena/
 *.swp
 
 # OS
