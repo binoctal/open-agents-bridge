@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -938,6 +939,8 @@ func (b *Bridge) handleMessage(msg Message) {
 		b.handleScannerToggle(msg)
 	case "scanner:rules:sync":
 		b.handleScannerRulesSync(msg)
+	case "device:listDir":
+		b.handleListDir(msg)
 	default:
 		b.logDebug("[%s] Unknown message type: %s", logger.ModBridge, msg.Type)
 	}
@@ -962,6 +965,125 @@ func (b *Bridge) handleDeviceRestart(msg Message) {
 	b.Stop()
 	// Exit the process - the service manager or user will restart it
 	os.Exit(0)
+}
+
+const maxListDirResults = 200
+
+type dirEntry struct {
+	Name       string `json:"name"`
+	Accessible bool   `json:"accessible"`
+}
+
+func (b *Bridge) handleListDir(msg Message) {
+	payload, ok := msg.Payload.(map[string]interface{})
+	if !ok {
+		b.logError("[%s] handleListDir: invalid payload type", logger.ModBridge)
+		return
+	}
+
+	requestID, _ := payload["requestId"].(string)
+	path, _ := payload["path"].(string)
+
+	// Resolve ~ to home directory
+	if path == "" || path == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			b.sendListDirResult(requestID, "", nil, "", true)
+			return
+		}
+		path = home
+	}
+
+	// Normalize path
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		b.sendListDirResult(requestID, path, nil, "Invalid path", false)
+		return
+	}
+
+	dirs, truncated, listErr := listDirectories(absPath)
+	if listErr != nil {
+		b.sendListDirResult(requestID, absPath, nil, listErr.Error(), false)
+		return
+	}
+
+	b.sendListDirResult(requestID, absPath, dirs, "", truncated)
+}
+
+func listDirectories(path string) ([]dirEntry, bool, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		if os.IsPermission(err) {
+			return nil, false, fmt.Errorf("Permission denied")
+		}
+		if os.IsNotExist(err) {
+			return nil, false, fmt.Errorf("Directory not found")
+		}
+		return nil, false, err
+	}
+
+	var dirs []dirEntry
+	for _, entry := range entries {
+		// Skip symlinks
+		info, err := os.Lstat(filepath.Join(path, entry.Name()))
+		if err != nil {
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+
+		// Only include directories
+		if !entry.IsDir() {
+			continue
+		}
+
+		// Check accessibility
+		accessible := true
+		f, err := os.Open(filepath.Join(path, entry.Name()))
+		if err != nil {
+			accessible = false
+		} else {
+			f.Close()
+		}
+
+		dirs = append(dirs, dirEntry{
+			Name:       entry.Name(),
+			Accessible: accessible,
+		})
+	}
+
+	// Sort by name
+	sort.Slice(dirs, func(i, j int) bool {
+		return dirs[i].Name < dirs[j].Name
+	})
+
+	truncated := false
+	if len(dirs) > maxListDirResults {
+		dirs = dirs[:maxListDirResults]
+		truncated = true
+	}
+
+	return dirs, truncated, nil
+}
+
+func (b *Bridge) sendListDirResult(requestID, path string, dirs []dirEntry, errMsg string, truncated bool) {
+	result := map[string]interface{}{
+		"requestId": requestID,
+		"path":      path,
+		"dirs":      dirs,
+	}
+	if errMsg != "" {
+		result["error"] = errMsg
+	}
+	if truncated {
+		result["truncated"] = true
+	}
+
+	b.sendMessage(Message{
+		Type:    "device:listDirResult",
+		Payload: result,
+	})
 }
 
 func (b *Bridge) handleSessionStart(msg Message) {
