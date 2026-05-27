@@ -183,6 +183,19 @@ func (a *PTYAdapter) SupportsToolCalls() bool {
 	return false
 }
 
+func (a *PTYAdapter) Resize(cols, rows int) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.ptmx == nil {
+		return nil
+	}
+	return pty.Setsize(a.ptmx, &pty.Winsize{
+		Cols: uint16(cols),
+		Rows: uint16(rows),
+	})
+}
+
 // readOutput reads raw output from PTY
 func (a *PTYAdapter) readOutput() {
 	buf := make([]byte, 4096)

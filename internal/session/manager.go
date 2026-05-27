@@ -442,7 +442,7 @@ func (s *Session) Send(input string) error {
 
 	if s.Protocol == nil {
 		logger.Error("[%s] Protocol is nil for session %s", logger.ModSession, s.ID)
-		return nil
+		return fmt.Errorf("protocol not initialized for session %s", s.ID)
 	}
 	err := s.Protocol.SendMessage(protocol.Message{
 		Type:    protocol.MessageTypeContent,
@@ -467,10 +467,14 @@ func (s *Session) GetMultiAgentMetadata() (jobID, taskID string, startedAt time.
 }
 
 func (s *Session) Resize(cols, rows int) error {
-	// Resize is handled by the protocol adapter
-	// For now, we don't expose this in the protocol interface
-	// TODO: Add resize support to protocol.Adapter interface if needed
-	return nil
+	if s.Protocol == nil {
+		return fmt.Errorf("protocol not initialized for session %s", s.ID)
+	}
+	adapter := s.Protocol.GetAdapter()
+	if adapter == nil {
+		return fmt.Errorf("adapter not available for session %s", s.ID)
+	}
+	return adapter.Resize(cols, rows)
 }
 
 func (m *Manager) Resize(id string, cols, rows int) error {
@@ -479,7 +483,7 @@ func (m *Manager) Resize(id string, cols, rows int) error {
 	m.mu.RUnlock()
 
 	if !ok {
-		return nil
+		return fmt.Errorf("session %s not found", id)
 	}
 	return sess.Resize(cols, rows)
 }

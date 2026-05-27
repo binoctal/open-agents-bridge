@@ -154,7 +154,10 @@ func New(cfg *config.Config) (*Bridge, error) {
 
 	// Initialize storage
 	storeDir := filepath.Join(config.ConfigDir(), "sessions")
-	store, _ := storage.NewStore(storeDir)
+	store, err := storage.NewStore(storeDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize session store: %w", err)
+	}
 
 	// Initialize session manager
 	sessionMgr := session.NewManager()
@@ -1341,6 +1344,16 @@ func (b *Bridge) handleSessionStop(msg Message) {
 	sessionID, _ := payload["sessionId"].(string)
 	if err := b.sessions.Stop(sessionID); err != nil {
 		b.logDebug("[%s] Failed to stop session: %v", logger.ModSession, err)
+		b.sendMessage(Message{
+			Type: "session:error",
+			Payload: map[string]interface{}{
+				"sessionId": sessionID,
+				"deviceId":  b.config.DeviceID,
+				"error":     fmt.Sprintf("Failed to stop session: %v", err),
+			},
+			Timestamp: time.Now().UnixMilli(),
+		})
+		return
 	}
 
 	// End session metrics
@@ -1664,7 +1677,9 @@ func (b *Bridge) handleRulesSync(msg Message) {
 
 	b.config.Rules = newRules
 	b.rulesEngine.UpdateRules(newRules)
-	config.Save(b.config)
+	if err := config.Save(b.config); err != nil {
+		b.logDebug("[%s] Failed to save config after rules sync: %v", logger.ModBridge, err)
+	}
 
 	b.logDebug("[%s] Synced %d auto-approval rules", logger.ModBridge, len(newRules))
 
@@ -1697,7 +1712,9 @@ func (b *Bridge) handleStorageSync(msg Message) {
 		}
 	}
 
-	config.Save(b.config)
+	if err := config.Save(b.config); err != nil {
+		b.logDebug("[%s] Failed to save config after storage sync: %v", logger.ModBridge, err)
+	}
 	b.logInfo("[%s] Storage type set to: %s", logger.ModBridge, storageType)
 
 	b.sendMessage(Message{
@@ -2211,7 +2228,9 @@ func (b *Bridge) syncRulesFromAPI() {
 
 	b.config.Rules = configRules
 	b.rulesEngine.UpdateRules(configRules)
-	config.Save(b.config)
+	if err := config.Save(b.config); err != nil {
+		b.logDebug("[%s] Failed to save config after API rules sync: %v", logger.ModBridge, err)
+	}
 	b.logInfo("[%s] Synced %d rules from API", logger.ModBridge, len(configRules))
 }
 
@@ -2248,7 +2267,9 @@ func (b *Bridge) handlePromptsSync(msg Message) {
 	// Store prompts locally in config
 	if prompts, ok := payload["prompts"]; ok {
 		b.config.Prompts = prompts
-		config.Save(b.config)
+		if err := config.Save(b.config); err != nil {
+			b.logDebug("[%s] Failed to save config after prompts sync: %v", logger.ModBridge, err)
+		}
 		b.logDebug("[%s] Synced prompts to local config", logger.ModBridge)
 	}
 
@@ -2273,7 +2294,9 @@ func (b *Bridge) handleScannerToggle(msg Message) {
 	b.scanner.SetEnabled(enabled)
 	boolVal := enabled
 	b.config.ScannerEnabled = &boolVal
-	config.Save(b.config)
+	if err := config.Save(b.config); err != nil {
+		b.logDebug("[%s] Failed to save config after scanner toggle: %v", logger.ModBridge, err)
+	}
 	b.logInfo("[%s] Toggled to %v", logger.ModScanner, enabled)
 
 	b.sendMessage(Message{
@@ -2314,7 +2337,9 @@ func (b *Bridge) handleScannerRulesSync(msg Message) {
 	b.scanner.ReplaceCustomRules(defs)
 
 	// Persist to local file
-	config.SaveScannerRules(defs)
+	if err := config.SaveScannerRules(defs); err != nil {
+		b.logDebug("[%s] Failed to save scanner rules: %v", logger.ModScanner, err)
+	}
 	b.logInfo("[%s] Synced %d custom rules from web", logger.ModScanner, len(defs))
 
 	b.sendMessage(Message{
