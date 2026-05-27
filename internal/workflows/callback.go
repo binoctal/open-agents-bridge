@@ -110,6 +110,7 @@ func (m *CallbackManager) SendTaskResult(result TaskResult) error {
 	event := map[string]interface{}{
 		"type": "workflow:task_result",
 		"payload": map[string]interface{}{
+			"missionId":  result.JobID,
 			"jobId":      result.JobID,
 			"taskId":     result.TaskID,
 			"artifacts":  result.Artifacts,
@@ -132,6 +133,7 @@ func (m *CallbackManager) SendTaskError(result TaskResult) error {
 	event := map[string]interface{}{
 		"type": "workflow:task_error",
 		"payload": map[string]interface{}{
+			"missionId":  result.JobID,
 			"jobId":      result.JobID,
 			"taskId":     result.TaskID,
 			"error":      result.Error,
@@ -291,6 +293,7 @@ func (m *CallbackManager) SendTaskOutput(jobID, taskID, stream, content string) 
 	event := map[string]interface{}{
 		"type": "workflow:task_output",
 		"payload": map[string]interface{}{
+			"missionId": jobID,
 			"jobId":   jobID,
 			"taskId":  taskID,
 			"stream":  stream,
