@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
+	"strings"
 
 	"github.com/open-agents/open-agents-bridge/internal/config"
 	"github.com/spf13/cobra"
@@ -49,12 +52,36 @@ var statusCmd = &cobra.Command{
 		fmt.Printf("Environment:  %s\n", cfg.GetEnvironment())
 		fmt.Println()
 
-		// TODO: Check if bridge is running
-		fmt.Println("Status: Configured (not running)")
-		fmt.Printf("Run 'open-agents-bridge start -d %s' to start the bridge.\n", device)
+		running := isBridgeRunning(device)
+		if running {
+			fmt.Println("Status: Running")
+		} else {
+			fmt.Println("Status: Not running")
+			fmt.Printf("Run 'open-agents-bridge start -d %s' to start the bridge.\n", device)
+		}
 	},
 }
 
 func init() {
 	statusCmd.Flags().StringVarP(&statusDevice, "device", "d", "", "Device name (required)")
+}
+
+// isBridgeRunning checks if a bridge process for the given device is running
+func isBridgeRunning(device string) bool {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("tasklist", "/FI", "IMAGENAME eq open-agents-bridge.exe", "/FO", "CSV", "/NH")
+	} else {
+		cmd = exec.Command("pgrep", "-f", fmt.Sprintf("open-agents-bridge.*start.*-d.*%s", device))
+	}
+
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	if runtime.GOOS == "windows" {
+		return strings.Contains(string(output), "open-agents-bridge.exe")
+	}
+	return strings.TrimSpace(string(output)) != ""
 }

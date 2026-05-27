@@ -21,6 +21,9 @@ type Adapter interface {
 	SupportsPermissions() bool
 	SupportsFileOps() bool
 	SupportsToolCalls() bool
+
+	// Terminal
+	Resize(cols, rows int) error
 }
 
 // AdapterConfig contains configuration for protocol adapters

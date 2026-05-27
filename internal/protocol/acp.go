@@ -1376,6 +1376,11 @@ func (a *ACPAdapter) nextRequestID() string {
 	return fmt.Sprintf("bridge_%d", a.requestID.Add(1))
 }
 
+// Resize is a no-op for ACP adapters (no PTY to resize)
+func (a *ACPAdapter) Resize(cols, rows int) error {
+	return nil
+}
+
 // estimateTokens provides a rough token count estimation
 // Uses approximately 4 characters per token (common for English text)
 func estimateTokens(text string) int64 {
