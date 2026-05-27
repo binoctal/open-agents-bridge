@@ -1029,8 +1029,17 @@ func listDirectories(path string) ([]dirEntry, bool, error) {
 		return nil, false, err
 	}
 
-	var dirs []dirEntry
+	// Collect candidate directories first
+	type candidate struct {
+		name string
+	}
+	var candidates []candidate
 	for _, entry := range entries {
+		// Only include directories
+		if !entry.IsDir() {
+			continue
+		}
+
 		// Skip symlinks
 		info, err := os.Lstat(filepath.Join(path, entry.Name()))
 		if err != nil {
@@ -1040,25 +1049,27 @@ func listDirectories(path string) ([]dirEntry, bool, error) {
 			continue
 		}
 
-		// Only include directories
-		if !entry.IsDir() {
-			continue
-		}
-
-		// Check accessibility
-		accessible := true
-		f, err := os.Open(filepath.Join(path, entry.Name()))
-		if err != nil {
-			accessible = false
-		} else {
-			f.Close()
-		}
-
-		dirs = append(dirs, dirEntry{
-			Name:       entry.Name(),
-			Accessible: accessible,
-		})
+		candidates = append(candidates, candidate{name: entry.Name()})
 	}
+
+	// Check accessibility concurrently
+	dirs := make([]dirEntry, len(candidates))
+	var wg sync.WaitGroup
+	for i, c := range candidates {
+		wg.Add(1)
+		go func(idx int, name string) {
+			defer wg.Done()
+			accessible := true
+			f, err := os.Open(filepath.Join(path, name))
+			if err != nil {
+				accessible = false
+			} else {
+				f.Close()
+			}
+			dirs[idx] = dirEntry{Name: name, Accessible: accessible}
+		}(i, c.name)
+	}
+	wg.Wait()
 
 	// Sort by name
 	sort.Slice(dirs, func(i, j int) bool {
