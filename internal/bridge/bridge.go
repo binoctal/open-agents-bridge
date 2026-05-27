@@ -202,6 +202,10 @@ func New(cfg *config.Config) (*Bridge, error) {
 		messageQueue:      make(chan Message, 100), // Buffered queue for ordered processing
 		ioLogger:          ioLogger,
 		worktreeManager:   workflows.NewWorktreeManager("."),
+		callbackManager:   workflows.NewCallbackManager(workflows.CallbackConfig{
+			APIURL:   cfg.ServerURL,
+			DeviceID: cfg.DeviceID,
+		}),
 		batchBuf:          make(map[string]*contentBatch),
 		offlineBuf:        nil,
 		msgBuffer:         NewMessageBuffer(DefaultBufferCapacity),
