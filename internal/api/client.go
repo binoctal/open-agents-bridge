@@ -138,6 +138,7 @@ type SessionReport struct {
 	CLIType   string `json:"cliType"`
 	WorkDir   string `json:"workDir"`
 	Status    string `json:"status"`
+	Protocol  string `json:"protocol,omitempty"`
 }
 
 func (c *Client) ReportSession(report SessionReport) error {

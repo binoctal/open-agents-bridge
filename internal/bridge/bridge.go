@@ -1165,6 +1165,9 @@ func (b *Bridge) handleSessionStart(msg Message) {
 
 	metrics.StartSession(sess.ID)
 
+	// Report session to API with actual protocol
+	go b.ReportSessionToAPI(sess.ID, cliType, workDir, "active", sess.Protocol.GetProtocolName())
+
 	// Send initial command if provided
 	if initialCommand != "" {
 		sess.Send(initialCommand)
@@ -2263,12 +2266,13 @@ func (b *Bridge) syncRulesFromAPI() {
 }
 
 // ReportSessionToAPI reports session status to API
-func (b *Bridge) ReportSessionToAPI(sessionID, cliType, workDir, status string) {
+func (b *Bridge) ReportSessionToAPI(sessionID, cliType, workDir, status, protocol string) {
 	err := b.apiClient.ReportSession(api.SessionReport{
 		SessionID: sessionID,
 		CLIType:   cliType,
 		WorkDir:   workDir,
 		Status:    status,
+		Protocol:  protocol,
 	})
 	if err != nil {
 		b.logDebug("[%s] Failed to report session to API: %v", logger.ModSession, err)
