@@ -2139,8 +2139,27 @@ func (b *Bridge) doFlushLocked() {
 	}
 }
 
+// Message types that should NOT be buffered for offline replay.
+// These are transient state that becomes stale when the connection is restored.
+var noBufferTypes = map[string]bool{
+	"permission:request": true, // Session may be dead, approval has nowhere to go
+	"agent:status":      true, // Stale status (thinking/streaming) misleads UI
+	"session:stopped":   true, // notifyStaleSessionsStopped handles this after flush
+	"tool:call":         true, // Stale tool call updates are meaningless
+}
+
 // bufferOffline stores a message for later delivery when the WebSocket is disconnected.
 func (b *Bridge) bufferOffline(msg Message) {
+	// Skip transient message types that should not be replayed
+	if noBufferTypes[msg.Type] {
+		return
+	}
+
+	// Skip messages older than 60 seconds — they will be stale on reconnect
+	if msg.Timestamp > 0 && time.Since(time.UnixMilli(msg.Timestamp)) > 60*time.Second {
+		return
+	}
+
 	b.offlineMu.Lock()
 	defer b.offlineMu.Unlock()
 
@@ -2149,12 +2168,6 @@ func (b *Bridge) bufferOffline(msg Message) {
 		b.offlineBuf = b.offlineBuf[offlineMaxMessages/2:]
 	}
 	b.offlineBuf = append(b.offlineBuf, msg)
-
-	// Also push to ring buffer for replay after reconnection
-	data, err := json.Marshal(msg)
-	if err == nil {
-		b.msgBuffer.Push(data, time.Now().UnixMilli())
-	}
 
 	b.logDebug("[%s] Buffered offline: %s (buf: %d)", logger.ModBridge, msg.Type, len(b.offlineBuf))
 }
