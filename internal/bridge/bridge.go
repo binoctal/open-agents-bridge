@@ -1621,11 +1621,17 @@ func (b *Bridge) handleConfigSync(msg Message) {
 		b.logDebug("[%s] Synced %d environment variables", logger.ModBridge, len(b.config.EnvVars))
 	}
 
-	// Sync CLI enabled status
+	// Sync CLI enabled status (ignore enable for uninstalled CLIs)
 	if cliEnabled, ok := payload["cliEnabled"].(map[string]interface{}); ok {
+		detected := b.config.CLIDetected
 		b.config.CLIEnabled = make(map[string]bool)
 		for k, v := range cliEnabled {
 			if bv, ok := v.(bool); ok {
+				// Only allow enabling CLIs that are actually installed
+				if bv && !detected[k] {
+					b.logDebug("[%s] Ignored enable for uninstalled CLI: %s", logger.ModBridge, k)
+					continue
+				}
 				b.config.CLIEnabled[k] = bv
 			}
 		}
