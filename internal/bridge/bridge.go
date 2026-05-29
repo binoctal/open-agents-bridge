@@ -284,8 +284,14 @@ func New(cfg *config.Config) (*Bridge, error) {
 	// Auto-detect installed CLI tools
 	cfg.CLIDetected = config.DetectInstalledCLIs()
 
-	// If cliEnabled is empty, auto-enable all detected CLIs
-	if cfg.CLIEnabled == nil || len(cfg.CLIEnabled) == 0 {
+	// Sanitize: remove any cliEnabled entries for CLIs that are not installed
+	for cli := range cfg.CLIEnabled {
+		if !cfg.CLIDetected[cli] {
+			delete(cfg.CLIEnabled, cli)
+		}
+	}
+	// If cliEnabled is empty after sanitization, auto-enable all detected CLIs
+	if len(cfg.CLIEnabled) == 0 {
 		cfg.CLIEnabled = make(map[string]bool, len(cfg.CLIDetected))
 		for cli, installed := range cfg.CLIDetected {
 			if installed {
