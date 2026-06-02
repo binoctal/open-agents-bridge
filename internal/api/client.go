@@ -131,6 +131,71 @@ func (c *Client) GetAgentConfig(agentID string) (*AgentConfig, error) {
 	return &cfg, nil
 }
 
+// Session List (for restore on startup)
+
+type SessionInfo struct {
+	ID              string `json:"id"`
+	CLIType         string `json:"cliType"`
+	WorkDir         string `json:"workDir"`
+	Status          string `json:"status"`
+	EffectiveStatus string `json:"effectiveStatus"`
+	StartedAt       int64  `json:"startedAt"`
+	EndedAt         int64  `json:"endedAt,omitempty"`
+}
+
+func (c *Client) ListSessions(deviceID string, limit int) ([]SessionInfo, error) {
+	path := fmt.Sprintf("/api/sessions?deviceId=%s&limit=%d&status=all", deviceID, limit)
+
+	data, err := c.request("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var sessions []SessionInfo
+	if err := json.Unmarshal(data, &sessions); err != nil {
+		// API may wrap in { sessions: [...] }
+		var resp struct {
+			Sessions []SessionInfo `json:"sessions"`
+		}
+		if err2 := json.Unmarshal(data, &resp); err2 != nil {
+			return nil, err
+		}
+		sessions = resp.Sessions
+	}
+
+	return sessions, nil
+}
+
+// Session Messages (for resume context)
+
+type MessageInfo struct {
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+func (c *Client) GetSessionMessages(sessionID string, limit int) ([]MessageInfo, error) {
+	path := fmt.Sprintf("/api/sessions/%s/messages?limit=%d", sessionID, limit)
+
+	data, err := c.request("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var messages []MessageInfo
+	if err := json.Unmarshal(data, &messages); err != nil {
+		var resp struct {
+			Messages []MessageInfo `json:"messages"`
+		}
+		if err2 := json.Unmarshal(data, &resp); err2 != nil {
+			return nil, err
+		}
+		messages = resp.Messages
+	}
+
+	return messages, nil
+}
+
 // Session Reporting
 
 type SessionReport struct {

@@ -26,6 +26,7 @@ import (
 	"github.com/open-agents/open-agents-bridge/internal/logger"
 	"github.com/open-agents/open-agents-bridge/internal/loopdetect"
 	mcpPkg "github.com/open-agents/open-agents-bridge/internal/mcp"
+	"github.com/open-agents/open-agents-bridge/internal/markdown"
 	"github.com/open-agents/open-agents-bridge/internal/metrics"
 	"github.com/open-agents/open-agents-bridge/internal/workflows"
 	"github.com/open-agents/open-agents-bridge/internal/permission"
@@ -70,6 +71,7 @@ type contentBatch struct {
 	sessionID    string
 	protocolName string
 	msgType      protocol.MessageType
+	forceFlush   bool // skip format-aware splitting on next flush
 }
 
 type Bridge struct {
@@ -548,6 +550,7 @@ func (b *Bridge) readLoop() {
 			b.stateManager.SetState(StateConnected, "connection_established")
 			b.flushOffline() // Send buffered messages from offline period
 			b.notifyStaleSessionsStopped()
+			go b.sendSessionRestore() // Push historical sessions to frontend
 			b.reconnectCallback.Notify(reconnect.Event{
 				Type:      reconnect.EventSuccess,
 				Attempts:  b.reconnectStrategy.Attempts(),
@@ -902,6 +905,8 @@ func (b *Bridge) handleMessage(msg Message) {
 		b.handleSessionResize(msg)
 	case "session:changeDir":
 		b.handleSessionChangeDir(msg)
+	case "session:resume-with-context":
+		b.handleResumeWithContext(msg)
 	case "chat:send":
 		b.handleChatSend(msg)
 	case "permission:response":
@@ -1252,6 +1257,127 @@ func (b *Bridge) handleSessionResume(msg Message) {
 	})
 }
 
+// handleResumeWithContext creates a new session and injects historical context
+// from a previous session as a prompt prefix, enabling seamless conversation continuity.
+func (b *Bridge) handleResumeWithContext(msg Message) {
+	b.logDebug("[%s] handleResumeWithContext called", logger.ModSession)
+	payload, ok := msg.Payload.(map[string]interface{})
+	if !ok {
+		b.logError("[%s] handleResumeWithContext: invalid payload type", logger.ModSession)
+		return
+	}
+
+	originalSessionID, _ := payload["originalSessionId"].(string)
+	cliType, _ := payload["cliType"].(string)
+	workDir, _ := payload["workDir"].(string)
+	deviceID, _ := payload["deviceId"].(string)
+
+	if deviceID != "" && deviceID != b.config.DeviceID {
+		return
+	}
+
+	if cliType == "" {
+		cliType = "kiro"
+	}
+	if workDir == "" {
+		workDir = "."
+	}
+
+	// Fetch historical messages
+	var messageCount int
+	var contextPrefix string
+	messages, err := b.apiClient.GetSessionMessages(originalSessionID, 20)
+	if err != nil {
+		b.logWarn("[%s] Failed to fetch history for resume: %v", logger.ModSession, err)
+		// Continue without context
+	} else if len(messages) > 0 {
+		messageCount = len(messages)
+		contextPrefix = formatResumeContext(originalSessionID, messages)
+	}
+
+	// Create new session
+	sess, err := b.sessions.CreateWithIDAndSize(cliType, workDir, "", 120, 30, "")
+	if err != nil {
+		b.logError("[%s] Failed to create session for resume: %v", logger.ModSession, err)
+		b.sendMessage(Message{
+			Type: "session:resume-with-context:failed",
+			Payload: map[string]interface{}{
+				"reason":             "session_create_failed",
+				"message":            err.Error(),
+				"originalSessionId":  originalSessionID,
+			},
+			Timestamp: time.Now().UnixMilli(),
+		})
+		return
+	}
+
+	// Inject context prefix if available
+	if contextPrefix != "" {
+		sess.ResumeContext = contextPrefix
+	}
+
+	b.sendMessage(Message{
+		Type: "session:resumed-with-context",
+		Payload: map[string]interface{}{
+			"sessionId":          sess.ID,
+			"originalSessionId":  originalSessionID,
+			"messageCount":       messageCount,
+			"deviceId":           b.config.DeviceID,
+			"cliType":            cliType,
+			"workDir":            workDir,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+
+	metrics.StartSession(sess.ID)
+	go b.ReportSessionToAPI(sess.ID, cliType, workDir, "active", sess.Protocol.GetProtocolName())
+
+	b.logInfo("[%s] Session %s created with context from %s (%d messages)",
+		logger.ModSession, sess.ID, originalSessionID, messageCount)
+}
+
+const (
+	maxSingleMessageLen = 2000
+	maxTotalContextLen  = 8000
+)
+
+// formatResumeContext formats historical messages into a prompt prefix.
+func formatResumeContext(originalSessionID string, messages []api.MessageInfo) string {
+	var buf strings.Builder
+	buf.WriteString(fmt.Sprintf("[Resumed from previous session (%s)]\n", originalSessionID))
+	buf.WriteString("Recent conversation:\n\n")
+
+	totalLen := buf.Len()
+	startIdx := 0
+
+	// Find the earliest starting point that fits within the limit
+	for i := 0; i < len(messages); i++ {
+		role := messages[i].Role
+		content := messages[i].Content
+		if len(content) > maxSingleMessageLen {
+			content = content[:maxSingleMessageLen] + "..."
+		}
+		entry := fmt.Sprintf("[%s]: %s\n", role, content)
+		if totalLen+len(entry) > maxTotalContextLen {
+			startIdx = i
+			break
+		}
+		totalLen += len(entry)
+	}
+
+	for i := startIdx; i < len(messages); i++ {
+		role := messages[i].Role
+		content := messages[i].Content
+		if len(content) > maxSingleMessageLen {
+			content = content[:maxSingleMessageLen] + "..."
+		}
+		buf.WriteString(fmt.Sprintf("[%s]: %s\n", role, content))
+	}
+
+	buf.WriteString("\nPlease continue the conversation based on the above context.\n---\n")
+	return buf.String()
+}
+
 func (b *Bridge) handleSessionSend(msg Message) {
 	b.logDebug("[%s] handleSessionSend called", logger.ModSession)
 
@@ -1340,7 +1466,14 @@ func (b *Bridge) handleSessionSend(msg Message) {
 	}
 	b.logDebug("[%s] Session protocol ready: %s", logger.ModSession, sess.GetProtocolName())
 
-	// Step 6: Send message to CLI
+	// Step 6: Inject resume context on first message if present
+	if sess.ResumeContext != "" {
+		content = sess.ResumeContext + content
+		sess.ResumeContext = "" // Only inject once
+		b.logInfo("[%s] Injected resume context for session %s", logger.ModSession, sessionID)
+	}
+
+	// Step 7: Send message to CLI
 	b.logDebug("[%s] Calling sess.Send() with content length: %d", logger.ModSession, len(content))
 	if err := sess.Send(content); err != nil {
 		b.logError("[%s] Send error: %v", logger.ModSession, err)
@@ -2052,6 +2185,30 @@ func (b *Bridge) reconnect() {
 	} else {
 		b.staleSessionIDs = nil
 	}
+}
+
+// sendSessionRestore fetches recent sessions from the API and pushes them
+// to the frontend so it can display historical sessions after bridge restart.
+func (b *Bridge) sendSessionRestore() {
+	sessions, err := b.apiClient.ListSessions(b.config.DeviceID, 20)
+	if err != nil {
+		b.logWarn("[%s] Failed to fetch session list for restore: %v", logger.ModSession, err)
+		return
+	}
+
+	if len(sessions) == 0 {
+		return
+	}
+
+	b.logInfo("[%s] Restoring %d sessions from API", logger.ModSession, len(sessions))
+	b.sendMessage(Message{
+		Type: "sessions:restore",
+		Payload: map[string]interface{}{
+			"sessions": sessions,
+			"deviceId": b.config.DeviceID,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
 
 	// Reset reconnect time budget so we get a fresh 10-minute window
 	b.reconnectStrategy.ResetBudget()
@@ -2109,11 +2266,9 @@ func (b *Bridge) batchContent(sessionID, protocolName, content string, msgType p
 	batch.chunks = append(batch.chunks, content)
 
 	// Immediate flush if accumulated content exceeds threshold
-	totalSize := 0
-	for _, c := range batch.chunks {
-		totalSize += len(c)
-	}
+	totalSize := batchTotalSize(batch)
 	if totalSize >= maxBatchSize {
+		batch.forceFlush = true
 		b.doFlushLocked()
 	}
 }
@@ -2134,6 +2289,17 @@ func (b *Bridge) doFlushLocked() {
 			continue
 		}
 		merged := strings.Join(batch.chunks, "")
+
+		var toSend, remainder string
+		if batch.forceFlush {
+			// Oversized remainder — skip format-aware splitting
+			toSend = merged
+			remainder = ""
+			batch.forceFlush = false
+		} else {
+			toSend, remainder = b.splitAtSafeBoundary(merged)
+		}
+
 		msgType := "chat:response"
 		if batch.msgType == protocol.MessageTypeThought {
 			msgType = "chat:thought"
@@ -2143,15 +2309,51 @@ func (b *Bridge) doFlushLocked() {
 			Payload: map[string]interface{}{
 				"sessionId": batch.sessionID,
 				"deviceId":  b.config.DeviceID,
-				"content":   merged,
+				"content":   toSend,
 				"protocol":  batch.protocolName,
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
-		b.logDebug("[%s] Flushed batch: session=%s, chunks=%d, merged=%d bytes",
-			logger.ModBridge, batch.sessionID, len(batch.chunks), len(merged))
-		delete(b.batchBuf, key)
+		b.logDebug("[%s] Flushed batch: session=%s, chunks=%d, sent=%d bytes, remainder=%d bytes",
+			logger.ModBridge, batch.sessionID, len(batch.chunks), len(toSend), len(remainder))
+
+		if len(remainder) > 0 {
+			// Put remainder back for next flush cycle
+			batch.chunks = []string{remainder}
+			// If remainder alone exceeds maxBatchSize, force full flush
+			// on next cycle to prevent unbounded accumulation
+			if len(remainder) >= maxBatchSize {
+				batch.forceFlush = true
+			}
+		} else {
+			delete(b.batchBuf, key)
+		}
 	}
+}
+
+// splitAtSafeBoundary splits merged content at the last safe markdown boundary.
+// Returns (safePart, remainder). If no safe cut point exists, returns (merged, "").
+func (b *Bridge) splitAtSafeBoundary(merged string) (string, string) {
+	if len(merged) == 0 {
+		return merged, ""
+	}
+
+	cut := markdown.FindSafeCut(merged)
+	if cut == 0 || cut >= len(merged) {
+		// No safe cut point or entire content is safe
+		return merged, ""
+	}
+
+	return merged[:cut], merged[cut:]
+}
+
+// batchTotalSize returns the total byte size of all chunks in a batch.
+func batchTotalSize(batch *contentBatch) int {
+	total := 0
+	for _, c := range batch.chunks {
+		total += len(c)
+	}
+	return total
 }
 
 // Message types that should NOT be buffered for offline replay.

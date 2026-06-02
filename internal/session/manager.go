@@ -54,6 +54,9 @@ type Session struct {
 	StartedAt time.Time // Task start time for duration tracking
 	Output    []byte    // Collected CLI output for artifacts extraction
 	ExitCode  int       // Process exit code (set when session exits)
+
+	// Resume context: prompt prefix injected on first user message
+	ResumeContext string
 }
 
 func NewManager() *Manager {
