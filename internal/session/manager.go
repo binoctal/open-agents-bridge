@@ -322,8 +322,8 @@ func (m *Manager) applyPermissionMode(permissionMode, cliType string, config *pr
 func (m *Manager) getCLICommand(cliType string) (string, []string) {
 	switch cliType {
 	case "claude":
-		// Claude Code ACP via npx
-		return "npx", []string{"@zed-industries/claude-code-acp"}
+		// Claude Code ACP via npx (package renamed from @zed-industries/claude-code-acp)
+		return "npx", []string{"@agentclientprotocol/claude-agent-acp"}
 	case "claude-pty":
 		// Claude Code PTY mode - full REPL with slash commands support
 		return "claude", nil
