@@ -25,7 +25,7 @@ func TestRepoConstants(t *testing.T) {
 func TestCheckUpdate(t *testing.T) {
 	// This test verifies the function doesn't panic
 	// Actual update check requires network access
-	release, hasUpdate, err := updater.CheckUpdate()
+	release, err := updater.CheckUpdate()
 
 	// Either succeeds or fails gracefully (network may not be available)
 	if err != nil {
@@ -34,7 +34,7 @@ func TestCheckUpdate(t *testing.T) {
 	}
 
 	if release != nil {
-		t.Logf("Latest release: %s, hasUpdate: %v", release.TagName, hasUpdate)
+		t.Logf("Latest release: %s, hasUpdate: %v", release.LatestVersion, release.HasUpdate)
 	}
 }
 

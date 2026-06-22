@@ -156,19 +156,30 @@ func (a *ACPAdapter) Connect(config AdapterConfig) error {
 
 	// Send initialize request
 	if err := a.initialize(); err != nil {
-		a.Disconnect()
+		// We hold a.mu here; calling Disconnect() would re-lock and deadlock
+		// (Go mutexes are not re-entrant). Use the lock-held cleanup helper.
+		a.disconnectLocked()
 		return fmt.Errorf("failed to initialize: %w", err)
 	}
 
 	return nil
 }
 
+// Disconnect tears down the ACP session. Acquires a.mu.
 func (a *ACPAdapter) Disconnect() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.disconnectLocked()
+	return nil
+}
 
+// disconnectLocked performs teardown assuming the caller already holds a.mu.
+// It exists because Connect() runs under a.mu and must clean up on its failure
+// path — calling Disconnect() there would self-deadlock (Go mutexes are not
+// re-entrant).
+func (a *ACPAdapter) disconnectLocked() {
 	if !a.connected.Load() {
-		return nil
+		return
 	}
 
 	logger.Info("[%s] Disconnecting", logger.ModACP)
@@ -199,8 +210,6 @@ func (a *ACPAdapter) Disconnect() error {
 	if a.cmd != nil && a.cmd.Process != nil {
 		killProcessGroup(a.cmd)
 	}
-
-	return nil
 }
 
 func (a *ACPAdapter) IsConnected() bool {
