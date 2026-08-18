@@ -1,6 +1,8 @@
 package workflows
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -73,5 +75,47 @@ func TestCallbackConfigDefaults(t *testing.T) {
 
 	if cfg.MaxArtifactSize != 100*1024 {
 		t.Errorf("default max artifact size = %d, want 100KB", cfg.MaxArtifactSize)
+	}
+}
+
+func TestNewCallbackManagerNormalizesWSScheme(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"ws://localhost:8989", "http://localhost:8989"},
+		{"wss://api.example.com", "https://api.example.com"},
+		{"http://localhost:8989", "http://localhost:8989"},
+		{"https://api.example.com", "https://api.example.com"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		cm := NewCallbackManager(CallbackConfig{APIURL: tt.in, DeviceID: "dev-1"})
+		if cm.config.APIURL != tt.want {
+			t.Errorf("APIURL %q normalized to %q, want %q", tt.in, cm.config.APIURL, tt.want)
+		}
+	}
+}
+
+func TestSendTaskResultUsesMissionEventRoute(t *testing.T) {
+	var gotPath, gotSecret, gotDeviceID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotSecret = r.Header.Get("X-Internal-Secret")
+		gotDeviceID = r.Header.Get("X-Device-ID")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cm := NewCallbackManager(CallbackConfig{APIURL: srv.URL, DeviceID: "dev-1", InternalSecret: "s3cret"})
+	if err := cm.SendTaskResult(TaskResult{JobID: "j1", TaskID: "t1", Success: true}); err != nil {
+		t.Fatalf("SendTaskResult: %v", err)
+	}
+
+	if gotPath != "/api/missions/internal/orchestrator/event" {
+		t.Errorf("callback path = %q, want /api/missions/internal/orchestrator/event", gotPath)
+	}
+	if gotSecret != "s3cret" {
+		t.Errorf("X-Internal-Secret = %q, want %q", gotSecret, "s3cret")
+	}
+	if gotDeviceID != "dev-1" {
+		t.Errorf("X-Device-ID = %q, want dev-1", gotDeviceID)
 	}
 }

@@ -205,8 +205,9 @@ func New(cfg *config.Config) (*Bridge, error) {
 		ioLogger:          ioLogger,
 		worktreeManager:   workflows.NewWorktreeManager("."),
 		callbackManager:   workflows.NewCallbackManager(workflows.CallbackConfig{
-			APIURL:   cfg.ServerURL,
-			DeviceID: cfg.DeviceID,
+			APIURL:         cfg.ServerURL,
+			DeviceID:       cfg.DeviceID,
+			InternalSecret: os.Getenv("OPEN_AGENTS_INTERNAL_SECRET"),
 		}),
 		batchBuf:          make(map[string]*contentBatch),
 		offlineBuf:        nil,
