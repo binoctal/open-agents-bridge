@@ -33,6 +33,7 @@ type TaskResult struct {
 type CallbackConfig struct {
 	APIURL          string        // Base URL for the API (ws://wss:// schemes normalized to http://https://)
 	DeviceID        string        // Device ID for identification
+	UserID          string        // Mission owner; sent as payload.userId (internal routes have no JWT context)
 	InternalSecret  string        // Shared secret for the API's /internal/* routes (X-Internal-Secret header)
 	Timeout         time.Duration // Task execution timeout (default 30min)
 	MaxRetries      int           // Max retry attempts for callback (default 3)
@@ -199,6 +200,15 @@ func (m *CallbackManager) sendEventWithRetry(event map[string]interface{}, taskI
 // postEvent sends a single HTTP POST to the Orchestrator API
 func (m *CallbackManager) postEvent(event map[string]interface{}) error {
 	url := m.config.APIURL + "/api/missions/internal/orchestrator/event"
+
+	if m.config.UserID != "" {
+		// The internal event route builds a user-scoped orchestrator and has
+		// no JWT context; without this it binds an undefined userId and D1
+		// rejects every callback with TYPE_ERROR.
+		if payload, ok := event["payload"].(map[string]interface{}); ok {
+			payload["userId"] = m.config.UserID
+		}
+	}
 
 	body, err := json.Marshal(event)
 	if err != nil {

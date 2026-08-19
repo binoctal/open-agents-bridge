@@ -207,6 +207,7 @@ func New(cfg *config.Config) (*Bridge, error) {
 		callbackManager:   workflows.NewCallbackManager(workflows.CallbackConfig{
 			APIURL:         cfg.ServerURL,
 			DeviceID:       cfg.DeviceID,
+			UserID:         cfg.UserID,
 			InternalSecret: os.Getenv("OPEN_AGENTS_INTERNAL_SECRET"),
 		}),
 		batchBuf:          make(map[string]*contentBatch),

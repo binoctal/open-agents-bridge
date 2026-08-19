@@ -1,6 +1,8 @@
 package workflows
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -96,15 +98,18 @@ func TestNewCallbackManagerNormalizesWSScheme(t *testing.T) {
 
 func TestSendTaskResultUsesMissionEventRoute(t *testing.T) {
 	var gotPath, gotSecret, gotDeviceID string
+	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotSecret = r.Header.Get("X-Internal-Secret")
 		gotDeviceID = r.Header.Get("X-Device-ID")
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &gotBody)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
-	cm := NewCallbackManager(CallbackConfig{APIURL: srv.URL, DeviceID: "dev-1", InternalSecret: "s3cret"})
+	cm := NewCallbackManager(CallbackConfig{APIURL: srv.URL, DeviceID: "dev-1", UserID: "user-1", InternalSecret: "s3cret"})
 	if err := cm.SendTaskResult(TaskResult{JobID: "j1", TaskID: "t1", Success: true}); err != nil {
 		t.Fatalf("SendTaskResult: %v", err)
 	}
@@ -117,5 +122,11 @@ func TestSendTaskResultUsesMissionEventRoute(t *testing.T) {
 	}
 	if gotDeviceID != "dev-1" {
 		t.Errorf("X-Device-ID = %q, want dev-1", gotDeviceID)
+	}
+	// The internal route has no JWT context; the payload must carry the
+	// mission owner so the route can build the user-scoped orchestrator.
+	payload, _ := gotBody["payload"].(map[string]any)
+	if payload["userId"] != "user-1" {
+		t.Errorf("payload.userId = %v, want user-1", payload["userId"])
 	}
 }
