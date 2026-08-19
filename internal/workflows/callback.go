@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,12 +31,14 @@ type TaskResult struct {
 
 // CallbackConfig holds configuration for the callback mechanism
 type CallbackConfig struct {
-	APIURL      string        // Base URL for the API
-	DeviceID    string        // Device ID for identification
-	Timeout     time.Duration // Task execution timeout (default 30min)
-	MaxRetries  int           // Max retry attempts for callback (default 3)
-	CacheDir    string        // Directory for caching failed callbacks
-	MaxArtifactSize int       // Max artifact size in bytes (default 100KB)
+	APIURL          string        // Base URL for the API (ws://wss:// schemes normalized to http://https://)
+	DeviceID        string        // Device ID for identification
+	UserID          string        // Mission owner; sent as payload.userId (internal routes have no JWT context)
+	InternalSecret  string        // Shared secret for the API's /internal/* routes (X-Internal-Secret header)
+	Timeout         time.Duration // Task execution timeout (default 30min)
+	MaxRetries      int           // Max retry attempts for callback (default 3)
+	CacheDir        string        // Directory for caching failed callbacks
+	MaxArtifactSize int           // Max artifact size in bytes (default 100KB)
 }
 
 // DefaultCallbackConfig returns default configuration
@@ -58,6 +61,10 @@ type CallbackManager struct {
 
 // NewCallbackManager creates a new callback manager
 func NewCallbackManager(config CallbackConfig) *CallbackManager {
+	// The API base is often configured as the WebSocket server URL; the
+	// callback is plain HTTP, so normalize the scheme or http.Client fails
+	// with "unsupported protocol scheme".
+	config.APIURL = httpURLFromWS(config.APIURL)
 	if config.MaxRetries == 0 {
 		config.MaxRetries = 3
 	}
@@ -77,6 +84,17 @@ func NewCallbackManager(config CallbackConfig) *CallbackManager {
 		config: config,
 		client: &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+// httpURLFromWS converts a ws:// or wss:// base URL to its http(s) equivalent.
+func httpURLFromWS(u string) string {
+	if strings.HasPrefix(u, "wss://") {
+		return "https://" + strings.TrimPrefix(u, "wss://")
+	}
+	if strings.HasPrefix(u, "ws://") {
+		return "http://" + strings.TrimPrefix(u, "ws://")
+	}
+	return u
 }
 
 // ExtractArtifacts processes CLI output and extracts artifacts
@@ -181,7 +199,16 @@ func (m *CallbackManager) sendEventWithRetry(event map[string]interface{}, taskI
 
 // postEvent sends a single HTTP POST to the Orchestrator API
 func (m *CallbackManager) postEvent(event map[string]interface{}) error {
-	url := m.config.APIURL + "/api/workflows/internal/orchestrator/event"
+	url := m.config.APIURL + "/api/missions/internal/orchestrator/event"
+
+	if m.config.UserID != "" {
+		// The internal event route builds a user-scoped orchestrator and has
+		// no JWT context; without this it binds an undefined userId and D1
+		// rejects every callback with TYPE_ERROR.
+		if payload, ok := event["payload"].(map[string]interface{}); ok {
+			payload["userId"] = m.config.UserID
+		}
+	}
 
 	body, err := json.Marshal(event)
 	if err != nil {
@@ -194,6 +221,11 @@ func (m *CallbackManager) postEvent(event map[string]interface{}) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Device-ID", m.config.DeviceID)
+	if m.config.InternalSecret != "" {
+		// The API guards /internal/* routes behind this shared secret
+		// (missions.ts internal middleware), mirroring the DO-side callback.
+		req.Header.Set("X-Internal-Secret", m.config.InternalSecret)
+	}
 
 	resp, err := m.client.Do(req)
 	if err != nil {

@@ -205,8 +205,10 @@ func New(cfg *config.Config) (*Bridge, error) {
 		ioLogger:          ioLogger,
 		worktreeManager:   workflows.NewWorktreeManager("."),
 		callbackManager:   workflows.NewCallbackManager(workflows.CallbackConfig{
-			APIURL:   cfg.ServerURL,
-			DeviceID: cfg.DeviceID,
+			APIURL:         cfg.ServerURL,
+			DeviceID:       cfg.DeviceID,
+			UserID:         cfg.UserID,
+			InternalSecret: os.Getenv("OPEN_AGENTS_INTERNAL_SECRET"),
 		}),
 		batchBuf:          make(map[string]*contentBatch),
 		offlineBuf:        nil,
@@ -785,6 +787,30 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
+
+		// A CLI that finishes by itself only reports status=idle with an
+		// exit_code meta (protocol/pty.go wait goroutine). Without stopping
+		// the session here, the manager's exit callback never fires, so a
+		// workflow task's result is never reported and the orchestrator
+		// waits until stuck recovery. Stopping is a no-op if the session is
+		// already gone.
+		if rawCode, hasCode := msg.Meta["exit_code"]; hasCode {
+			code, valid := rawCode.(int)
+			if !valid {
+				if f, isFloat := rawCode.(float64); isFloat {
+					code, valid = int(f), true
+				}
+			}
+			if valid {
+				sid := sessionID
+				exitCode := code
+				go func() {
+					if err := b.sessions.StopWithExitCode(sid, exitCode); err != nil {
+						b.logWarn("[%s] Failed to stop exited session %s: %v", logger.ModSession, sid, err)
+					}
+				}()
+			}
+		}
 
 	case protocol.MessageTypeUsage:
 		usage, ok := msg.Content.(protocol.UsageStats)
