@@ -25,10 +25,9 @@ import (
 	"github.com/open-agents/open-agents-bridge/internal/crypto"
 	"github.com/open-agents/open-agents-bridge/internal/logger"
 	"github.com/open-agents/open-agents-bridge/internal/loopdetect"
-	mcpPkg "github.com/open-agents/open-agents-bridge/internal/mcp"
 	"github.com/open-agents/open-agents-bridge/internal/markdown"
+	mcpPkg "github.com/open-agents/open-agents-bridge/internal/mcp"
 	"github.com/open-agents/open-agents-bridge/internal/metrics"
-	"github.com/open-agents/open-agents-bridge/internal/workflows"
 	"github.com/open-agents/open-agents-bridge/internal/permission"
 	"github.com/open-agents/open-agents-bridge/internal/protocol"
 	"github.com/open-agents/open-agents-bridge/internal/reconnect"
@@ -36,6 +35,7 @@ import (
 	"github.com/open-agents/open-agents-bridge/internal/scanner"
 	"github.com/open-agents/open-agents-bridge/internal/session"
 	"github.com/open-agents/open-agents-bridge/internal/storage"
+	"github.com/open-agents/open-agents-bridge/internal/workflows"
 )
 
 // logDebug logs debug messages
@@ -204,16 +204,16 @@ func New(cfg *config.Config) (*Bridge, error) {
 		messageQueue:      make(chan Message, 100), // Buffered queue for ordered processing
 		ioLogger:          ioLogger,
 		worktreeManager:   workflows.NewWorktreeManager("."),
-		callbackManager:   workflows.NewCallbackManager(workflows.CallbackConfig{
+		callbackManager: workflows.NewCallbackManager(workflows.CallbackConfig{
 			APIURL:         cfg.ServerURL,
 			DeviceID:       cfg.DeviceID,
 			UserID:         cfg.UserID,
 			InternalSecret: os.Getenv("OPEN_AGENTS_INTERNAL_SECRET"),
 		}),
-		batchBuf:          make(map[string]*contentBatch),
-		offlineBuf:        nil,
-		msgBuffer:         NewMessageBuffer(DefaultBufferCapacity),
-		keepAliveDone:     make(chan struct{}),
+		batchBuf:      make(map[string]*contentBatch),
+		offlineBuf:    nil,
+		msgBuffer:     NewMessageBuffer(DefaultBufferCapacity),
+		keepAliveDone: make(chan struct{}),
 	}
 
 	// Apply scanner config
@@ -660,7 +660,6 @@ func (b *Bridge) messageWorker() {
 		}
 	}
 }
-
 
 // forwardSessionOutput forwards protocol messages from CLI to WebSocket
 func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
@@ -1272,12 +1271,12 @@ func (b *Bridge) handleSessionResume(msg Message) {
 	b.sendMessage(Message{
 		Type: "session:resumed",
 		Payload: map[string]interface{}{
-			"sessionId":     sess.ID,
-			"deviceId":      b.config.DeviceID,
-			"cliType":       sess.CLIType,
-			"workDir":       sess.WorkDir,
+			"sessionId":      sess.ID,
+			"deviceId":       b.config.DeviceID,
+			"cliType":        sess.CLIType,
+			"workDir":        sess.WorkDir,
 			"permissionMode": sess.PermissionMode,
-			"agentStatus":   "idle", // Reset to idle on resume
+			"agentStatus":    "idle", // Reset to idle on resume
 		},
 		Timestamp: time.Now().UnixMilli(),
 	})
@@ -1328,9 +1327,9 @@ func (b *Bridge) handleResumeWithContext(msg Message) {
 		b.sendMessage(Message{
 			Type: "session:resume-with-context:failed",
 			Payload: map[string]interface{}{
-				"reason":             "session_create_failed",
-				"message":            err.Error(),
-				"originalSessionId":  originalSessionID,
+				"reason":            "session_create_failed",
+				"message":           err.Error(),
+				"originalSessionId": originalSessionID,
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
@@ -1345,12 +1344,12 @@ func (b *Bridge) handleResumeWithContext(msg Message) {
 	b.sendMessage(Message{
 		Type: "session:resumed-with-context",
 		Payload: map[string]interface{}{
-			"sessionId":          sess.ID,
-			"originalSessionId":  originalSessionID,
-			"messageCount":       messageCount,
-			"deviceId":           b.config.DeviceID,
-			"cliType":            cliType,
-			"workDir":            workDir,
+			"sessionId":         sess.ID,
+			"originalSessionId": originalSessionID,
+			"messageCount":      messageCount,
+			"deviceId":          b.config.DeviceID,
+			"cliType":           cliType,
+			"workDir":           workDir,
 		},
 		Timestamp: time.Now().UnixMilli(),
 	})
@@ -2386,9 +2385,9 @@ func batchTotalSize(batch *contentBatch) int {
 // These are transient state that becomes stale when the connection is restored.
 var noBufferTypes = map[string]bool{
 	"permission:request": true, // Session may be dead, approval has nowhere to go
-	"agent:status":      true, // Stale status (thinking/streaming) misleads UI
-	"session:stopped":   true, // notifyStaleSessionsStopped handles this after flush
-	"tool:call":         true, // Stale tool call updates are meaningless
+	"agent:status":       true, // Stale status (thinking/streaming) misleads UI
+	"session:stopped":    true, // notifyStaleSessionsStopped handles this after flush
+	"tool:call":          true, // Stale tool call updates are meaningless
 }
 
 // bufferOffline stores a message for later delivery when the WebSocket is disconnected.
@@ -2749,6 +2748,22 @@ func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 	b.startTaskSession(jobId, taskId, agent, title, description, context, workDir)
 }
 
+// taskStartedMessage builds the workflow:task_started frame for the
+// orchestrator-dispatch path (known-issue #7): previously the only start
+// signal there was task_progress {progress:0, step:"started"} and the
+// task_started emitters were echoes of web-origin commands.
+func taskStartedMessage(jobId, taskId, deviceId string) Message {
+	return Message{
+		Type: "workflow:task_started",
+		Payload: map[string]interface{}{
+			"jobId":    jobId,
+			"taskId":   taskId,
+			"deviceId": deviceId,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	}
+}
+
 func (b *Bridge) startTaskSession(jobId, taskId, agent, title, description, context, workDir string) {
 	prompt := buildTaskPrompt(title, description, context)
 
@@ -2768,6 +2783,11 @@ func (b *Bridge) startTaskSession(jobId, taskId, agent, title, description, cont
 		})
 		return
 	}
+
+	// Known-issue #7: emit the task_started signal on the dispatch path (the
+	// web-origin command echoes are no longer its only emitters), then the
+	// progress-0 "started" step report.
+	_ = b.sendMessage(taskStartedMessage(jobId, taskId, b.config.DeviceID))
 
 	// Report progress
 	b.sendMessage(Message{
@@ -2865,9 +2885,9 @@ func (b *Bridge) handleWorkflowTaskMerge(msg Message) {
 		b.sendMessage(Message{
 			Type: "workflow:task_merge_conflict",
 			Payload: map[string]interface{}{
-				"jobId":        jobId,
-				"taskId":       taskId,
-				"deviceId":     b.config.DeviceID,
+				"jobId":         jobId,
+				"taskId":        taskId,
+				"deviceId":      b.config.DeviceID,
 				"conflictFiles": conflictFiles,
 			},
 			Timestamp: time.Now().UnixMilli(),
@@ -2963,9 +2983,9 @@ func (b *Bridge) handleWorkflowMergeAll(msg Message) {
 			b.sendMessage(Message{
 				Type: "workflow:merge_progress",
 				Payload: map[string]interface{}{
-					"jobId":        jobId,
-					"taskId":       branch.TaskID,
-					"status":       "conflict",
+					"jobId":         jobId,
+					"taskId":        branch.TaskID,
+					"status":        "conflict",
 					"conflictFiles": conflictFiles,
 				},
 				Timestamp: time.Now().UnixMilli(),
@@ -3391,8 +3411,8 @@ func (b *Bridge) handleWorkflowSetState(msg Message) {
 	b.sendMessage(Message{
 		Type: "workflow:state_set",
 		Payload: map[string]interface{}{
-			"jobId":  jobId,
-			"key":    key,
+			"jobId":   jobId,
+			"key":     key,
 			"success": true,
 		},
 		Timestamp: time.Now().UnixMilli(),
