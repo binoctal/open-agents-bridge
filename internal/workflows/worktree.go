@@ -15,8 +15,14 @@ type WorktreeManager struct {
 	projectDir string // Base project directory
 }
 
-// NewWorktreeManager creates a new worktree manager for the given project directory
+// NewWorktreeManager creates a new worktree manager for the given project directory.
+// The base is absolutized here: every path the manager derives (worktree paths
+// handed to ACP session/new as cwd) must be absolute, and callers pass a
+// literal relative base (".") — known-issue #10.
 func NewWorktreeManager(projectDir string) *WorktreeManager {
+	if abs, err := filepath.Abs(projectDir); err == nil {
+		projectDir = abs
+	}
 	return &WorktreeManager{projectDir: projectDir}
 }
 
