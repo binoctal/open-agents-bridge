@@ -49,3 +49,4 @@ dist/
 # npm
 npm/bin/
 npm/node_modules/
+.open-agents-bridge-worktrees/
