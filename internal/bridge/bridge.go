@@ -3075,24 +3075,32 @@ func (b *Bridge) handleSessionExit(sessionID string, exitCode int, output []byte
 	}
 }
 
-// handleQuestionMarker detects [QUESTION] markers in CLI output and triggers human-in-the-loop
-func (b *Bridge) handleQuestionMarker(sessionID string, sess *session.Session, content string) {
-	if !strings.Contains(content, "[QUESTION]") {
-		return
-	}
-
-	// Extract question text from lines containing [QUESTION]
-	var questionParts []string
+// extractQuestion returns the question text from the first line STARTING
+// with the [QUESTION] marker. The task prompt itself mentions "[QUESTION]"
+// mid-sentence (see buildTaskPrompt), and the PTY path echoes that prompt
+// back as CLI output — a Contains match would fire deterministically on
+// harness text, so detection requires the marker to open the line, exactly
+// the contract the prompt states ("output a line starting with [QUESTION]").
+func extractQuestion(content string) (string, bool) {
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.Contains(trimmed, "[QUESTION]") {
-			q := strings.TrimSpace(strings.SplitN(trimmed, "[QUESTION]", 2)[1])
-			if q != "" {
-				questionParts = append(questionParts, q)
-			}
+		if !strings.HasPrefix(trimmed, "[QUESTION]") {
+			continue
+		}
+		q := strings.TrimSpace(strings.TrimPrefix(trimmed, "[QUESTION]"))
+		if q != "" {
+			return q, true
 		}
 	}
-	question := strings.Join(questionParts, " ")
+	return "", false
+}
+
+// handleQuestionMarker detects [QUESTION] markers in CLI output and triggers human-in-the-loop
+func (b *Bridge) handleQuestionMarker(sessionID string, sess *session.Session, content string) {
+	question, ok := extractQuestion(content)
+	if !ok {
+		return
+	}
 	if question == "" {
 		question = "Agent is asking a question"
 	}
