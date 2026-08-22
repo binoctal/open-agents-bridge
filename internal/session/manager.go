@@ -15,20 +15,24 @@ type OutputCallback func(sessionID string, msg protocol.Message)
 type ExitCallback func(sessionID string, exitCode int, output []byte)
 
 type Manager struct {
-	sessions       map[string]*Session
-	mu             sync.RWMutex
-	outputCallback OutputCallback
-	exitCallback   ExitCallback
-	maxConcurrent  int
-	queue          []QueueItem
-	queueMu        sync.Mutex
-	ioLogger       *logger.IOLogger // I/O logger for debugging and auditing
+	sessions         map[string]*Session
+	mu               sync.RWMutex
+	outputCallback   OutputCallback
+	exitCallback     ExitCallback
+	capacityCallback func()
+	maxConcurrent    int
+	queue            []QueueItem
+	queueMu          sync.Mutex
+	ioLogger         *logger.IOLogger // I/O logger for debugging and auditing
 }
 
 type QueueItem struct {
-	CLIType    string
-	WorkDir    string
-	SessionID  string
+	CLIType   string
+	WorkDir   string
+	SessionID string
+	// JobID pairs with SessionID (the task ID) so a drained task keeps its
+	// completion reporting: the exit callback reports results per job/task.
+	JobID      string
 	Cols       int
 	Rows       int
 	PermMode   string
@@ -115,6 +119,14 @@ func (m *Manager) SetOutputCallback(callback OutputCallback) {
 	m.outputCallback = callback
 }
 
+// SetCapacityCallback registers a hook fired after every session close —
+// the bridge drains its task queue there (a freed pool slot may fit a
+// queued task). Without a drain trigger, pool-full enqueues were never
+// started (DequeueNext had no caller).
+func (m *Manager) SetCapacityCallback(callback func()) {
+	m.capacityCallback = callback
+}
+
 func (m *Manager) SetExitCallback(callback ExitCallback) {
 	m.exitCallback = callback
 }
@@ -131,7 +143,6 @@ func (m *Manager) Create(cliType, workDir string) (*Session, error) {
 func (m *Manager) CreateWithID(cliType, workDir, sessionID string) (*Session, error) {
 	return m.CreateWithIDAndSize(cliType, workDir, sessionID, 120, 30, "default")
 }
-
 
 // activeCountLocked returns active session count (must be called with lock held)
 func (m *Manager) activeCountLocked() int {
@@ -411,6 +422,11 @@ func (m *Manager) StopWithExitCode(id string, exitCode int) error {
 	taskID := sess.TaskID
 
 	delete(m.sessions, id)
+
+	// A pool slot just freed — let the bridge drain queued tasks.
+	if m.capacityCallback != nil {
+		go m.capacityCallback()
+	}
 
 	// Call exit callback if set and this is a multi-agent task
 	if m.exitCallback != nil && jobID != "" && taskID != "" {
