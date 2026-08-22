@@ -33,8 +33,8 @@ func TestQueueRoundTrip(t *testing.T) {
 	if got.PermMode != "accept-edits" || got.Cols != 120 || got.Rows != 30 || got.Prompt != "p1" {
 		t.Fatalf("first dequeue lost fields: %+v", got)
 	}
-	if !got.EnqueuedAt.IsZero() {
-		// EnqueuedAt is set by Enqueue; it must be populated for wait logging.
+	if got.EnqueuedAt.IsZero() {
+		// EnqueuedAt is set by Enqueue; it feeds drain wait logging.
 		t.Fatal("EnqueuedAt not stamped by Enqueue")
 	}
 	if got2 := m.DequeueNext(); got2 == nil || got2.SessionID != "task-2" {
