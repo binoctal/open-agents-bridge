@@ -363,6 +363,8 @@ func (b *Bridge) Start() error {
 	b.sessions.SetExitCallback(func(sessionID string, exitCode int, output []byte) {
 		go b.handleSessionExit(sessionID, exitCode, output)
 	})
+	// Freed pool slots drain queued tasks (see drainTaskQueue).
+	b.sessions.SetCapacityCallback(b.drainTaskQueue)
 	if err := b.connect(); err != nil {
 		return err
 	}
@@ -2737,6 +2739,7 @@ func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 			CLIType:   agent,
 			WorkDir:   workDir,
 			SessionID: taskId,
+			JobID:     jobId,
 			Cols:      120,
 			Rows:      30,
 			PermMode:  "accept-edits",
@@ -2766,8 +2769,15 @@ func taskStartedMessage(jobId, taskId, deviceId string) Message {
 
 func (b *Bridge) startTaskSession(jobId, taskId, agent, title, description, context, workDir string) {
 	prompt := buildTaskPrompt(title, description, context)
+	b.launchTaskSession(jobId, taskId, agent, workDir, 120, 30, "accept-edits", prompt, title)
+}
 
-	sess, err := b.sessions.CreateWithIDAndSize(agent, workDir, taskId, 120, 30, "accept-edits")
+// launchTaskSession creates the task session and emits its start signals.
+// Shared by the direct dispatch path (startTaskSession) and the queue drain
+// (drainTaskQueue) so a queued task gets the identical lifecycle — including
+// the completion exit callback, which keys on the session's job/task metadata.
+func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, rows int, permMode, prompt, title string) {
+	sess, err := b.sessions.CreateWithIDAndSize(cli, workDir, taskId, cols, rows, permMode)
 	if err != nil {
 		b.logInfo("[%s] Failed to create session for task %s: %v", logger.ModWorkflow, taskId, err)
 		b.sendMessage(Message{
@@ -2821,6 +2831,27 @@ func (b *Bridge) startTaskSession(jobId, taskId, agent, title, description, cont
 		Worktree: isWorktree,
 	}
 	b.taskMetaMu.Unlock()
+}
+
+// drainTaskQueue starts queued tasks as pool capacity frees. Without it the
+// pool-full Enqueue in handleWorkflowTaskAssign was a black hole: DequeueNext
+// had no caller, so a task dispatched while 3 sessions were active never ran
+// — no task_started/task_progress, no completion callback, the mission stuck
+// until retry/stuck-recovery (found live in dogfood 2026-08-22).
+func (b *Bridge) drainTaskQueue() {
+	for {
+		if b.sessions.ActiveCount() >= b.sessions.MaxConcurrent() {
+			return
+		}
+		item := b.sessions.DequeueNext()
+		if item == nil {
+			return
+		}
+		b.logInfo("[%s] Draining queued task %s (job %s, waited %s)", logger.ModWorkflow,
+			item.SessionID, item.JobID, time.Since(item.EnqueuedAt).Round(time.Second))
+		b.launchTaskSession(item.JobID, item.SessionID, item.CLIType, item.WorkDir,
+			item.Cols, item.Rows, item.PermMode, item.Prompt, "")
+	}
 }
 
 func buildTaskPrompt(title, description, context string) string {
