@@ -107,6 +107,11 @@ type Bridge struct {
 	// Pending questions for human-in-the-loop (taskId -> answer channel)
 	pendingQuestions   map[string]chan string
 	pendingQuestionsMu sync.RWMutex
+	// lineBoundary tracks per session whether the last content chunk ended at
+	// a newline — question-marker detection must not treat a mid-line chunk
+	// start as a line start (see extractQuestion).
+	lineBoundary   map[string]bool
+	lineBoundaryMu sync.Mutex
 
 	// Task metadata for workflow tasks (sessionID -> taskMeta)
 	taskMeta   map[string]*taskMeta
@@ -196,6 +201,7 @@ func New(cfg *config.Config) (*Bridge, error) {
 		loopDetectors:     make(map[string]*loopdetect.Detector),
 		permSessionMap:    make(map[string]string),
 		pendingQuestions:  make(map[string]chan string),
+		lineBoundary:      make(map[string]bool),
 		taskMeta:          make(map[string]*taskMeta),
 		reconnectStrategy: reconnect.NewStrategy(),
 		stateManager:      NewStateManager(),
@@ -3112,8 +3118,19 @@ func (b *Bridge) handleSessionExit(sessionID string, exitCode int, output []byte
 // back as CLI output — a Contains match would fire deterministically on
 // harness text, so detection requires the marker to open the line, exactly
 // the contract the prompt states ("output a line starting with [QUESTION]").
-func extractQuestion(content string) (string, bool) {
-	for _, line := range strings.Split(content, "\n") {
+//
+// firstLineIsBoundary: PTY reads deliver arbitrary-size chunks, so a chunk
+// may begin MID-LINE. A chunk that happens to start exactly at the marker
+// inside the echoed instruction ("Example: |[QUESTION] …" split across
+// reads) would otherwise satisfy the prefix check (live-observed in dogfood
+// 2026-08-22). Only the chunk's first line is affected — every later line
+// follows an in-chunk newline and is a true line start. The caller tracks
+// whether the previous chunk ended at a newline.
+func extractQuestion(content string, firstLineIsBoundary bool) (string, bool) {
+	for i, line := range strings.Split(content, "\n") {
+		if i == 0 && !firstLineIsBoundary {
+			continue
+		}
 		trimmed := strings.TrimSpace(line)
 		if !strings.HasPrefix(trimmed, "[QUESTION]") {
 			continue
@@ -3126,9 +3143,23 @@ func extractQuestion(content string) (string, bool) {
 	return "", false
 }
 
+// chunkStartsAtLineBoundary reports whether the next content chunk for this
+// session begins at a line boundary, updating the tracked tail state. The
+// first chunk of a session is assumed line-aligned.
+func (b *Bridge) chunkStartsAtLineBoundary(sessionID, content string) bool {
+	b.lineBoundaryMu.Lock()
+	defer b.lineBoundaryMu.Unlock()
+	atBoundary, seen := b.lineBoundary[sessionID]
+	if !seen {
+		atBoundary = true
+	}
+	b.lineBoundary[sessionID] = strings.HasSuffix(content, "\n")
+	return atBoundary
+}
+
 // handleQuestionMarker detects [QUESTION] markers in CLI output and triggers human-in-the-loop
 func (b *Bridge) handleQuestionMarker(sessionID string, sess *session.Session, content string) {
-	question, ok := extractQuestion(content)
+	question, ok := extractQuestion(content, b.chunkStartsAtLineBoundary(sessionID, content))
 	if !ok {
 		return
 	}
