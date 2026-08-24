@@ -1,6 +1,9 @@
 package bridge
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Known-issue #9: the task prompt itself contains "[QUESTION]" mid-sentence
 // (buildTaskPrompt's instruction line), and the PTY fallback path echoes that
@@ -39,9 +42,8 @@ func TestExtractQuestion(t *testing.T) {
 			found:               true,
 		},
 		{
-			name: "echoed prompt instruction does not match",
-			content: "Fix the login bug\n\n--- Instruction ---\n" +
-				"If you need to ask the user a question during execution, output a line starting with [QUESTION] followed by your question. Example: [QUESTION] Should I use JWT or session-based authentication?",
+			name:                "echoed prompt instruction does not match",
+			content:             buildTaskPrompt("Fix the login bug", "Locate and fix it", ""),
 			firstLineIsBoundary: true,
 			want:                "",
 			found:               false,
@@ -88,6 +90,54 @@ func TestExtractQuestion(t *testing.T) {
 				t.Fatalf("question = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// Dogfood 2026-08-24 (run 13): PTY terminals hard-wrap echoed text at the
+// column width, and a wrap can fall immediately before ANY "[QUESTION]"
+// occurrence inside the echoed instruction — live logs show both the example
+// sentence ("Should I use JW", truncated mid-word at the wrap) and the
+// instruction sentence itself ("followed by your question. Example: …")
+// landing at genuine "\n" line starts. Line-prefix detection cannot
+// distinguish that from a real question, so the prompt must not contain the
+// literal marker at all: buildTaskPrompt describes the format without
+// spelling the marker out.
+func TestBuildTaskPromptOmitsLiteralQuestionMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name, title, desc, context string
+	}{
+		{"minimal", "Fix the login bug", "Locate and fix the authentication failure", ""},
+		{"with upstream context", "Fix the login bug", "Locate and fix the authentication failure", "upstream task output"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if strings.Contains(buildTaskPrompt(tc.title, tc.desc, tc.context), "[QUESTION]") {
+				t.Fatal("task prompt must not contain the literal [QUESTION] marker: " +
+					"PTY echo hard-wrap can place it at a true line start and fire a spurious task_question")
+			}
+		})
+	}
+}
+
+// wrapAtWidth simulates a terminal hard-wrapping echoed text at the given
+// column count — the failure mode live-observed in dogfood (extraction fired
+// on "Should I use JW", the example sentence split mid-word).
+func wrapAtWidth(s string, width int) string {
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && i%width == 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func TestWrappedPromptEchoNeverFiresQuestionMarker(t *testing.T) {
+	prompt := buildTaskPrompt("Fix the login bug", "Locate and fix the authentication failure", "upstream task output")
+	for w := 10; w <= 160; w++ {
+		if _, found := extractQuestion(wrapAtWidth(prompt, w), true); found {
+			t.Fatalf("width %d: a hard-wrapped echo of the task prompt must not fire question detection", w)
+		}
 	}
 }
 

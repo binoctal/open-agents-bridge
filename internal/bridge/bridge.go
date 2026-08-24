@@ -2865,7 +2865,13 @@ func buildTaskPrompt(title, description, context string) string {
 	if context != "" {
 		prompt += "\n\n--- Upstream task output ---\n" + context
 	}
-	prompt += "\n\n--- Instruction ---\nIf you need to ask the user a question during execution, output a line starting with [QUESTION] followed by your question. Example: [QUESTION] Should I use JWT or session-based authentication?"
+	// The instruction must NOT spell out the literal marker: the PTY path
+	// echoes the prompt back as CLI output, and terminals hard-wrap at the
+	// column width — a wrap landing right before the marker puts it at a
+	// genuine "\n" line start, where extractQuestion's line-prefix check
+	// (correctly) treats it as a real question (live-observed in dogfood
+	// 2026-08-24, run 13). Describe the format instead.
+	prompt += "\n\n--- Instruction ---\nIf you need to ask the user a question during execution, output a line starting with the QUESTION marker enclosed in square brackets, followed by your question. Example: the marker, then Should I use JWT or session-based authentication?"
 	return prompt
 }
 
@@ -3113,11 +3119,12 @@ func (b *Bridge) handleSessionExit(sessionID string, exitCode int, output []byte
 }
 
 // extractQuestion returns the question text from the first line STARTING
-// with the [QUESTION] marker. The task prompt itself mentions "[QUESTION]"
-// mid-sentence (see buildTaskPrompt), and the PTY path echoes that prompt
-// back as CLI output — a Contains match would fire deterministically on
-// harness text, so detection requires the marker to open the line, exactly
-// the contract the prompt states ("output a line starting with [QUESTION]").
+// with the [QUESTION] marker. buildTaskPrompt deliberately does NOT contain
+// the literal marker (a PTY-echoed prompt, hard-wrapped at the terminal
+// width, once placed it at genuine line starts — dogfood 2026-08-24), but
+// echoed prose can still MENTION the marker mid-sentence, so detection
+// requires the marker to open the line, exactly the contract the prompt
+// states ("output a line starting with the QUESTION marker").
 //
 // firstLineIsBoundary: PTY reads deliver arbitrary-size chunks, so a chunk
 // may begin MID-LINE. A chunk that happens to start exactly at the marker
