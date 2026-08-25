@@ -3212,6 +3212,15 @@ func (b *Bridge) handleQuestionMarker(sessionID string, sess *session.Session, c
 			b.pendingQuestionsMu.Lock()
 			delete(b.pendingQuestions, sess.TaskID)
 			b.pendingQuestionsMu.Unlock()
+			// The waiting agent cannot proceed without an answer — terminate
+			// the session so its process-pool slot frees. Leaking it wedges
+			// the bridge: every later task queues behind the dead session
+			// forever (live-observed in dogfood run 17: a retry-created
+			// session re-asked after the web had already answered, timed
+			// out, and the pool never drained).
+			if err := b.sessions.Stop(sessionID); err != nil {
+				b.logInfo("[%s] Task %s: stopping timed-out question session: %v", logger.ModWorkflow, sess.TaskID, err)
+			}
 		}
 	}()
 }
