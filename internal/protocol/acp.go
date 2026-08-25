@@ -3,6 +3,7 @@ package protocol
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -48,6 +49,15 @@ type ACPAdapter struct {
 	outputTokens atomic.Int64
 	// Signal channels for initialization sequencing
 	initDone chan struct{} // closed when initialize response received
+	// Agent-death reporting (known-issue #17): monitorProcess records the
+	// wait exit code and closes procExited; readMessages' stdout-EOF path
+	// (the authoritative death signal) picks it up and emits the same
+	// exit_code status message the PTY path uses, so the bridge stops the
+	// session and the manager's exit callback fires instead of wedging the
+	// task in running.
+	procExitCode     atomic.Int64 // -1 until the wait returns
+	procExited       chan struct{}
+	manualDisconnect atomic.Bool // Disconnect() in progress: EOF is expected, not death
 	// Agent health tracking
 	consecutiveErrors atomic.Int32
 	isProcessing      atomic.Bool // true while waiting for session/prompt response
@@ -55,10 +65,13 @@ type ACPAdapter struct {
 
 // NewACPAdapter creates a new ACP adapter
 func NewACPAdapter() *ACPAdapter {
-	return &ACPAdapter{
-		terminals: make(map[string]*terminalState),
-		initDone:  make(chan struct{}),
+	a := &ACPAdapter{
+		terminals:  make(map[string]*terminalState),
+		initDone:   make(chan struct{}),
+		procExited: make(chan struct{}),
 	}
+	a.procExitCode.Store(-1)
+	return a
 }
 
 // SetWorkDir sets the working directory and initializes the safe filesystem.
@@ -88,6 +101,7 @@ func (a *ACPAdapter) Connect(config AdapterConfig) error {
 
 	// Start CLI process in its own process group so we can kill
 	// the entire tree (npx → sh → node) on disconnect
+	a.manualDisconnect.Store(false)
 	a.cmd = exec.Command(config.Command, config.Args...)
 	a.cmd.Dir = config.WorkDir
 	a.cmd.Env = os.Environ()
@@ -183,6 +197,7 @@ func (a *ACPAdapter) disconnectLocked() {
 	}
 
 	logger.Info("[%s] Disconnecting", logger.ModACP)
+	a.manualDisconnect.Store(true)
 
 	// Send session/close before disconnecting
 	if a.sessionID != "" && a.stdin != nil {
@@ -444,6 +459,25 @@ func (a *ACPAdapter) monitorProcess() {
 
 	err := a.cmd.Wait()
 
+	code := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			code = exitErr.ExitCode()
+			if code < 0 {
+				code = 1 // signaled without a code: treat as failure
+			}
+		} else {
+			code = 1
+		}
+	}
+	a.procExitCode.Store(int64(code))
+	select {
+	case <-a.procExited:
+	default:
+		close(a.procExited)
+	}
+
 	if err != nil {
 		if strings.Contains(err.Error(), "signal: killed") {
 			logger.Debug("[%s] Parent process killed (expected during disconnect)", logger.ModACP)
@@ -477,7 +511,33 @@ func (a *ACPAdapter) readMessages() {
 	}
 
 	// stdout EOF — the ACP connection is truly dead
+	wasConnected := a.connected.Load()
 	a.connected.Store(false)
+
+	// Known-issue #17: report the death in the PTY path's shape (status
+	// message carrying exit_code) so the bridge stops the session and the
+	// manager's exit callback fires — without this a dead agent wedges its
+	// workflow task in `running` (no task_error, no retry, no task_failed).
+	// A manual Disconnect() causes the same EOF; that teardown path already
+	// handles its own lifecycle, so only unexpected death reports here.
+	if wasConnected && !a.manualDisconnect.Load() {
+		code := int64(1)
+		select {
+		case <-a.procExited:
+			code = a.procExitCode.Load()
+		case <-time.After(2 * time.Second):
+			// Parent alive but pipe closed (child died under an npx
+			// wrapper): death is real, code unknown.
+		}
+		a.emitMessage(Message{
+			Type:    MessageTypeStatus,
+			Content: StatusIdle,
+			Meta: map[string]interface{}{
+				"protocol":  "acp",
+				"exit_code": int(code),
+			},
+		})
+	}
 
 	if err := scanner.Err(); err != nil {
 		if a.connected.Load() {

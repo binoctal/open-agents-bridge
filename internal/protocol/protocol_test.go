@@ -157,14 +157,20 @@ func TestACPIntegration(t *testing.T) {
 		t.Errorf("Expected PTY protocol for echo, got '%s'", manager.GetProtocolName())
 	}
 
-	// Wait for output
-	select {
-	case msg := <-received:
-		if msg.Type != MessageTypeContent {
-			t.Errorf("Expected content message, got '%s'", msg.Type)
+	// Wait for output. The abandoned ACP attempt (echo dies instantly) now
+	// reports its death as a status message with exit_code before the PTY
+	// fallback delivers the content — skip that expected noise.
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case msg := <-received:
+			if msg.Type == MessageTypeContent {
+				return
+			}
+		case <-deadline:
+			t.Error("Timeout waiting for content message")
+			return
 		}
-	case <-time.After(2 * time.Second):
-		t.Error("Timeout waiting for message")
 	}
 
 	manager.Disconnect()
