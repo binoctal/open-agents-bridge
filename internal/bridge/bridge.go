@@ -63,7 +63,24 @@ const (
 	batchFlushInterval = 500 * time.Millisecond
 	maxBatchSize       = 4096 // max bytes per merged message
 	offlineMaxMessages = 1000 // max offline buffered messages
+
+	// slowRetryInterval paces keep-alive reconnect attempts after the
+	// reconnect time budget is exhausted (known issue #22). Same ceiling
+	// philosophy as the stuck-mission alarm backoff (#21): a slow cadence
+	// self-recovers when the server returns instead of giving up.
+	slowRetryInterval = 5 * time.Minute
 )
+
+// enterSlowRetry atomically transitions the bridge into slow-retry mode.
+// It returns true only on the transition (the first exhausted-budget
+// observation), so the budget-exhausted error log, StateFailed transition,
+// and EventMaxRetry notification fire exactly once — not on every
+// 5-minute keep-alive attempt.
+func (b *Bridge) enterSlowRetry() bool { return !b.slowRetry.Swap(true) }
+
+// exitSlowRetry clears slow-retry mode after a successful reconnect, so a
+// later budget exhaustion announces itself again.
+func (b *Bridge) exitSlowRetry() { b.slowRetry.Store(false) }
 
 // contentBatch accumulates small content chunks for a session
 type contentBatch struct {
@@ -125,6 +142,11 @@ type Bridge struct {
 
 	// Heartbeat failure tracking for dead-connection detection
 	heartbeatFailures int
+
+	// Slow-retry mode after the reconnect time budget is exhausted
+	// (known issue #22): the bridge never gives up — it keeps trying once
+	// per slowRetryInterval so it self-recovers when the server returns.
+	slowRetry atomic.Bool
 
 	// Message batching (Scheme 1: merge small content chunks)
 	batchMu    sync.Mutex
@@ -511,15 +533,28 @@ func (b *Bridge) readLoop() {
 		// If not connected, try to connect with exponential backoff
 		if b.conn == nil {
 			if b.reconnectStrategy.HasExhaustedBudget() {
-				b.logError("[%s] Reconnect time budget exhausted (%v), giving up", logger.ModBridge, b.reconnectStrategy.TimeBudget())
-				b.stateManager.SetState(StateFailed, "time_budget_exhausted")
-				b.reconnectCallback.Notify(reconnect.Event{
-					Type:      reconnect.EventMaxRetry,
-					Attempts:  b.reconnectStrategy.Attempts(),
-					Timestamp: time.Now(),
-					Layer:     "websocket",
-				})
-				return
+				// Known issue #22: returning here made the process a zombie —
+				// Start() still blocks on <-b.done, so the bridge stayed alive
+				// with no WS, no heartbeats, and no exit, holding sessions,
+				// worktrees, and the device slot. Instead, fall back to a slow
+				// keep-alive cadence (NextDelay returns 0 once the budget is
+				// spent, so the sleep below is the only pacing).
+				if b.enterSlowRetry() {
+					b.logError("[%s] Reconnect time budget exhausted (%v), entering slow retry (one attempt every %v)",
+						logger.ModBridge, b.reconnectStrategy.TimeBudget(), slowRetryInterval)
+					b.stateManager.SetState(StateFailed, "time_budget_exhausted")
+					b.reconnectCallback.Notify(reconnect.Event{
+						Type:      reconnect.EventMaxRetry,
+						Attempts:  b.reconnectStrategy.Attempts(),
+						Timestamp: time.Now(),
+						Layer:     "websocket",
+					})
+				}
+				select {
+				case <-b.done:
+					return
+				case <-time.After(slowRetryInterval):
+				}
 			}
 
 			delay := b.reconnectStrategy.NextDelay()
@@ -557,6 +592,7 @@ func (b *Bridge) readLoop() {
 			elapsed := time.Since(startTime)
 			b.reconnectMetrics.RecordAttempt(true, elapsed)
 			b.reconnectStrategy.Reset()
+			b.exitSlowRetry() // a later exhaustion must re-announce (fresh budget)
 			b.stateManager.SetState(StateConnected, "connection_established")
 			b.flushOffline() // Send buffered messages from offline period
 			b.notifyStaleSessionsStopped()
