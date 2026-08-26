@@ -49,6 +49,15 @@ func (w *WorktreeManager) CreateWorktree(jobID, taskID string) (string, error) {
 		return "", fmt.Errorf("failed to create worktrees directory: %w", err)
 	}
 
+	// Known-issue #20: a re-dispatch creates the same task worktree again,
+	// and `git worktree add -b` fails on the existing branch — the caller
+	// then fell back to workDir "." (wrong directory, no isolation). If this
+	// task's worktree already exists (linked worktrees carry a .git file),
+	// hand back the existing path so the session resumes in place.
+	if _, err := os.Stat(filepath.Join(worktreePath, ".git")); err == nil {
+		return worktreePath, nil
+	}
+
 	// Create worktree with new branch from HEAD
 	cmd := exec.Command("git", "worktree", "add", worktreePath, "-b", branchName)
 	cmd.Dir = w.projectDir

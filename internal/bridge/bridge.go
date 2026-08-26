@@ -2705,6 +2705,12 @@ func (b *Bridge) handleWorkflowStartTask(msg Message) {
 	})
 }
 
+// isLiveTaskSession reports whether an existing session for a task ID is
+// healthy enough that a re-dispatch must not disturb it.
+func isLiveTaskSession(sess *session.Session) bool {
+	return sess != nil && sess.Status == "active" && sess.Protocol != nil && sess.Protocol.IsConnected()
+}
+
 // handleWorkflowTaskAssign handles task assignment from Orchestrator
 func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 	payload, ok := msg.Payload.(map[string]interface{})
@@ -2721,6 +2727,19 @@ func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 	worktreeBranch := getString(payload, "worktreeBranch")
 
 	b.logInfo("[%s] Workflow task assign: %s (agent: %s) in job %s", logger.ModWorkflow, taskId, agent, jobId)
+
+	// Known-issue #20: a re-dispatch for a task this bridge is already
+	// executing must not touch the live session. Previously the re-dispatch
+	// re-created the worktree (branch existed → workDir fell back to "."),
+	// failed resume on the workDir mismatch, and REPLACED the healthy
+	// session with one in the wrong directory — output lost, task stuck.
+	// The task is running here; just re-emit its start signal so the
+	// orchestrator records it as dispatched to this device.
+	if isLiveTaskSession(b.sessions.Get(taskId)) {
+		b.logWarn("[%s] Re-dispatch for live task %s (job %s): ignoring, session healthy", logger.ModWorkflow, taskId, jobId)
+		_ = b.sendMessage(taskStartedMessage(jobId, taskId, b.config.DeviceID))
+		return
+	}
 
 	// Determine working directory — use worktree if available
 	workDir := "."

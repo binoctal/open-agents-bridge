@@ -18,6 +18,13 @@ func NewManager() *Manager {
 	return &Manager{}
 }
 
+// NewManagerWithAdapter builds a manager around a pre-connected adapter.
+// Dependency-injection seam for callers (and tests) that need a manager
+// reporting a specific connection state without auto-detecting a real CLI.
+func NewManagerWithAdapter(a Adapter) *Manager {
+	return &Manager{adapter: a}
+}
+
 // Connect attempts to connect using the best available protocol
 // For ACP-capable CLIs, we always prefer ACP and don't fallback to PTY
 // If ForceProtocol is set to "pty", skip ACP and use PTY directly
