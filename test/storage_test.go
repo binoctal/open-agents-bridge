@@ -15,13 +15,13 @@ func TestStorageCreateSession(t *testing.T) {
 		t.Fatalf("NewStore failed: %v", err)
 	}
 
-	session := store.CreateSession("session_1", "device_1", "kiro", "/home/user/project")
+	session := store.CreateSession("session_1", "device_1", "claude", "/home/user/project")
 
 	if session.SessionID != "session_1" {
 		t.Errorf("SessionID = %s, want session_1", session.SessionID)
 	}
-	if session.CLIType != "kiro" {
-		t.Errorf("CLIType = %s, want kiro", session.CLIType)
+	if session.CLIType != "claude" {
+		t.Errorf("CLIType = %s, want claude", session.CLIType)
 	}
 
 	// Verify file was created
@@ -35,7 +35,7 @@ func TestStorageAddMessage(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := storage.NewStore(tmpDir)
 
-	store.CreateSession("session_1", "device_1", "kiro", "/project")
+	store.CreateSession("session_1", "device_1", "claude", "/project")
 
 	store.AddMessage("session_1", storage.Message{
 		ID:      "msg_1",
@@ -63,7 +63,7 @@ func TestStorageGetMessagesLimit(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := storage.NewStore(tmpDir)
 
-	store.CreateSession("session_1", "device_1", "kiro", "/project")
+	store.CreateSession("session_1", "device_1", "claude", "/project")
 
 	for i := 0; i < 10; i++ {
 		store.AddMessage("session_1", storage.Message{
@@ -84,7 +84,7 @@ func TestStoragePersistence(t *testing.T) {
 
 	// Create and populate store
 	store1, _ := storage.NewStore(tmpDir)
-	store1.CreateSession("session_1", "device_1", "kiro", "/project")
+	store1.CreateSession("session_1", "device_1", "claude", "/project")
 	store1.AddMessage("session_1", storage.Message{
 		ID:        "msg_1",
 		Role:      "user",
@@ -114,7 +114,7 @@ func TestStorageListSessions(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := storage.NewStore(tmpDir)
 
-	store.CreateSession("session_1", "device_1", "kiro", "/project1")
+	store.CreateSession("session_1", "device_1", "claude", "/project1")
 	store.CreateSession("session_2", "device_1", "cline", "/project2")
 
 	sessions := store.ListSessions()

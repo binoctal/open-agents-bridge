@@ -7,15 +7,39 @@ import (
 	"github.com/open-agents/open-agents-bridge/internal/logger"
 )
 
+// defaultACPHandshakeTimeout is how long we wait for the ACP process to emit
+// its first status message. Generous on purpose: a slow network or a cold npx
+// download must not be mistaken for a CLI that cannot speak ACP.
+const defaultACPHandshakeTimeout = 60 * time.Second
+
 // Manager manages protocol adapters and auto-detection
 type Manager struct {
 	adapter  Adapter
 	callback func(Message)
+
+	// acpHandshakeTimeout bounds the wait in tryACP. Zero means
+	// defaultACPHandshakeTimeout; tests shorten it via SetACPHandshakeTimeout.
+	acpHandshakeTimeout time.Duration
 }
 
 // NewManager creates a new protocol manager
 func NewManager() *Manager {
 	return &Manager{}
+}
+
+// SetACPHandshakeTimeout overrides how long Connect waits for the ACP handshake
+// before falling back to PTY. Intended for tests that drive a non-ACP command
+// and must not sit through the production timeout.
+func (m *Manager) SetACPHandshakeTimeout(d time.Duration) {
+	m.acpHandshakeTimeout = d
+}
+
+// handshakeTimeout returns the configured timeout, or the default.
+func (m *Manager) handshakeTimeout() time.Duration {
+	if m.acpHandshakeTimeout > 0 {
+		return m.acpHandshakeTimeout
+	}
+	return defaultACPHandshakeTimeout
 }
 
 // NewManagerWithAdapter builds a manager around a pre-connected adapter.
@@ -55,6 +79,11 @@ func (m *Manager) Connect(config AdapterConfig) error {
 // because ACP is the preferred protocol and may need authentication
 func (m *Manager) tryACP(config AdapterConfig) error {
 	adapter := NewACPAdapter()
+	// Connect() blocks on the initialize response, so the handshake budget has
+	// to reach the adapter — the select below is only entered after it returns.
+	if m.acpHandshakeTimeout > 0 {
+		adapter.SetInitTimeout(m.acpHandshakeTimeout)
+	}
 
 	// Channel to receive initialization status
 	// We wait up to 60 seconds for initial connection, but once connected,
@@ -102,11 +131,11 @@ func (m *Manager) tryACP(config AdapterConfig) error {
 	case err := <-initError:
 		adapter.Disconnect()
 		return fmt.Errorf("ACP connection failed: %w", err)
-	case <-time.After(60 * time.Second):
+	case <-time.After(m.handshakeTimeout()):
 		// Only timeout if ACP process doesn't respond at all
 		// This indicates the CLI doesn't support ACP
 		adapter.Disconnect()
-		return fmt.Errorf("ACP process did not respond within 60 seconds")
+		return fmt.Errorf("ACP process did not respond within %s", m.handshakeTimeout())
 	}
 }
 

@@ -12,7 +12,7 @@ func TestSessionManagerCreate(t *testing.T) {
 
 	// Use temp dir that exists
 	tmpDir := t.TempDir()
-	sess, err := mgr.Create("kiro", tmpDir)
+	sess, err := mgr.Create("claude", tmpDir)
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
@@ -20,8 +20,8 @@ func TestSessionManagerCreate(t *testing.T) {
 	if sess.ID == "" {
 		t.Error("Session ID is empty")
 	}
-	if sess.CLIType != "kiro" {
-		t.Errorf("CLIType = %s, want kiro", sess.CLIType)
+	if sess.CLIType != "claude" {
+		t.Errorf("CLIType = %s, want claude", sess.CLIType)
 	}
 	if sess.WorkDir != tmpDir {
 		t.Errorf("WorkDir = %s, want %s", sess.WorkDir, tmpDir)
@@ -35,7 +35,7 @@ func TestSessionManagerGet(t *testing.T) {
 	mgr := session.NewManager()
 	tmpDir := t.TempDir()
 
-	sess, err := mgr.Create("kiro", tmpDir)
+	sess, err := mgr.Create("claude", tmpDir)
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestSessionManagerList(t *testing.T) {
 	mgr := session.NewManager()
 	tmpDir := t.TempDir()
 
-	mgr.Create("kiro", tmpDir)
+	mgr.Create("claude", tmpDir)
 	
 	// Create another temp dir for second session
 	tmpDir2, _ := os.MkdirTemp("", "session2")
@@ -79,7 +79,7 @@ func TestSessionManagerStop(t *testing.T) {
 	mgr := session.NewManager()
 	tmpDir := t.TempDir()
 
-	sess, err := mgr.Create("kiro", tmpDir)
+	sess, err := mgr.Create("claude", tmpDir)
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestSessionManagerStopAll(t *testing.T) {
 	mgr := session.NewManager()
 	tmpDir := t.TempDir()
 
-	mgr.Create("kiro", tmpDir)
+	mgr.Create("claude", tmpDir)
 
 	mgr.StopAll()
 

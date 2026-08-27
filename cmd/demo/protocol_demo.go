@@ -1,3 +1,8 @@
+//go:build ignore
+
+// Standalone demo script. Excluded from `go build ./...` because each file
+// declares its own main; run one with `go run cmd/demo/protocol_demo.go`.
+
 package main
 
 import (

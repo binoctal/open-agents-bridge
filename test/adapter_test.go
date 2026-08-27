@@ -58,11 +58,11 @@ func TestAdapterList(t *testing.T) {
 	}
 }
 
-func TestKiroAdapter(t *testing.T) {
-	adp, _ := adapter.Get("kiro")
+func TestClaudeAdapter(t *testing.T) {
+	adp, _ := adapter.Get("claude")
 
-	if adp.Name() != "kiro" {
-		t.Errorf("Name = %s, want kiro", adp.Name())
+	if adp.Name() != "claude" {
+		t.Errorf("Name = %s, want claude", adp.Name())
 	}
 	if adp.DisplayName() == "" {
 		t.Error("DisplayName is empty")
@@ -84,7 +84,7 @@ func TestClineAdapter(t *testing.T) {
 }
 
 func TestAdapterCallbacks(t *testing.T) {
-	adp, _ := adapter.Get("kiro")
+	adp, _ := adapter.Get("claude")
 
 	// These should not panic
 	adp.OnOutput(func(e adapter.OutputEvent) {})

@@ -36,6 +36,9 @@ func TestProtocolManagerForcePTY(t *testing.T) {
 
 func TestProtocolManagerACPThenPTYFallback(t *testing.T) {
 	mgr := protocol.NewManager()
+	// Production waits 60s for the ACP handshake; shorten it so the fallback
+	// path is exercised without the test sitting through that budget.
+	mgr.SetACPHandshakeTimeout(2 * time.Second)
 
 	// Using a command that does NOT support ACP should fall back to PTY
 	config := protocol.AdapterConfig{

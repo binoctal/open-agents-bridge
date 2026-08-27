@@ -29,6 +29,11 @@ type terminalState struct {
 	doneChan  chan struct{}
 }
 
+// defaultInitTimeout is how long Connect waits for the initialize response.
+// Generous on purpose: a cold `npx` download of an agent must not be mistaken
+// for a CLI that cannot speak ACP.
+const defaultInitTimeout = 30 * time.Second
+
 // ACPAdapter implements the Agent Client Protocol (ACP)
 type ACPAdapter struct {
 	cmd        *exec.Cmd
@@ -49,6 +54,11 @@ type ACPAdapter struct {
 	outputTokens atomic.Int64
 	// Signal channels for initialization sequencing
 	initDone chan struct{} // closed when initialize response received
+	// initTimeout bounds the wait for the initialize response inside Connect.
+	// Zero means defaultInitTimeout; the Manager lowers it so protocol
+	// auto-detection against a non-ACP command doesn't block for the full
+	// production budget.
+	initTimeout time.Duration
 	// Agent-death reporting (known-issue #17): monitorProcess records the
 	// wait exit code and closes procExited; readMessages' stdout-EOF path
 	// (the authoritative death signal) picks it up and emits the same
@@ -72,6 +82,14 @@ func NewACPAdapter() *ACPAdapter {
 	}
 	a.procExitCode.Store(-1)
 	return a
+}
+
+// SetInitTimeout overrides how long Connect waits for the initialize response.
+// A non-ACP command never answers, so this bounds protocol auto-detection.
+func (a *ACPAdapter) SetInitTimeout(d time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.initTimeout = d
 }
 
 // SetWorkDir sets the working directory and initializes the safe filesystem.
@@ -421,11 +439,15 @@ func (a *ACPAdapter) initialize() error {
 	}
 
 	// Step 2: Wait for initialize response before sending session/new
+	initTimeout := a.initTimeout
+	if initTimeout <= 0 {
+		initTimeout = defaultInitTimeout
+	}
 	select {
 	case <-a.initDone:
 		logger.Info("[%s] Initialize response received, sending session/new", logger.ModACP)
-	case <-time.After(30 * time.Second):
-		return fmt.Errorf("timeout waiting for initialize response")
+	case <-time.After(initTimeout):
+		return fmt.Errorf("timeout waiting for initialize response after %s", initTimeout)
 	}
 
 	// Step 3: Create a new session
