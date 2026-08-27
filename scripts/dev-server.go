@@ -1,3 +1,9 @@
+//go:build ignore
+
+// Standalone dev script. Excluded from `go build ./...` for the same reason as
+// cmd/demo: it declares its own main, and it uses http.Request.PathValue, which
+// needs a newer stdlib than the go 1.21 floor the bridge itself targets.
+// Run it with `go run scripts/dev-server.go` on Go 1.22+.
 package main
 
 import (
