@@ -16,7 +16,7 @@ RUN go mod download
 COPY . .
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o open-agents-bridge ./cmd/open-agents
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o open-agents-bridge ./cmd/open-agents-bridge
 
 # Final stage
 FROM alpine:latest
