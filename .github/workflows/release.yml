@@ -22,12 +22,6 @@ jobs:
         with:
           go-version: "1.21"
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
-
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -42,16 +36,71 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  publish-npm:
+    needs: release
+    # `always()`, deliberately. This job publishes to a different registry than
+    # the one above, and coupling them made a half-finished release impossible
+    # to finish: when the npm step failed on an expired token, rerunning the
+    # workflow re-ran GoReleaser, which cannot re-upload assets that already
+    # exist (422 already_exists) — so it failed, and the npm half was skipped
+    # again. The release stayed on GitHub and npm stayed a version behind,
+    # with no rerun that could ever fix it.
+    #
+    # Dropping `needs`-success does not mean publishing blindly: the guard
+    # below is the real precondition, and it checks the thing that actually
+    # matters — that the tag's release carries the archives install.js will go
+    # on to download.
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
       - name: Extract version from tag
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
+      - name: Require the release to carry the archives install.js downloads
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          set -euo pipefail
+          assets=$(gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
+          echo "$assets"
+          # install.js resolves an archive for the running platform and then
+          # verifies it against checksums.txt, refusing to install if that file
+          # is missing. Publishing a package whose postinstall cannot complete
+          # is worse than not publishing at all, so require both.
+          echo "$assets" | grep -q "^checksums.txt$"
+          echo "$assets" | grep -q "^open-agents-bridge_${VERSION}_linux_amd64.tar.gz$"
+
+      - name: Skip if this version is already on the registry
+        id: published
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          set -uo pipefail
+          if npm view "@binoctal/open-agents-bridge@${VERSION}" version >/dev/null 2>&1; then
+            echo "already=true" >> $GITHUB_OUTPUT
+          else
+            echo "already=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Update package.json version
+        if: steps.published.outputs.already == 'false'
         working-directory: npm
         run: |
           npm version ${{ steps.version.outputs.VERSION }} --no-git-tag-version --allow-same-version
 
       - name: Publish to npm
+        if: steps.published.outputs.already == 'false'
         working-directory: npm
         run: npm publish --access public --tag latest
         env:
