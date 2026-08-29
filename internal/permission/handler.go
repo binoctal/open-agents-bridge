@@ -7,14 +7,18 @@ import (
 
 // Request represents a permission request from CLI
 type Request struct {
-	ID             string         `json:"id"`
-	SessionID      string         `json:"sessionId"`
-	DeviceID       string         `json:"deviceId"`
-	PermissionType string         `json:"permissionType"` // file:read | file:write | command:exec
-	Description    string         `json:"description"`
-	Detail         map[string]any `json:"detail,omitempty"`
-	Risk           string         `json:"risk"` // low | medium | high
-	Timeout        int            `json:"timeout"`
+	ID             string `json:"id"`
+	SessionID      string `json:"sessionId"`
+	DeviceID       string `json:"deviceId"`
+	PermissionType string `json:"permissionType"` // file:read | file:write | command:exec
+	// ToolName is the CLI's own name for the tool (fs_read, execute_bash, …).
+	// PermissionType above is a coarser label built for display, and the rules
+	// the user writes are keyed by tool name, so rule matching needs this one.
+	ToolName    string         `json:"toolName"`
+	Description string         `json:"description"`
+	Detail      map[string]any `json:"detail,omitempty"`
+	Risk        string         `json:"risk"` // low | medium | high
+	Timeout     int            `json:"timeout"`
 }
 
 // Response represents a permission response
@@ -25,8 +29,8 @@ type Response struct {
 
 // Handler manages pending permission requests
 type Handler struct {
-	pending  map[string]chan Response
-	mu       sync.Mutex
+	pending   map[string]chan Response
+	mu        sync.Mutex
 	onRequest func(Request)
 }
 

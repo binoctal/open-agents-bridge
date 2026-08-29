@@ -105,6 +105,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		ID:             fmt.Sprintf("perm_%d_%d", os.Getpid(), time.Now().UnixNano()),
 		SessionID:      req.SessionID,
 		PermissionType: toolToPermissionType(req.ToolName),
+		ToolName:       req.ToolName,
 		Description:    buildDescription(req.ToolName, req.ToolInput),
 		Detail:         req.ToolInput,
 		Risk:           classifyRisk(req.ToolName),

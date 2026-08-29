@@ -82,11 +82,26 @@ func newPermBridge(t *testing.T, sink *alertSink, autoRules []config.AutoApprova
 
 func cmdRequest(command string) permission.Request {
 	return permission.Request{
-		ID:             "req-1",
-		SessionID:      "sess-1",
+		ID:        "req-1",
+		SessionID: "sess-1",
+		// Both, as the hook fills them: the coarse label the web client shows,
+		// and the CLI's own tool name, which is what the user's rules name.
 		PermissionType: "command:exec",
+		ToolName:       "execute_bash",
 		Description:    "run a command",
 		Detail:         map[string]any{"command": command},
+		Timeout:        1,
+	}
+}
+
+func fileRequest(path string) permission.Request {
+	return permission.Request{
+		ID:             "req-2",
+		SessionID:      "sess-1",
+		PermissionType: "file:read",
+		ToolName:       "fs_read",
+		Description:    "read a file",
+		Detail:         map[string]any{"path": path},
 		Timeout:        1,
 	}
 }
@@ -141,7 +156,7 @@ func TestAutoApprovalWinsButStillAlerts(t *testing.T) {
 	// The user has already decided this one; an admin rule does not overrule
 	// them, but the admin still gets to hear about it.
 	b := newPermBridge(t, sink, []config.AutoApprovalRule{
-		{ID: "user-1", Tool: "command:exec", Pattern: "*", Action: "auto-approve"},
+		{ID: "user-1", Tool: "execute_bash", Pattern: "*", Action: "auto-approve"},
 	})
 	b.setCommandAlertRules([]api.CommandAlertRule{
 		{ID: "dd", Name: "dd", Pattern: `dd if=`, Severity: "critical", Action: "block"},
@@ -291,5 +306,78 @@ func TestReportingDoesNotWaitOnTheAPI(t *testing.T) {
 	b.handlePermissionRequest(cmdRequest("echo hi"))
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Errorf("the decision waited %v on the alert report", elapsed)
+	}
+}
+
+// The rules the user writes name tools the way the CLI does. The request also
+// carries a coarser display label (PermissionType), and matching against that
+// one instead meant no rule with a tool or a pattern ever fired — every request
+// fell through to "ask", which looks like "the user has no rules" rather than
+// like a bug. These pin the vocabulary at the seam.
+
+func TestAutoApprovalMatchesOnToolName(t *testing.T) {
+	sink := newAlertSink(t)
+	b := newPermBridge(t, sink, []config.AutoApprovalRule{
+		{ID: "bash", Tool: "execute_bash", Pattern: "git status", Action: "auto-approve"},
+	})
+
+	outcome, _ := b.decidePermission(cmdRequest("git status --short"))
+	if outcome != permissionApprove {
+		t.Errorf("a rule on execute_bash must match an execute_bash request, got %v", outcome)
+	}
+}
+
+func TestAutoApprovalDoesNotMatchOnPermissionType(t *testing.T) {
+	sink := newAlertSink(t)
+	// Anti-vacuity for the test above: the display label must NOT be what rules
+	// are keyed by, or the previous test would pass under the old behaviour too.
+	b := newPermBridge(t, sink, []config.AutoApprovalRule{
+		{ID: "coarse", Tool: "command:exec", Pattern: "*", Action: "auto-approve"},
+	})
+
+	if outcome, _ := b.decidePermission(cmdRequest("git status --short")); outcome != permissionAsk {
+		t.Errorf("a rule naming the display label must not match, got %v", outcome)
+	}
+}
+
+func TestPathRulesMatchFileRequests(t *testing.T) {
+	sink := newAlertSink(t)
+	b := newPermBridge(t, sink, []config.AutoApprovalRule{
+		{ID: "src", Tool: "fs_read", Pattern: "/home/u/*", Action: "auto-approve"},
+	})
+
+	if outcome, _ := b.decidePermission(fileRequest("/home/u/main.go")); outcome != permissionApprove {
+		t.Errorf("a path rule must match a file request, got %v", outcome)
+	}
+	// The pattern still has to hold: matching on tool name alone would approve
+	// everything the tool touches.
+	if outcome, _ := b.decidePermission(fileRequest("/etc/passwd")); outcome != permissionAsk {
+		t.Errorf("a path outside the pattern must still be asked, got %v", outcome)
+	}
+}
+
+func TestDenyRuleReachesTheRequest(t *testing.T) {
+	sink := newAlertSink(t)
+	b := newPermBridge(t, sink, []config.AutoApprovalRule{
+		{ID: "no-curl", Tool: "execute_bash", Pattern: "curl", Action: "deny"},
+	})
+
+	// A deny rule that never matches fails safe — the user is asked — which is
+	// why this went unnoticed. It is still the user's rule being ignored.
+	if outcome, _ := b.decidePermission(cmdRequest("curl https://x.example")); outcome != permissionDeny {
+		t.Errorf("a deny rule must refuse the request, got %v", outcome)
+	}
+}
+
+func TestUnknownToolStillReachesWildcardRules(t *testing.T) {
+	sink := newAlertSink(t)
+	b := newPermBridge(t, sink, []config.AutoApprovalRule{
+		{ID: "any", Tool: "*", Pattern: "*", Action: "auto-approve"},
+	})
+
+	req := cmdRequest("anything")
+	req.ToolName = "some_new_tool"
+	if outcome, _ := b.decidePermission(req); outcome != permissionApprove {
+		t.Errorf("a wildcard rule must cover a tool the bridge does not know, got %v", outcome)
 	}
 }

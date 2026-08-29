@@ -113,7 +113,13 @@ func (b *Bridge) decidePermission(req permission.Request) (permissionOutcome, []
 		}
 	}
 
-	action, ruleID := b.rulesEngine.Evaluate(req.PermissionType, path, command)
+	// Match on the tool name, not PermissionType. The rules the user writes
+	// name tools the way the CLI does (fs_read, execute_bash, …) — that is the
+	// vocabulary the rules UI offers and the vocabulary the engine tests
+	// against. PermissionType is the coarse display label (file:read,
+	// command:exec), and passing it here meant no rule with a tool or a
+	// pattern ever matched: every request fell through to "ask".
+	action, ruleID := b.rulesEngine.Evaluate(req.ToolName, path, command)
 
 	// Alerts are evaluated for every request, including the ones the user's own
 	// rules answer without asking. An auto-approved dangerous command is
