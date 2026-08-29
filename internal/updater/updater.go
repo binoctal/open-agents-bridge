@@ -19,8 +19,17 @@ const (
 	CheckInterval = 24 * time.Hour
 )
 
+// Release builds get these from goreleaser's -X ldflags. The defaults are what
+// a build without them reports — `go install`, or a local `go build`.
+//
+// The default deliberately is not a version number. It used to read "0.6.0",
+// which meant a `go install` build of 0.6.2 introduced itself as 0.6.0 and,
+// because CheckUpdate compares this value against the latest release, kept
+// offering an update it had already installed. "dev" compares below every
+// release, so a dev build is honestly told it is behind, and nothing has to
+// remember to bump a string here on every release.
 var (
-	version = "0.6.0"
+	version = "dev"
 	commit  = "none"
 	date    = "unknown"
 )
