@@ -32,7 +32,12 @@ jobs:
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
-          version: "~> v2"
+          # Pinned to a minor line, not "~> v2". A floating major pulls the
+          # latest v2 at run time, so a deprecation removed upstream turns the
+          # next tag push into a failed release with no warning beforehand —
+          # which is exactly how this config went stale (it still declared the
+          # v0 schema and v2 refused to load it).
+          version: "~> v2.18"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
