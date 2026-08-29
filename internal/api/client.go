@@ -103,6 +103,82 @@ func (c *Client) GetPermissionRules(project string) ([]PermissionRule, error) {
 	return resp.Rules, nil
 }
 
+// Scanner Rules
+
+// ScannerRule is an organization-wide scanner rule managed in the admin panel.
+// The field names match scanner.CustomRuleDef so the two sets can be merged
+// without a translation step; the conversion still happens in the bridge, to
+// keep this transport package free of a dependency on the scanner.
+type ScannerRule struct {
+	ID       string `json:"id"`
+	Pattern  string `json:"pattern"`
+	Category string `json:"category"`
+	Level    string `json:"level"`
+	Title    string `json:"title"`
+	Desc     string `json:"desc"`
+}
+
+func (c *Client) GetScannerRules() ([]ScannerRule, error) {
+	data, err := c.request("GET", "/api/bridge/scanner-rules", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp struct {
+		Rules []ScannerRule `json:"rules"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+
+	return resp.Rules, nil
+}
+
+// Command Alert Rules
+
+// CommandAlertRule is an organization-wide rule matched against the command a
+// permission request is asking to run.
+type CommandAlertRule struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Pattern     string `json:"pattern"`
+	Severity    string `json:"severity"`
+	Action      string `json:"action"`
+	Description string `json:"description"`
+}
+
+func (c *Client) GetCommandAlertRules() ([]CommandAlertRule, error) {
+	data, err := c.request("GET", "/api/bridge/command-alert-rules", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp struct {
+		Rules []CommandAlertRule `json:"rules"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+
+	return resp.Rules, nil
+}
+
+// SecurityAlert is an alert this device raised. The server takes the device and
+// the user from the token, so neither is sent here.
+type SecurityAlert struct {
+	RuleID      string `json:"ruleId"`
+	Severity    string `json:"severity"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	Command     string `json:"command,omitempty"`
+	SessionID   string `json:"sessionId,omitempty"`
+}
+
+func (c *Client) ReportSecurityAlert(alert SecurityAlert) error {
+	_, err := c.request("POST", "/api/bridge/security-alert", alert)
+	return err
+}
+
 // Agent Config
 
 type AgentConfig struct {

@@ -92,22 +92,32 @@ type contentBatch struct {
 }
 
 type Bridge struct {
-	config            *config.Config
-	conn              *websocket.Conn
-	sessions          *session.Manager
-	permServer        *permission.Server
-	permHandler       *permission.Handler
-	store             *storage.Store
-	s3Uploader        *storage.S3Uploader
-	rulesEngine       *rules.Engine
-	apiClient         *api.Client
-	keyPair           *crypto.KeyPair
-	webPubKey         *[crypto.KeySize]byte
-	done              chan struct{}
-	connMu            sync.Mutex // protects conn read/write and conn lifecycle only
-	mu                sync.Mutex // protects other shared state (keyPair, webPubKey, etc.)
-	mcpManager        *mcpPkg.Manager
-	scanner           *scanner.Scanner
+	config      *config.Config
+	conn        *websocket.Conn
+	sessions    *session.Manager
+	permServer  *permission.Server
+	permHandler *permission.Handler
+	store       *storage.Store
+	s3Uploader  *storage.S3Uploader
+	rulesEngine *rules.Engine
+	apiClient   *api.Client
+	keyPair     *crypto.KeyPair
+	webPubKey   *[crypto.KeySize]byte
+	done        chan struct{}
+	connMu      sync.Mutex // protects conn read/write and conn lifecycle only
+	mu          sync.Mutex // protects other shared state (keyPair, webPubKey, etc.)
+	mcpManager  *mcpPkg.Manager
+	scanner     *scanner.Scanner
+	// Custom scanner rules come from two independent places and must be kept
+	// apart: the scanner's "custom" plugin is replaced wholesale on every
+	// update, so holding only the merged set would make either source able to
+	// wipe the other. See scanner_rules.go.
+	scannerRulesMu   sync.Mutex
+	orgScannerRules  []scanner.CustomRuleDef
+	userScannerRules []scanner.CustomRuleDef
+	// Command alert rules, compiled once at sync time. See command_alerts.go.
+	commandAlertsMu   sync.Mutex
+	commandAlertRules []compiledCommandRule
 	loopDetectors     map[string]*loopdetect.Detector
 	callbackManager   *workflows.CallbackManager
 	worktreeManager   *workflows.WorktreeManager
@@ -251,7 +261,7 @@ func New(cfg *config.Config) (*Bridge, error) {
 
 	// Initialize effective whitelist from config
 	command.SetEffectiveWhitelist(command.BuildEffectiveWhitelist(cfg.CommandWhitelist))
-	b.scanner.LoadCustomRules(config.ConfigDir())
+	b.loadUserScannerRules()
 
 	// Initialize S3 uploader if configured
 	if cfg.S3Config != nil {
@@ -343,43 +353,11 @@ func (b *Bridge) Start() error {
 
 	// Sync rules from API on startup
 	go b.syncRulesFromAPI()
+	go b.syncOrgScannerRulesFromAPI()
+	go b.syncCommandAlertRulesFromAPI()
 
 	// Set up permission request forwarding with rules engine
-	b.permHandler.OnRequest(func(req permission.Request) {
-		req.DeviceID = b.config.DeviceID
-
-		// Check auto-approval rules
-		path := ""
-		command := ""
-		if req.Detail != nil {
-			if p, ok := req.Detail["path"].(string); ok {
-				path = p
-			}
-			if c, ok := req.Detail["command"].(string); ok {
-				command = c
-			}
-		}
-
-		action, ruleID := b.rulesEngine.Evaluate(req.PermissionType, path, command)
-
-		switch action {
-		case "auto-approve":
-			b.logInfo("[%s] Auto-approved by rule %s: %s", logger.ModPermission, ruleID, req.Description)
-			b.permHandler.Resolve(permission.Response{ID: req.ID, Approved: true})
-			return
-		case "deny":
-			b.logInfo("[%s] Auto-denied by rule %s: %s", logger.ModPermission, ruleID, req.Description)
-			b.permHandler.Resolve(permission.Response{ID: req.ID, Approved: false})
-			return
-		}
-
-		// Default: forward to Web for user decision
-		b.sendMessage(Message{
-			Type:      "permission:request",
-			Payload:   req,
-			Timestamp: time.Now().UnixMilli(),
-		})
-	})
+	b.permHandler.OnRequest(b.handlePermissionRequest)
 
 	// Set up session output forwarding
 	// NOTE: outputCallback is called from ACP's readMessages goroutine.
@@ -2649,9 +2627,12 @@ func (b *Bridge) handleScannerRulesSync(msg Message) {
 		}
 	}
 
-	b.scanner.ReplaceCustomRules(defs)
+	// Only the user's half is replaced. The organization rules pushed by the
+	// admin panel are not the user's to clear, and the settings page has no
+	// idea they exist — it sends the user's list and nothing else.
+	b.setUserScannerRules(defs)
 
-	// Persist to local file
+	// Persist to local file — the user's rules only, for the same reason.
 	if err := config.SaveScannerRules(defs); err != nil {
 		b.logDebug("[%s] Failed to save scanner rules: %v", logger.ModScanner, err)
 	}

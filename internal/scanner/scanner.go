@@ -54,21 +54,32 @@ func (s *Scanner) SetPluginEnabled(name string, enabled bool) {
 	s.mu.Unlock()
 }
 
-// LoadCustomRules loads user-defined rules from a JSON file and adds as plugin.
-func (s *Scanner) LoadCustomRules(configDir string) {
+// LoadCustomRuleDefs reads the rules the user saved on this device. A missing
+// or unreadable file is not an error: it means the user has no rules of their
+// own, which is the common case.
+func LoadCustomRuleDefs(configDir string) []CustomRuleDef {
 	path := filepath.Join(configDir, "scanner-rules.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return // no custom rules file, that's fine
+		return nil // no custom rules file, that's fine
 	}
 	var cfg struct {
 		CustomRules []CustomRuleDef `json:"customRules"`
 	}
-	if json.Unmarshal(data, &cfg) != nil || len(cfg.CustomRules) == 0 {
+	if json.Unmarshal(data, &cfg) != nil {
+		return nil
+	}
+	return cfg.CustomRules
+}
+
+// LoadCustomRules loads user-defined rules from a JSON file and adds as plugin.
+func (s *Scanner) LoadCustomRules(configDir string) {
+	defs := LoadCustomRuleDefs(configDir)
+	if len(defs) == 0 {
 		return
 	}
 	s.mu.Lock()
-	s.plugins = append(s.plugins, NewCustomRuleScanner(cfg.CustomRules))
+	s.plugins = append(s.plugins, NewCustomRuleScanner(defs))
 	s.mu.Unlock()
 }
 
