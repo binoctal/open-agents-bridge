@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/open-agents/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/logger"
 )
 
 // HookServer receives notifications from CLI tools via hooks

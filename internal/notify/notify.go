@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 
-	"github.com/open-agents/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/logger"
 )
 
 // Notification represents a desktop notification

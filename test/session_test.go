@@ -5,7 +5,7 @@ import (
 	"os/exec"
 	"testing"
 
-	"github.com/open-agents/open-agents-bridge/internal/session"
+	"github.com/binoctal/open-agents-bridge/internal/session"
 )
 
 // testCLIType is the CLI these tests spawn. "claude-pty" maps to the plain

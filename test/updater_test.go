@@ -3,7 +3,7 @@ package test
 import (
 	"testing"
 
-	"github.com/open-agents/open-agents-bridge/internal/updater"
+	"github.com/binoctal/open-agents-bridge/internal/updater"
 )
 
 func TestVersion(t *testing.T) {

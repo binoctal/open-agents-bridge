@@ -4,8 +4,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/open-agents/open-agents-bridge/internal/logger"
-	"github.com/open-agents/open-agents-bridge/internal/protocol"
+	"github.com/binoctal/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/protocol"
 )
 
 // CreateWithIDAndSize creates a new session with a specific ID and terminal size.

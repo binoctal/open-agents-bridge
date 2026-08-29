@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/open-agents/open-agents-bridge/internal/config"
+	"github.com/binoctal/open-agents-bridge/internal/config"
 )
 
 type S3Uploader struct {

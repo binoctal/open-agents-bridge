@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/open-agents/open-agents-bridge/internal/config"
+	"github.com/binoctal/open-agents-bridge/internal/config"
 )
 
 type Message struct {

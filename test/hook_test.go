@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/open-agents/open-agents-bridge/internal/hook"
+	"github.com/binoctal/open-agents-bridge/internal/hook"
 )
 
 func TestHookServerStart(t *testing.T) {

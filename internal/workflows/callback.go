@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/open-agents/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/logger"
 )
 
 // TaskResult encapsulates the result of a workflow task execution

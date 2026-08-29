@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/open-agents/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/logger"
 )
 
 // ServerConfig represents an MCP server configuration

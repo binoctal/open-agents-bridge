@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/open-agents/open-agents-bridge/internal/updater"
+	"github.com/binoctal/open-agents-bridge/internal/updater"
 	"github.com/spf13/cobra"
 )
 

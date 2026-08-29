@@ -1,4 +1,4 @@
-module github.com/open-agents/open-agents-bridge
+module github.com/binoctal/open-agents-bridge
 
 go 1.21
 

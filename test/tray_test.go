@@ -3,7 +3,7 @@ package test
 import (
 	"testing"
 
-	"github.com/open-agents/open-agents-bridge/internal/tray"
+	"github.com/binoctal/open-agents-bridge/internal/tray"
 )
 
 func TestTrayNew(t *testing.T) {

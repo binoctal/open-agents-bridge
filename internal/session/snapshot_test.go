@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/open-agents/open-agents-bridge/internal/protocol"
+	"github.com/binoctal/open-agents-bridge/internal/protocol"
 )
 
 func TestSnapshotManager_TakeAndRestore(t *testing.T) {

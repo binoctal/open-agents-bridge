@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/open-agents/open-agents-bridge/internal/protocol"
+	"github.com/binoctal/open-agents-bridge/internal/protocol"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════

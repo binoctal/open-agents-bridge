@@ -1,10 +1,10 @@
 package bridge
 
 import (
-	"github.com/open-agents/open-agents-bridge/internal/api"
-	"github.com/open-agents/open-agents-bridge/internal/config"
-	"github.com/open-agents/open-agents-bridge/internal/logger"
-	"github.com/open-agents/open-agents-bridge/internal/scanner"
+	"github.com/binoctal/open-agents-bridge/internal/api"
+	"github.com/binoctal/open-agents-bridge/internal/config"
+	"github.com/binoctal/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/scanner"
 )
 
 // Custom scanner rules reach this device from two places: the admin panel

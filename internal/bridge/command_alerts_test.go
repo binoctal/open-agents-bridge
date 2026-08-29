@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/open-agents/open-agents-bridge/internal/api"
-	"github.com/open-agents/open-agents-bridge/internal/config"
-	"github.com/open-agents/open-agents-bridge/internal/permission"
-	"github.com/open-agents/open-agents-bridge/internal/rules"
+	"github.com/binoctal/open-agents-bridge/internal/api"
+	"github.com/binoctal/open-agents-bridge/internal/config"
+	"github.com/binoctal/open-agents-bridge/internal/permission"
+	"github.com/binoctal/open-agents-bridge/internal/rules"
 )
 
 // alertSink is the API's /security-alert endpoint, recording what the device

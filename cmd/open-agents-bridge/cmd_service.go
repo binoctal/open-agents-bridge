@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/open-agents/open-agents-bridge/internal/service"
+	"github.com/binoctal/open-agents-bridge/internal/service"
 	"github.com/spf13/cobra"
 )
 

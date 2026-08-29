@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/open-agents/open-agents-bridge/internal/bridge"
-	"github.com/open-agents/open-agents-bridge/internal/config"
-	"github.com/open-agents/open-agents-bridge/internal/logger"
-	"github.com/open-agents/open-agents-bridge/internal/tray"
+	"github.com/binoctal/open-agents-bridge/internal/bridge"
+	"github.com/binoctal/open-agents-bridge/internal/config"
+	"github.com/binoctal/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/tray"
 	"github.com/spf13/cobra"
 )
 

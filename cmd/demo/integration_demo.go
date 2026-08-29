@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/open-agents/open-agents-bridge/internal/protocol"
-	"github.com/open-agents/open-agents-bridge/internal/session"
+	"github.com/binoctal/open-agents-bridge/internal/protocol"
+	"github.com/binoctal/open-agents-bridge/internal/session"
 )
 
 func main() {

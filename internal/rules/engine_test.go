@@ -3,7 +3,7 @@ package rules
 import (
 	"testing"
 
-	"github.com/open-agents/open-agents-bridge/internal/config"
+	"github.com/binoctal/open-agents-bridge/internal/config"
 )
 
 func TestEvaluate_StarPattern(t *testing.T) {

@@ -3,8 +3,8 @@ package bridge
 import (
 	"testing"
 
-	"github.com/open-agents/open-agents-bridge/internal/protocol"
-	"github.com/open-agents/open-agents-bridge/internal/session"
+	"github.com/binoctal/open-agents-bridge/internal/protocol"
+	"github.com/binoctal/open-agents-bridge/internal/session"
 )
 
 // fakeAdapter satisfies protocol.Adapter for liveness tests — no real CLI.

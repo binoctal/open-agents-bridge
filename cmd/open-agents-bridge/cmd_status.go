@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/open-agents/open-agents-bridge/internal/config"
+	"github.com/binoctal/open-agents-bridge/internal/config"
 	"github.com/spf13/cobra"
 )
 

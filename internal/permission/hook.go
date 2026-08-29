@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/open-agents/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/logger"
 )
 
 const SocketName = "open-agents-bridge.sock"

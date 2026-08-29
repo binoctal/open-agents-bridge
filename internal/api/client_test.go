@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/open-agents/open-agents-bridge/internal/config"
+	"github.com/binoctal/open-agents-bridge/internal/config"
 )
 
 func TestNewClient_WSSConversion(t *testing.T) {

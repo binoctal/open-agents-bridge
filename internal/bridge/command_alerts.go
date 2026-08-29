@@ -4,9 +4,9 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/open-agents/open-agents-bridge/internal/api"
-	"github.com/open-agents/open-agents-bridge/internal/logger"
-	"github.com/open-agents/open-agents-bridge/internal/permission"
+	"github.com/binoctal/open-agents-bridge/internal/api"
+	"github.com/binoctal/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/permission"
 )
 
 // Command alert rules are matched against the command a permission request

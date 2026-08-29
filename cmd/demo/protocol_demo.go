@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/open-agents/open-agents-bridge/internal/protocol"
+	"github.com/binoctal/open-agents-bridge/internal/protocol"
 )
 
 // Config for demo

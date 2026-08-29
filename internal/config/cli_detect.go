@@ -4,7 +4,7 @@ import (
 	"os/exec"
 	"sort"
 
-	"github.com/open-agents/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/logger"
 )
 
 // cliDetectMap maps CLI type names to the executable they need on PATH.

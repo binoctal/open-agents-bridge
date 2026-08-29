@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/open-agents/open-agents-bridge/internal/protocol"
+	"github.com/binoctal/open-agents-bridge/internal/protocol"
 )
 
 // SessionSnapshot represents a point-in-time snapshot of a session

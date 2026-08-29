@@ -3,7 +3,7 @@ package test
 import (
 	"testing"
 
-	"github.com/open-agents/open-agents-bridge/internal/crypto"
+	"github.com/binoctal/open-agents-bridge/internal/crypto"
 )
 
 func TestGenerateKeyPair(t *testing.T) {

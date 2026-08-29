@@ -6,9 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/open-agents/open-agents-bridge/internal/api"
-	"github.com/open-agents/open-agents-bridge/internal/config"
-	"github.com/open-agents/open-agents-bridge/internal/scanner"
+	"github.com/binoctal/open-agents-bridge/internal/api"
+	"github.com/binoctal/open-agents-bridge/internal/config"
+	"github.com/binoctal/open-agents-bridge/internal/scanner"
 )
 
 // Rules are checked by scanning, not by reading back state: what matters is

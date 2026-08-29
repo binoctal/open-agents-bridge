@@ -14,9 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/open-agents/open-agents-bridge/internal/command"
-	"github.com/open-agents/open-agents-bridge/internal/filesystem"
-	"github.com/open-agents/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/command"
+	"github.com/binoctal/open-agents-bridge/internal/filesystem"
+	"github.com/binoctal/open-agents-bridge/internal/logger"
 )
 
 // terminalState stores the state of a terminal command

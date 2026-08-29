@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/open-agents/open-agents-bridge/internal/logger"
-	"github.com/open-agents/open-agents-bridge/internal/protocol"
+	"github.com/binoctal/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/protocol"
 )
 
 type OutputCallback func(sessionID string, msg protocol.Message)

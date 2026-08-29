@@ -3,7 +3,7 @@ package test
 import (
 	"testing"
 
-	"github.com/open-agents/open-agents-bridge/internal/adapter"
+	"github.com/binoctal/open-agents-bridge/internal/adapter"
 )
 
 func TestAdapterGet(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/creack/pty"
-	"github.com/open-agents/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/logger"
 )
 
 // PTYAdapter implements the legacy PTY (pseudo-terminal) protocol
