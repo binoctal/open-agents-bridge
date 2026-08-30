@@ -34,7 +34,7 @@ type CallbackConfig struct {
 	APIURL          string        // Base URL for the API (ws://wss:// schemes normalized to http://https://)
 	DeviceID        string        // Device ID for identification
 	UserID          string        // Mission owner; sent as payload.userId (internal routes have no JWT context)
-	InternalSecret  string        // Shared secret for the API's /internal/* routes (X-Internal-Secret header)
+	DeviceToken     string        // Credential for the API's /internal/* routes; the server reads the acting user from it
 	Timeout         time.Duration // Task execution timeout (default 30min)
 	MaxRetries      int           // Max retry attempts for callback (default 3)
 	CacheDir        string        // Directory for caching failed callbacks
@@ -221,10 +221,13 @@ func (m *CallbackManager) postEvent(event map[string]interface{}) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Device-ID", m.config.DeviceID)
-	if m.config.InternalSecret != "" {
-		// The API guards /internal/* routes behind this shared secret
-		// (missions.ts internal middleware), mirroring the DO-side callback.
-		req.Header.Set("X-Internal-Secret", m.config.InternalSecret)
+	if m.config.DeviceToken != "" {
+		// The API's /internal/* middleware accepts either its own server-side
+		// shared secret or a device token. Only the second is reachable from
+		// here — the shared secret has no delivery channel to a user's machine
+		// — and the server derives the acting user from this token rather than
+		// from payload.userId above.
+		req.Header.Set("Authorization", "Bearer "+m.config.DeviceToken)
 	}
 
 	resp, err := m.client.Do(req)

@@ -97,10 +97,11 @@ func TestNewCallbackManagerNormalizesWSScheme(t *testing.T) {
 }
 
 func TestSendTaskResultUsesMissionEventRoute(t *testing.T) {
-	var gotPath, gotSecret, gotDeviceID string
+	var gotPath, gotAuth, gotSecret, gotDeviceID string
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
 		gotSecret = r.Header.Get("X-Internal-Secret")
 		gotDeviceID = r.Header.Get("X-Device-ID")
 		body, _ := io.ReadAll(r.Body)
@@ -109,7 +110,7 @@ func TestSendTaskResultUsesMissionEventRoute(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cm := NewCallbackManager(CallbackConfig{APIURL: srv.URL, DeviceID: "dev-1", UserID: "user-1", InternalSecret: "s3cret"})
+	cm := NewCallbackManager(CallbackConfig{APIURL: srv.URL, DeviceID: "dev-1", UserID: "user-1", DeviceToken: "devtok"})
 	if err := cm.SendTaskResult(TaskResult{JobID: "j1", TaskID: "t1", Success: true}); err != nil {
 		t.Fatalf("SendTaskResult: %v", err)
 	}
@@ -117,8 +118,14 @@ func TestSendTaskResultUsesMissionEventRoute(t *testing.T) {
 	if gotPath != "/api/missions/internal/orchestrator/event" {
 		t.Errorf("callback path = %q, want /api/missions/internal/orchestrator/event", gotPath)
 	}
-	if gotSecret != "s3cret" {
-		t.Errorf("X-Internal-Secret = %q, want %q", gotSecret, "s3cret")
+	// The device token is the only credential reachable from a user's machine:
+	// the API's shared secret is server-side and has no delivery channel here,
+	// which is why every callback used to 403.
+	if gotAuth != "Bearer devtok" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer devtok")
+	}
+	if gotSecret != "" {
+		t.Errorf("X-Internal-Secret = %q, want it unset", gotSecret)
 	}
 	if gotDeviceID != "dev-1" {
 		t.Errorf("X-Device-ID = %q, want dev-1", gotDeviceID)
