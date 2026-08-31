@@ -833,6 +833,25 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 			}
 		}
 
+		// An ACP agent does not exit when its turn ends — the session stays
+		// alive waiting for the next prompt, so it never carries an exit_code
+		// and the branch above never fires. A workflow task run over ACP
+		// therefore finished its work and then sat in `running` until the
+		// execution deadline swept it (live-observed in the local end-to-end
+		// on 2026-08-31: the file was edited, stopReason=end_turn arrived, no
+		// result was ever reported). For a task session the end of the turn IS
+		// the end of the task; interactive sessions must survive their turns,
+		// so this is gated on the workflow metadata.
+		if code, terminal := taskTurnExitCode(msg.Meta, sess.JobID != "" && sess.TaskID != ""); terminal {
+			sid, exitCode := sessionID, code
+			b.logInfo("[%s] ACP turn ended for task session %s (exit %d), reporting result", logger.ModWorkflow, sid, exitCode)
+			go func() {
+				if err := b.sessions.StopWithExitCode(sid, exitCode); err != nil {
+					b.logWarn("[%s] Failed to stop finished task session %s: %v", logger.ModSession, sid, err)
+				}
+			}()
+		}
+
 	case protocol.MessageTypeUsage:
 		usage, ok := msg.Content.(protocol.UsageStats)
 		if !ok {
@@ -2797,6 +2816,38 @@ func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 // orchestrator-dispatch path (known-issue #7): previously the only start
 // signal there was task_progress {progress:0, step:"started"} and the
 // task_started emitters were echoes of web-origin commands.
+// taskTurnExitCode maps the stopReason of a finished ACP turn onto the exit
+// code the session manager's exit callback expects, and reports whether the
+// turn ends the task at all.
+//
+// The PTY path gets this for free: the CLI exits, status carries exit_code,
+// and the session stops. An ACP agent instead stays alive for the next
+// prompt, so nothing stopped the session, the exit callback never fired, and
+// a task that had already done its work sat in `running` until the execution
+// deadline swept it. Only workflow task sessions end on a turn boundary —
+// an interactive ACP session must survive its turns, hence isTask.
+func taskTurnExitCode(meta map[string]interface{}, isTask bool) (int, bool) {
+	if !isTask {
+		return 0, false
+	}
+	reason, ok := meta["stopReason"].(string)
+	if !ok {
+		return 0, false
+	}
+	switch reason {
+	case "end_turn":
+		return 0, true
+	case "max_tokens", "max_turn_requests":
+		// The turn was cut off mid-work. Report a failure so the orchestrator
+		// retries or downgrades the agent instead of accepting truncated work
+		// as the task's result.
+		return 1, true
+	default:
+		// "cancelled" and anything else is not the task finishing.
+		return 0, false
+	}
+}
+
 func taskStartedMessage(jobId, taskId, deviceId string) Message {
 	return Message{
 		Type: "workflow:task_started",
