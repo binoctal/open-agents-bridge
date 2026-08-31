@@ -179,6 +179,35 @@ func (c *Client) ReportSecurityAlert(alert SecurityAlert) error {
 	return err
 }
 
+// PermissionDecision is a permission request this device's own rules engine
+// resolved without ever asking the server. Those requests never reach the
+// WebSocket path that records every other approval, so without this report the
+// audit table would show a device's human approvals and silently omit
+// everything its rules decided.
+//
+// As with SecurityAlert, the device and the user come from the token — this is
+// the table whose entire purpose is saying who let something through, so the
+// sender does not get to name itself.
+type PermissionDecision struct {
+	ID             string         `json:"id"`
+	Approved       bool           `json:"approved"`
+	RuleID         string         `json:"ruleId,omitempty"`
+	SessionID      string         `json:"sessionId,omitempty"`
+	PermissionType string         `json:"permissionType,omitempty"`
+	ToolName       string         `json:"toolName,omitempty"`
+	Description    string         `json:"description,omitempty"`
+	Detail         map[string]any `json:"detail,omitempty"`
+	Risk           string         `json:"risk,omitempty"`
+	// DecidedAt is when the bridge decided, not when the server heard about it:
+	// network latency is not part of how long an approval took.
+	DecidedAt string `json:"decidedAt,omitempty"`
+}
+
+func (c *Client) ReportPermissionDecision(d PermissionDecision) error {
+	_, err := c.request("POST", "/api/bridge/permission-decision", d)
+	return err
+}
+
 // Agent Config
 
 type AgentConfig struct {

@@ -78,14 +78,21 @@ func (b *Bridge) evaluateCommandAlerts(command string) []compiledCommandRule {
 	return hits
 }
 
-// strictestCommandAlertAction returns "block" if any hit blocks, else "warn".
-func strictestCommandAlertAction(hits []compiledCommandRule) string {
+// firstBlockingCommandAlert returns the id of the first hit that blocks, or ""
+// if none of them do. The id — not just the fact that something blocked — is
+// what the audit record needs.
+func firstBlockingCommandAlert(hits []compiledCommandRule) string {
 	for _, h := range hits {
 		if h.def.Action == "block" {
-			return "block"
+			if h.def.ID == "" {
+				// An unnamed rule still blocks. Returning "" here would read as
+				// "nothing blocked" and quietly send the request to the user.
+				return "unnamed-command-alert"
+			}
+			return h.def.ID
 		}
 	}
-	return "warn"
+	return ""
 }
 
 type permissionOutcome int
@@ -97,10 +104,14 @@ const (
 	permissionDeny
 )
 
-// decidePermission works out what happens to a request and which alert rules
-// it tripped, without acting on either. Kept separate from the acting so the
-// decision can be tested without a websocket.
-func (b *Bridge) decidePermission(req permission.Request) (permissionOutcome, []compiledCommandRule) {
+// decidePermission works out what happens to a request, which rule decided it,
+// and which alert rules it tripped, without acting on any of them. Kept
+// separate from the acting so the decision can be tested without a websocket.
+//
+// The rule id is returned, not just logged, because a locally-resolved request
+// is reported to the server for the audit trail and "which rule let this
+// through" is the one thing that record is for.
+func (b *Bridge) decidePermission(req permission.Request) (permissionOutcome, string, []compiledCommandRule) {
 	// Check auto-approval rules
 	path := ""
 	command := ""
@@ -129,20 +140,20 @@ func (b *Bridge) decidePermission(req permission.Request) (permissionOutcome, []
 	switch action {
 	case "auto-approve":
 		b.logInfo("[%s] Auto-approved by rule %s: %s", logger.ModPermission, ruleID, req.Description)
-		return permissionApprove, hits
+		return permissionApprove, ruleID, hits
 	case "deny":
 		b.logInfo("[%s] Auto-denied by rule %s: %s", logger.ModPermission, ruleID, req.Description)
-		return permissionDeny, hits
+		return permissionDeny, ruleID, hits
 	}
 
 	// A blocking alert refuses a request that would otherwise have gone to the
 	// user. It runs after the user's own rules, never over them.
-	if strictestCommandAlertAction(hits) == "block" {
-		b.logInfo("[%s] Denied by command alert rule: %s", logger.ModPermission, req.Description)
-		return permissionDeny, hits
+	if blocker := firstBlockingCommandAlert(hits); blocker != "" {
+		b.logInfo("[%s] Denied by command alert rule %s: %s", logger.ModPermission, blocker, req.Description)
+		return permissionDeny, blocker, hits
 	}
 
-	return permissionAsk, hits
+	return permissionAsk, "", hits
 }
 
 // handlePermissionRequest is the permission handler's OnRequest callback: it
@@ -151,24 +162,58 @@ func (b *Bridge) decidePermission(req permission.Request) (permissionOutcome, []
 func (b *Bridge) handlePermissionRequest(req permission.Request) {
 	req.DeviceID = b.config.DeviceID
 
-	outcome, hits := b.decidePermission(req)
+	outcome, ruleID, hits := b.decidePermission(req)
 
 	if len(hits) > 0 {
 		command, _ := req.Detail["command"].(string)
 		go b.reportCommandAlerts(req, command, hits)
 	}
 
+	// Every branch below that does NOT forward the request to the web client
+	// must also report the decision, or it leaves no trace anywhere: the server
+	// never sees the request at all, so `permission_requests` would record the
+	// device's human approvals and silently omit everything its rules decided.
+	// `permission_decision_reported_test.go` enforces this on new branches.
 	switch outcome {
 	case permissionApprove:
 		b.permHandler.Resolve(permission.Response{ID: req.ID, Approved: true})
+		go b.reportPermissionDecision(req, true, ruleID)
 	case permissionDeny:
 		b.permHandler.Resolve(permission.Response{ID: req.ID, Approved: false})
+		go b.reportPermissionDecision(req, false, ruleID)
 	default:
 		b.sendMessage(Message{
 			Type:      "permission:request",
 			Payload:   req,
 			Timestamp: time.Now().UnixMilli(),
 		})
+	}
+}
+
+// reportPermissionDecision records a request this bridge resolved by itself.
+//
+// Called on its own goroutine, always after the decision has been delivered:
+// the report is a round-trip over the public internet and an agent is blocked
+// on the answer. A failure costs one audit row and is logged; it never retries
+// into the decision path and never changes what was decided.
+func (b *Bridge) reportPermissionDecision(req permission.Request, approved bool, ruleID string) {
+	if b.apiClient == nil {
+		return
+	}
+	err := b.apiClient.ReportPermissionDecision(api.PermissionDecision{
+		ID:             req.ID,
+		Approved:       approved,
+		RuleID:         ruleID,
+		SessionID:      req.SessionID,
+		PermissionType: req.PermissionType,
+		ToolName:       req.ToolName,
+		Description:    req.Description,
+		Detail:         req.Detail,
+		Risk:           req.Risk,
+		DecidedAt:      time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		b.logWarn("[%s] Failed to report permission decision %s: %v", logger.ModPermission, req.ID, err)
 	}
 }
 

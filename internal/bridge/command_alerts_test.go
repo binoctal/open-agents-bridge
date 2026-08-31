@@ -113,7 +113,7 @@ func warnRule(id, pattern string) api.CommandAlertRule {
 // asks reports whether the request would be put to the user.
 func asks(t *testing.T, b *Bridge, req permission.Request) bool {
 	t.Helper()
-	outcome, _ := b.decidePermission(req)
+	outcome, _, _ := b.decidePermission(req)
 	return outcome == permissionAsk
 }
 
@@ -143,7 +143,7 @@ func TestBlockAlertDeniesTheRequest(t *testing.T) {
 	req := cmdRequest("dd if=/dev/zero of=/dev/sda")
 	// Asserted on the decision, not on Submit's answer: an unanswered request
 	// times out to "not approved" too, and that is not the same thing.
-	outcome, _ := b.decidePermission(req)
+	outcome, _, _ := b.decidePermission(req)
 	if outcome != permissionDeny {
 		t.Errorf("a blocking rule must refuse the request, got outcome %v", outcome)
 	}
@@ -199,7 +199,7 @@ func TestBlockWinsOverWarnAmongHits(t *testing.T) {
 		{ID: "dd", Name: "dd", Pattern: `of=/dev/`, Severity: "critical", Action: "block"},
 	})
 
-	outcome, _ := b.decidePermission(cmdRequest("dd if=/dev/zero of=/dev/sda"))
+	outcome, _, _ := b.decidePermission(cmdRequest("dd if=/dev/zero of=/dev/sda"))
 	if outcome != permissionDeny {
 		t.Errorf("one blocking hit among several must decide the outcome, got %v", outcome)
 	}
@@ -321,7 +321,7 @@ func TestAutoApprovalMatchesOnToolName(t *testing.T) {
 		{ID: "bash", Tool: "execute_bash", Pattern: "git status", Action: "auto-approve"},
 	})
 
-	outcome, _ := b.decidePermission(cmdRequest("git status --short"))
+	outcome, _, _ := b.decidePermission(cmdRequest("git status --short"))
 	if outcome != permissionApprove {
 		t.Errorf("a rule on execute_bash must match an execute_bash request, got %v", outcome)
 	}
@@ -335,7 +335,7 @@ func TestAutoApprovalDoesNotMatchOnPermissionType(t *testing.T) {
 		{ID: "coarse", Tool: "command:exec", Pattern: "*", Action: "auto-approve"},
 	})
 
-	if outcome, _ := b.decidePermission(cmdRequest("git status --short")); outcome != permissionAsk {
+	if outcome, _, _ := b.decidePermission(cmdRequest("git status --short")); outcome != permissionAsk {
 		t.Errorf("a rule naming the display label must not match, got %v", outcome)
 	}
 }
@@ -346,12 +346,12 @@ func TestPathRulesMatchFileRequests(t *testing.T) {
 		{ID: "src", Tool: "fs_read", Pattern: "/home/u/*", Action: "auto-approve"},
 	})
 
-	if outcome, _ := b.decidePermission(fileRequest("/home/u/main.go")); outcome != permissionApprove {
+	if outcome, _, _ := b.decidePermission(fileRequest("/home/u/main.go")); outcome != permissionApprove {
 		t.Errorf("a path rule must match a file request, got %v", outcome)
 	}
 	// The pattern still has to hold: matching on tool name alone would approve
 	// everything the tool touches.
-	if outcome, _ := b.decidePermission(fileRequest("/etc/passwd")); outcome != permissionAsk {
+	if outcome, _, _ := b.decidePermission(fileRequest("/etc/passwd")); outcome != permissionAsk {
 		t.Errorf("a path outside the pattern must still be asked, got %v", outcome)
 	}
 }
@@ -364,7 +364,7 @@ func TestDenyRuleReachesTheRequest(t *testing.T) {
 
 	// A deny rule that never matches fails safe — the user is asked — which is
 	// why this went unnoticed. It is still the user's rule being ignored.
-	if outcome, _ := b.decidePermission(cmdRequest("curl https://x.example")); outcome != permissionDeny {
+	if outcome, _, _ := b.decidePermission(cmdRequest("curl https://x.example")); outcome != permissionDeny {
 		t.Errorf("a deny rule must refuse the request, got %v", outcome)
 	}
 }
@@ -377,7 +377,7 @@ func TestUnknownToolStillReachesWildcardRules(t *testing.T) {
 
 	req := cmdRequest("anything")
 	req.ToolName = "some_new_tool"
-	if outcome, _ := b.decidePermission(req); outcome != permissionApprove {
+	if outcome, _, _ := b.decidePermission(req); outcome != permissionApprove {
 		t.Errorf("a wildcard rule must cover a tool the bridge does not know, got %v", outcome)
 	}
 }
