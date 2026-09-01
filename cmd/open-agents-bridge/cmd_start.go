@@ -16,9 +16,10 @@ import (
 )
 
 var (
-	logLevel   string
-	headless   bool
-	deviceName string
+	logLevel        string
+	headless        bool
+	deviceName      string
+	recordReplayDir string
 )
 
 var startCmd = &cobra.Command{
@@ -101,6 +102,17 @@ Examples:
 			os.Exit(1)
 		}
 
+		// G17 replay recording: one JSONL wire-frame script per session,
+		// used to produce the replay fixtures. Diagnostic mode — off unless
+		// the flag is passed.
+		if recordReplayDir != "" {
+			if err := b.EnableReplayRecording(recordReplayDir); err != nil {
+				fmt.Fprintf(os.Stderr, "Error enabling replay recording: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("  🎥 Recording replay scripts to: %s\n", recordReplayDir)
+		}
+
 		// Setup system tray notification
 		trayTitle := "Open Agents"
 		if cfg.DeviceName != "" {
@@ -121,7 +133,7 @@ Examples:
 			b.Stop()
 		}()
 
-	if err := b.Start(); err != nil {
+		if err := b.Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "❌ Bridge error: %v\n", err)
 			fmt.Fprintf(os.Stderr, "   See logs at: %s\n", filepath.Join(logger.GetLogDir(), "bridge.log"))
 			os.Exit(1)
@@ -134,4 +146,5 @@ func init() {
 	startCmd.Flags().StringVarP(&logLevel, "log-level", "l", "info", "Log level (error, warn, info, debug)")
 	startCmd.Flags().BoolVarP(&headless, "headless", "H", false, "Run in headless mode (no system tray)")
 	startCmd.Flags().StringVarP(&deviceName, "device", "d", "", "Device name to start (required)")
+	startCmd.Flags().StringVar(&recordReplayDir, "record-replay-dir", "", "Record ACP wire frames of every session to <dir>/<sessionID>.jsonl (replay fixture production)")
 }

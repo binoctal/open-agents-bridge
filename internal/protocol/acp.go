@@ -17,6 +17,7 @@ import (
 	"github.com/binoctal/open-agents-bridge/internal/command"
 	"github.com/binoctal/open-agents-bridge/internal/filesystem"
 	"github.com/binoctal/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/replay"
 )
 
 // terminalState stores the state of a terminal command
@@ -71,6 +72,14 @@ type ACPAdapter struct {
 	// Agent health tracking
 	consecutiveErrors atomic.Int32
 	isProcessing      atomic.Bool // true while waiting for session/prompt response
+	// Replay recording (off by default): when non-nil, raw wire frames are
+	// mirrored to a script file at the stdio boundary. A nil recorder makes
+	// every hook a no-op, so the production path pays nothing. recorderMu
+	// guards the field itself: frames are recorded from both the SendMessage
+	// caller and the readMessages goroutine, and a write failure nils the
+	// recorder from either side.
+	recorder   *replay.Recorder
+	recorderMu sync.Mutex
 }
 
 // NewACPAdapter creates a new ACP adapter
@@ -98,6 +107,43 @@ func (a *ACPAdapter) SetWorkDir(dir string) {
 	defer a.mu.Unlock()
 	a.workDir = dir
 	a.safeFS = filesystem.New(dir, filesystem.DefaultMaxFileSize)
+}
+
+// SetRecorder enables replay recording. Must be called before Connect; a
+// nil recorder (the default) keeps recording off with zero overhead.
+func (a *ACPAdapter) SetRecorder(r *replay.Recorder) {
+	a.recorderMu.Lock()
+	defer a.recorderMu.Unlock()
+	a.recorder = r
+}
+
+// recordFrame mirrors one raw wire frame to the replay script. No-op when
+// recording is off; on the first write error recording is disabled so a
+// full disk cannot spam the hot path.
+func (a *ACPAdapter) recordFrame(dir replay.Direction, frame json.RawMessage) {
+	a.recorderMu.Lock()
+	defer a.recorderMu.Unlock()
+	if a.recorder == nil {
+		return
+	}
+	if err := a.recorder.Frame(dir, frame); err != nil {
+		logger.Warn("[%s] replay recording stopped: %v", logger.ModACP, err)
+		a.recorder = nil
+	}
+}
+
+// closeRecorder finalizes the replay script (if recording was on) so every
+// frame written before teardown is flushed to disk. Idempotent.
+func (a *ACPAdapter) closeRecorder() {
+	a.recorderMu.Lock()
+	defer a.recorderMu.Unlock()
+	if a.recorder == nil {
+		return
+	}
+	if err := a.recorder.Close(); err != nil {
+		logger.Warn("[%s] replay recorder close: %v", logger.ModACP, err)
+	}
+	a.recorder = nil
 }
 
 func (a *ACPAdapter) Name() string {
@@ -211,6 +257,7 @@ func (a *ACPAdapter) Disconnect() error {
 // re-entrant).
 func (a *ACPAdapter) disconnectLocked() {
 	if !a.connected.Load() {
+		a.closeRecorder()
 		return
 	}
 
@@ -243,6 +290,20 @@ func (a *ACPAdapter) disconnectLocked() {
 	if a.cmd != nil && a.cmd.Process != nil {
 		killProcessGroup(a.cmd)
 	}
+
+	a.closeRecorder()
+}
+
+// closeRecorderLocked finalizes the replay script (if recording was on) so
+// every frame written before teardown is flushed to disk. Idempotent.
+func (a *ACPAdapter) closeRecorderLocked() {
+	if a.recorder == nil {
+		return
+	}
+	if err := a.recorder.Close(); err != nil {
+		logger.Warn("[%s] replay recorder close: %v", logger.ModACP, err)
+	}
+	a.recorder = nil
 }
 
 func (a *ACPAdapter) IsConnected() bool {
@@ -528,6 +589,10 @@ func (a *ACPAdapter) readMessages() {
 			logger.Debug("[%s] Failed to parse JSON: %v", logger.ModACP, err)
 			continue
 		}
+
+		// Record the raw stdout line verbatim (only valid-JSON frames enter
+		// the script — debug noise the adapter drops would break replay).
+		a.recordFrame(replay.DirectionOut, json.RawMessage(scanner.Bytes()))
 
 		a.handleMessage(msg)
 	}
@@ -1456,8 +1521,13 @@ func (a *ACPAdapter) sendJSONRPC(msg interface{}) error {
 		return err
 	}
 
-	_, err = a.stdin.Write(append(data, '\n'))
-	return err
+	if _, err := a.stdin.Write(append(data, '\n')); err != nil {
+		return err
+	}
+	// Record after a successful write: the script must contain exactly the
+	// bytes that reached the CLI's stdin (replay plays them back verbatim).
+	a.recordFrame(replay.DirectionIn, json.RawMessage(data))
+	return nil
 }
 
 // nextRequestID generates the next request ID as a string with "bridge_" prefix.

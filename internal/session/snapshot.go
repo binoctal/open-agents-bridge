@@ -41,6 +41,7 @@ func (sm *SnapshotManager) TakeSnapshot(sess *Session, history []protocol.Messag
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	jobID, taskID, _ := sess.GetMultiAgentMetadata()
 	snapshot := &SessionSnapshot{
 		SessionID: sess.ID,
 		CLIType:   sess.CLIType,
@@ -50,8 +51,8 @@ func (sm *SnapshotManager) TakeSnapshot(sess *Session, history []protocol.Messag
 		Context: map[string]interface{}{
 			"status":     sess.Status,
 			"created_at": sess.CreatedAt,
-			"job_id":     sess.JobID,
-			"task_id":    sess.TaskID,
+			"job_id":     jobID,
+			"task_id":    taskID,
 		},
 		Timestamp: time.Now(),
 		Version:   "1.0",

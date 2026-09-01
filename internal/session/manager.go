@@ -2,6 +2,8 @@ package session
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +26,9 @@ type Manager struct {
 	queue            []QueueItem
 	queueMu          sync.Mutex
 	ioLogger         *logger.IOLogger // I/O logger for debugging and auditing
+	// replayDir, when non-empty, mirrors every ACP session's raw wire
+	// frames to <replayDir>/<sessionID>.jsonl (G17 replay recording).
+	replayDir string
 }
 
 type QueueItem struct {
@@ -52,12 +57,17 @@ type Session struct {
 	Config         protocol.AdapterConfig // Store config for reconnection
 	ioLogger       *logger.IOLogger       // I/O logger for this session
 
-	// Multi-agent task metadata
+	// Multi-agent task metadata. Guarded by metaMu: the session-creation
+	// status message fires the output callback chain before
+	// launchTaskSession gets to SetMultiAgentMetadata, so JobID/TaskID are
+	// written and read from different goroutines (found by the G17 replay
+	// suite under -race).
 	JobID     string    // Associated multi-agent job ID (if any)
 	TaskID    string    // Associated multi-agent task ID (if any)
 	StartedAt time.Time // Task start time for duration tracking
-	Output    []byte    // Collected CLI output for artifacts extraction
-	ExitCode  int       // Process exit code (set when session exits)
+	metaMu    sync.RWMutex
+	Output    []byte // Collected CLI output for artifacts extraction
+	ExitCode  int    // Process exit code (set when session exits)
 
 	// Resume context: prompt prefix injected on first user message
 	ResumeContext string
@@ -134,6 +144,13 @@ func (m *Manager) SetExitCallback(callback ExitCallback) {
 // SetIOLogger sets the I/O logger for the session manager
 func (m *Manager) SetIOLogger(ioLogger *logger.IOLogger) {
 	m.ioLogger = ioLogger
+}
+
+// SetReplayDir enables ACP wire-frame recording into dir (one JSONL script
+// per session, named <sessionID>.jsonl). An empty dir keeps recording off —
+// the default and the production state.
+func (m *Manager) SetReplayDir(dir string) {
+	m.replayDir = dir
 }
 
 func (m *Manager) Create(cliType, workDir string) (*Session, error) {
@@ -330,33 +347,49 @@ func (m *Manager) applyPermissionMode(permissionMode, cliType string, config *pr
 	}
 }
 
-func (m *Manager) getCLICommand(cliType string) (string, []string) {
+func (m *Manager) getCLICommand(cliType string) (string, []string, error) {
 	switch cliType {
 	case "claude":
 		// Claude Code ACP via npx (package renamed from @zed-industries/claude-code-acp)
-		return "npx", []string{"@agentclientprotocol/claude-agent-acp"}
+		return "npx", []string{"@agentclientprotocol/claude-agent-acp"}, nil
 	case "claude-pty":
 		// Claude Code PTY mode - full REPL with slash commands support
-		return "claude", nil
+		return "claude", nil, nil
 	case "qwen":
-		return "qwen-code", []string{"--experimental-acp"}
+		return "qwen-code", []string{"--experimental-acp"}, nil
 	case "goose":
-		return "goose", []string{"acp"}
+		return "goose", []string{"acp"}, nil
 	case "gemini":
-		return "gemini-cli", []string{"--acp"}
+		return "gemini-cli", []string{"--acp"}, nil
 	case "kiro":
-		return "kiro", []string{"chat"}
+		return "kiro", []string{"chat"}, nil
 	case "cline":
-		return "cline", nil
+		return "cline", nil, nil
 	case "codex":
-		return "codex", nil
+		return "codex", nil, nil
 	case "aider":
 		// Aider - AI pair programming in terminal (PTY mode)
 		// Installation: pip install aider-chat
 		// Uses its own protocol, not ACP
-		return "aider", []string{"--no-auto-commits", "--pretty"}
+		return "aider", []string{"--no-auto-commits", "--pretty"}, nil
+	case "replay":
+		// G17 replay shim: the command comes from the environment so
+		// production code never references the test binary. The shim reads
+		// OA_REPLAY_SCRIPT itself. Missing env is a hard error — a
+		// production dispatch with agent="replay" must fail loudly here,
+		// not exec an empty command (spec scenario "Missing shim command
+		// fails loud").
+		cmd := os.Getenv("OA_REPLAY_SHIM")
+		if cmd == "" {
+			return "", nil, fmt.Errorf("cliType %q requires OA_REPLAY_SHIM to point at the replay shim executable", cliType)
+		}
+		var args []string
+		if extra := os.Getenv("OA_REPLAY_SHIM_ARGS"); extra != "" {
+			args = strings.Fields(extra)
+		}
+		return cmd, args, nil
 	default:
-		return cliType, nil
+		return cliType, nil, nil
 	}
 }
 
@@ -418,8 +451,7 @@ func (m *Manager) StopWithExitCode(id string, exitCode int) error {
 	}
 
 	// Store session info before deletion for callback
-	jobID := sess.JobID
-	taskID := sess.TaskID
+	jobID, taskID, _ := sess.GetMultiAgentMetadata()
 
 	delete(m.sessions, id)
 
@@ -475,6 +507,8 @@ func (s *Session) Send(input string) error {
 
 // SetMultiAgentMetadata sets the multi-agent task metadata for a session
 func (s *Session) SetMultiAgentMetadata(jobID, taskID string) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
 	s.JobID = jobID
 	s.TaskID = taskID
 	s.StartedAt = time.Now()
@@ -482,7 +516,17 @@ func (s *Session) SetMultiAgentMetadata(jobID, taskID string) {
 
 // GetMultiAgentMetadata returns the multi-agent task metadata
 func (s *Session) GetMultiAgentMetadata() (jobID, taskID string, startedAt time.Time) {
+	s.metaMu.RLock()
+	defer s.metaMu.RUnlock()
 	return s.JobID, s.TaskID, s.StartedAt
+}
+
+// IsTaskSession reports whether this session is a workflow task session —
+// the gate for turn-end termination (taskTurnExitCode).
+func (s *Session) IsTaskSession() bool {
+	s.metaMu.RLock()
+	defer s.metaMu.RUnlock()
+	return s.JobID != "" && s.TaskID != ""
 }
 
 func (s *Session) Resize(cols, rows int) error {

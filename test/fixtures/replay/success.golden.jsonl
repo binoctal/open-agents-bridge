@@ -1,0 +1,4 @@
+{"kind":"header","cliType":"bridge","adapterVersion":"fixture","recordedAt":"2026-09-01T00:00:00Z","recipe":"success-path (see test/fixtures/replay/README.md)"}
+{"kind":"event","seq":0,"channel":"ws","type":"workflow:task_started","payload":{"deviceId":"device-replay","jobId":"job-success","taskId":"task-success"}}
+{"kind":"event","seq":1,"channel":"ws","type":"workflow:task_progress","payload":{"deviceId":"device-replay","jobId":"job-success","progress":0,"step":"started","taskId":"task-success"}}
+{"kind":"event","seq":2,"channel":"callback","type":"workflow:task_result","payload":{"artifacts":"Fixture task output: wrote greeting.txt.\n","commitHash":"","jobId":"job-success","missionId":"job-success","summary":"Fixture task output: wrote greeting.txt.\n","taskId":"task-success","userId":"user-replay"}}

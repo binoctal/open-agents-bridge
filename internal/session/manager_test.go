@@ -370,10 +370,10 @@ func TestSession_MultiAgentMetadata(t *testing.T) {
 func TestManager_applyPermissionMode(t *testing.T) {
 	m := NewManager()
 	cases := []struct {
-		name   string
-		mode   string
-		cli    string
-		check  func(*testing.T, *protocol.AdapterConfig)
+		name  string
+		mode  string
+		cli   string
+		check func(*testing.T, *protocol.AdapterConfig)
 	}{
 		{
 			name: "claude accept-all sets env and skip flag",
@@ -468,9 +468,9 @@ func contains(slice []string, want string) bool {
 func TestManager_getCLICommand(t *testing.T) {
 	m := NewManager()
 	cases := []struct {
-		cli       string
-		wantCmd   string
-		wantArg   string // first arg substring, "" if no args
+		cli     string
+		wantCmd string
+		wantArg string // first arg substring, "" if no args
 	}{
 		{"claude", "npx", "@agentclientprotocol/claude-agent-acp"},
 		{"claude-pty", "claude", ""},
@@ -485,7 +485,11 @@ func TestManager_getCLICommand(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.cli, func(t *testing.T) {
-			cmd, args := m.getCLICommand(c.cli)
+			cmd, args, err := m.getCLICommand(c.cli)
+			if err != nil {
+				t.Errorf("getCLICommand(%q): %v", c.cli, err)
+				return
+			}
 			if cmd != c.wantCmd {
 				t.Errorf("command = %q, want %q", cmd, c.wantCmd)
 			}

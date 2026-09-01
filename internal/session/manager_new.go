@@ -1,11 +1,16 @@
 package session
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/binoctal/open-agents-bridge/internal/logger"
 	"github.com/binoctal/open-agents-bridge/internal/protocol"
+	"github.com/binoctal/open-agents-bridge/internal/replay"
+	"github.com/binoctal/open-agents-bridge/internal/updater"
+	"github.com/google/uuid"
 )
 
 // CreateWithIDAndSize creates a new session with a specific ID and terminal size.
@@ -99,7 +104,7 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 				}
 			}
 		}
-		if sess.JobID != "" && msg.Type == protocol.MessageTypeContent {
+		if sess.IsTaskSession() && msg.Type == protocol.MessageTypeContent {
 			if content, ok := msg.Content.(string); ok {
 				sess.Output = append(sess.Output, []byte(content)...)
 			}
@@ -115,7 +120,13 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 	// --- End of locked phase ---
 
 	// --- Phase 2: Connect() outside lock (may block up to 60s for ACP handshake) ---
-	command, args := m.getCLICommand(cliType)
+	command, args, err := m.getCLICommand(cliType)
+	if err != nil {
+		m.mu.Lock()
+		delete(m.sessions, sess.ID)
+		m.mu.Unlock()
+		return nil, err
+	}
 	config := protocol.AdapterConfig{
 		WorkDir: workDir,
 		Command: command,
@@ -131,6 +142,29 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 		config.ForceProtocol = "pty"
 	}
 	m.applyPermissionMode(permissionMode, cliType, &config)
+
+	// Replay recording (G17): when enabled, hand the protocol manager a
+	// per-session recorder before Connect so the ACP adapter mirrors raw
+	// wire frames to <replayDir>/<sessionID>.jsonl. Creation failure is
+	// fail-loud — a requested recording that silently writes nothing is
+	// exactly the defect class this feature exists to catch.
+	if m.replayDir != "" {
+		rec, err := replay.NewRecorder(
+			filepath.Join(m.replayDir, sessionID+".jsonl"),
+			replay.Header{
+				CLIType:        cliType,
+				AdapterVersion: updater.Version,
+				Recipe:         os.Getenv("OA_REPLAY_RECIPE"),
+			},
+		)
+		if err != nil {
+			m.mu.Lock()
+			delete(m.sessions, sess.ID)
+			m.mu.Unlock()
+			return nil, fmt.Errorf("replay recording setup: %w", err)
+		}
+		protocolMgr.SetRecorder(rec)
+	}
 
 	if err := protocolMgr.Connect(config); err != nil {
 		// Connect failed — remove from map

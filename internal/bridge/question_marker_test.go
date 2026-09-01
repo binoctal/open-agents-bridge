@@ -51,9 +51,9 @@ func TestExtractQuestion(t *testing.T) {
 		{
 			name:                "mid-line mention does not match",
 			content:             "The docs say to use [QUESTION] markers when stuck.",
-			firstLineIsBoundary:  true,
-			want:                 "",
-			found:                false,
+			firstLineIsBoundary: true,
+			want:                "",
+			found:               false,
 		},
 		{
 			// Dogfood 2026-08-22: a PTY read split the echoed instruction
@@ -61,23 +61,23 @@ func TestExtractQuestion(t *testing.T) {
 			// "[QUESTION]" but is not at a line start.
 			name:                "chunk beginning mid-line at the marker does not match",
 			content:             "[QUESTION] Should I use JWT or session-based authentication?",
-			firstLineIsBoundary:  false,
-			want:                 "",
-			found:                false,
+			firstLineIsBoundary: false,
+			want:                "",
+			found:               false,
 		},
 		{
 			name:                "later lines are true line starts even when the chunk begins mid-line",
 			content:             "Should I use JWT or session-based authentication?\n[QUESTION] Actually, wait?",
-			firstLineIsBoundary:  false,
-			want:                 "Actually, wait?",
-			found:                true,
+			firstLineIsBoundary: false,
+			want:                "Actually, wait?",
+			found:               true,
 		},
 		{
 			name:                "marker with empty question is ignored",
 			content:             "[QUESTION]",
-			firstLineIsBoundary:  true,
-			want:                 "",
-			found:                false,
+			firstLineIsBoundary: true,
+			want:                "",
+			found:               false,
 		},
 	}
 	for _, tc := range cases {
@@ -169,5 +169,94 @@ func TestChunkStartsAtLineBoundary(t *testing.T) {
 	}
 	if !b.chunkStartsAtLineBoundary("s2", "independent session starts aligned") {
 		t.Fatal("session state must be independent")
+	}
+}
+
+// TestExtractQuestionAdversarial pins the extraction contract against
+// terminal-shaped corruption (G17 task 5.2). Each case is a way real PTY
+// output has (or plausibly would) corrupt a marker mention; none of them
+// may fire a question.
+func TestExtractQuestionAdversarial(t *testing.T) {
+	cases := []struct {
+		name                string
+		content             string
+		firstLineIsBoundary bool
+		want                string
+		found               bool
+	}{
+		{
+			// A terminal hard-wrap can split the marker TOKEN itself; the
+			// continuation line starts mid-marker and must not match.
+			name:                "wrap splits the marker token",
+			content:             "echo: [QUEST\nION] Should I use JWT?",
+			firstLineIsBoundary: true,
+			want:                "",
+			found:               false,
+		},
+		{
+			// Same-line prefix before the marker: not a line start.
+			name:                "same-line prefix before the marker",
+			content:             "Working. [QUESTION] Really proceed?",
+			firstLineIsBoundary: true,
+			want:                "",
+			found:               false,
+		},
+		{
+			// The question text must live on the marker's own line; a marker
+			// line with nothing after it is not a question.
+			name:                "question text on the next line is not extracted",
+			content:             "[QUESTION]\nWhat about the migration?",
+			firstLineIsBoundary: true,
+			want:                "",
+			found:               false,
+		},
+		{
+			// Whitespace-only question equals empty question.
+			name:                "marker with whitespace-only question",
+			content:             "[QUESTION]   \t ",
+			firstLineIsBoundary: true,
+			want:                "",
+			found:               false,
+		},
+		{
+			// A wrapped same-line mention: the wrap lands BEFORE the marker,
+			// putting it at a true line start of a line that is really the
+			// continuation of a sentence. Line-prefix detection cannot catch
+			// this one — it is exactly why buildTaskPrompt must not contain
+			// the literal marker (see TestBuildTaskPromptOmitsLiteral...).
+			// Pinned here to document the residual, accepted gap.
+			name:                "wrap immediately before a mentioned marker still fires (known gap)",
+			content:             "The instructions say to use\n[QUESTION] markers when stuck.",
+			firstLineIsBoundary: true,
+			want:                "markers when stuck.",
+			found:               true,
+		},
+		{
+			// Multiple markers: the first with a non-empty question wins.
+			name:                "first non-empty marker question wins",
+			content:             "[QUESTION]\n[QUESTION] First real one?",
+			firstLineIsBoundary: true,
+			want:                "First real one?",
+			found:               true,
+		},
+		{
+			// Trailing \r on the marker line must not end up in the question.
+			name:                "trailing CR stripped from the question",
+			content:             "[QUESTION] Proceed?\r",
+			firstLineIsBoundary: true,
+			want:                "Proceed?",
+			found:               true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, found := extractQuestion(tc.content, tc.firstLineIsBoundary)
+			if found != tc.found {
+				t.Fatalf("found = %v, want %v (content: %q)", found, tc.found, tc.content)
+			}
+			if got != tc.want {
+				t.Fatalf("question = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

@@ -17,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/binoctal/open-agents-bridge/internal/alert"
 	"github.com/binoctal/open-agents-bridge/internal/api"
 	"github.com/binoctal/open-agents-bridge/internal/command"
@@ -31,11 +30,14 @@ import (
 	"github.com/binoctal/open-agents-bridge/internal/permission"
 	"github.com/binoctal/open-agents-bridge/internal/protocol"
 	"github.com/binoctal/open-agents-bridge/internal/reconnect"
+	"github.com/binoctal/open-agents-bridge/internal/replay"
 	"github.com/binoctal/open-agents-bridge/internal/rules"
 	"github.com/binoctal/open-agents-bridge/internal/scanner"
 	"github.com/binoctal/open-agents-bridge/internal/session"
 	"github.com/binoctal/open-agents-bridge/internal/storage"
+	"github.com/binoctal/open-agents-bridge/internal/updater"
 	"github.com/binoctal/open-agents-bridge/internal/workflows"
+	"github.com/gorilla/websocket"
 )
 
 // logDebug logs debug messages
@@ -126,6 +128,11 @@ type Bridge struct {
 	reconnectCallback *reconnect.CallbackManager
 	reconnectMetrics  *reconnect.Metrics
 	ioLogger          *logger.IOLogger // I/O logger for debugging and auditing
+	// Golden uplink recording (G17, second face of a recorded session):
+	// merges WS messages and HTTP callbacks into one time-ordered sequence.
+	// Nil unless EnableReplayRecording was called.
+	goldenMu sync.Mutex
+	golden   *replay.GoldenRecorder
 
 	// Permission ID -> Session ID mapping for precise routing
 	permSessionMap map[string]string
@@ -441,6 +448,72 @@ func (b *Bridge) Stop() {
 	if b.ioLogger != nil {
 		b.ioLogger.Close()
 	}
+
+	// Finalize the golden uplink sequence, if recording was on.
+	b.closeGolden()
+}
+
+// EnableReplayRecording mirrors every ACP session's raw wire frames to
+// <dir>/<sessionID>.jsonl for the replay test suite (G17), and every uplink
+// message (WS + HTTP callbacks) to <dir>/uplink.golden.jsonl. Creating the
+// directory up front makes a bad path fail immediately at startup instead
+// of at the first recorded session.
+func (b *Bridge) EnableReplayRecording(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("replay recording dir: %w", err)
+	}
+	b.sessions.SetReplayDir(dir)
+
+	golden, err := replay.NewGoldenRecorder(
+		filepath.Join(dir, "uplink.golden.jsonl"),
+		replay.Header{
+			CLIType:        "bridge",
+			AdapterVersion: updater.Version,
+			Recipe:         os.Getenv("OA_REPLAY_RECIPE"),
+		},
+	)
+	if err != nil {
+		return err
+	}
+	b.goldenMu.Lock()
+	b.golden = golden
+	b.goldenMu.Unlock()
+	b.callbackManager.SetGoldenRecorder(golden)
+	return nil
+}
+
+// recordGolden mirrors one uplink message to the golden sequence. Records
+// the PLAINTEXT message — the golden contract is what the bridge decided to
+// say, not the E2EE envelope shape. Nil recorder: no-op.
+func (b *Bridge) recordGolden(typ string, payload any) {
+	b.goldenMu.Lock()
+	g := b.golden
+	b.goldenMu.Unlock()
+	if g == nil {
+		return
+	}
+	if err := g.Event(replay.ChannelWS, typ, payload); err != nil {
+		logger.Warn("replay golden recording stopped: %v", err)
+		b.goldenMu.Lock()
+		b.golden = nil
+		b.goldenMu.Unlock()
+	}
+}
+
+// closeGolden finalizes the golden sequence file.
+func (b *Bridge) closeGolden() {
+	b.goldenMu.Lock()
+	g := b.golden
+	b.golden = nil
+	b.goldenMu.Unlock()
+	if g != nil {
+		if err := g.Close(); err != nil {
+			logger.Warn("replay golden close: %v", err)
+		}
+	}
 }
 
 func (b *Bridge) connect() error {
@@ -728,9 +801,10 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 		}
 
 		// Forward to workflow task output if this is a workflow task
-		if sess != nil && sess.JobID != "" && sess.TaskID != "" {
+		if sess != nil && sess.IsTaskSession() {
+			jobID, taskID, _ := sess.GetMultiAgentMetadata()
 			if contentStr, ok := msg.Content.(string); ok {
-				b.sendTaskOutput(sess.JobID, sess.TaskID, "stdout", contentStr)
+				b.sendTaskOutput(jobID, taskID, "stdout", contentStr)
 
 				// Detect [QUESTION] marker for human-in-the-loop
 				b.handleQuestionMarker(sessionID, sess, contentStr)
@@ -842,7 +916,7 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 		// result was ever reported). For a task session the end of the turn IS
 		// the end of the task; interactive sessions must survive their turns,
 		// so this is gated on the workflow metadata.
-		if code, terminal := taskTurnExitCode(msg.Meta, sess.JobID != "" && sess.TaskID != ""); terminal {
+		if code, terminal := taskTurnExitCode(msg.Meta, sess.IsTaskSession()); terminal {
 			sid, exitCode := sessionID, code
 			b.logInfo("[%s] ACP turn ended for task session %s (exit %d), reporting result", logger.ModWorkflow, sid, exitCode)
 			go func() {
@@ -2014,6 +2088,10 @@ func (b *Bridge) sendMessage(msg Message) error {
 		return err
 	}
 
+	// Golden recording sees the plaintext frame (pre-E2EE): the replay
+	// contract is the message the bridge decided to send, not the envelope.
+	b.recordGolden(msg.Type, msg)
+
 	b.logDebug("[%s] Sending: type=%s, size=%d, payload=%s", logger.ModBridge, msg.Type, len(data), logger.Truncate(string(data), logger.MaxPayload))
 
 	// Read encryption keys under mu (brief)
@@ -2905,13 +2983,17 @@ func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, row
 		Timestamp: time.Now().UnixMilli(),
 	})
 
+	// Store job/task metadata BEFORE sending the prompt: the turn-end
+	// terminal check (taskTurnExitCode) reads sess.JobID/TaskID, and a fast
+	// agent can answer the prompt before SetMultiAgentMetadata would have
+	// run — that ordering turned a completed turn into a task stuck in
+	// `running` forever (caught by the G17 replay suite under -race).
+	sess.SetMultiAgentMetadata(jobId, taskId)
+
 	// Send the prompt to the CLI agent
 	if err := sess.Send(prompt); err != nil {
 		b.logDebug("[%s] Failed to send prompt for task %s: %v", logger.ModWorkflow, taskId, err)
 	}
-
-	// Store job/task metadata for exit callback
-	sess.SetMultiAgentMetadata(jobId, taskId)
 
 	// Store task meta for worktree handling on exit
 	isWorktree := workDir != "."
@@ -3261,14 +3343,15 @@ func (b *Bridge) handleQuestionMarker(sessionID string, sess *session.Session, c
 		question = "Agent is asking a question"
 	}
 
-	b.logInfo("[%s] Task %s asking question: %s", logger.ModWorkflow, sess.TaskID, question)
+	jobID, taskID, _ := sess.GetMultiAgentMetadata()
+	b.logInfo("[%s] Task %s asking question: %s", logger.ModWorkflow, taskID, question)
 
 	// Send question to frontend via WebSocket
 	b.sendMessage(Message{
 		Type: "workflow:task_question",
 		Payload: map[string]interface{}{
-			"missionId": sess.JobID,
-			"taskId":    sess.TaskID,
+			"missionId": jobID,
+			"taskId":    taskID,
 			"question":  question,
 			"deviceId":  b.config.DeviceID,
 		},
@@ -3279,25 +3362,25 @@ func (b *Bridge) handleQuestionMarker(sessionID string, sess *session.Session, c
 	answerCh := make(chan string, 1)
 	b.pendingQuestionsMu.Lock()
 	// Clean up any existing pending question for this task
-	if oldCh, exists := b.pendingQuestions[sess.TaskID]; exists {
+	if oldCh, exists := b.pendingQuestions[taskID]; exists {
 		close(oldCh)
 	}
-	b.pendingQuestions[sess.TaskID] = answerCh
+	b.pendingQuestions[taskID] = answerCh
 	b.pendingQuestionsMu.Unlock()
 
 	// Wait for answer asynchronously
 	go func() {
 		select {
 		case answer := <-answerCh:
-			b.logInfo("[%s] Received answer for task %s, injecting into session", logger.ModWorkflow, sess.TaskID)
+			b.logInfo("[%s] Received answer for task %s, injecting into session", logger.ModWorkflow, taskID)
 			answerPrompt := fmt.Sprintf("User answered your question:\n%s\n\nContinue with this information.", answer)
 			if s := b.sessions.Get(sessionID); s != nil {
 				s.Send(answerPrompt)
 			}
 		case <-time.After(5 * time.Minute):
-			b.logInfo("[%s] Task %s question timed out (5min), continuing", logger.ModWorkflow, sess.TaskID)
+			b.logInfo("[%s] Task %s question timed out (5min), continuing", logger.ModWorkflow, taskID)
 			b.pendingQuestionsMu.Lock()
-			delete(b.pendingQuestions, sess.TaskID)
+			delete(b.pendingQuestions, taskID)
 			b.pendingQuestionsMu.Unlock()
 			// The waiting agent cannot proceed without an answer — terminate
 			// the session so its process-pool slot frees. Leaking it wedges
@@ -3306,7 +3389,7 @@ func (b *Bridge) handleQuestionMarker(sessionID string, sess *session.Session, c
 			// session re-asked after the web had already answered, timed
 			// out, and the pool never drained).
 			if err := b.sessions.Stop(sessionID); err != nil {
-				b.logInfo("[%s] Task %s: stopping timed-out question session: %v", logger.ModWorkflow, sess.TaskID, err)
+				b.logInfo("[%s] Task %s: stopping timed-out question session: %v", logger.ModWorkflow, taskID, err)
 			}
 		}
 	}()

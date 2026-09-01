@@ -2,9 +2,11 @@ package protocol
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/binoctal/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/replay"
 )
 
 // defaultACPHandshakeTimeout is how long we wait for the ACP process to emit
@@ -17,9 +19,19 @@ type Manager struct {
 	adapter  Adapter
 	callback func(Message)
 
+	// mu guards adapter/callback: the init callback chain can deliver
+	// messages (and readers like GetProtocolName run on those goroutines)
+	// concurrently with tryACP/tryPTY still finishing their assignment.
+	mu sync.RWMutex
+
 	// acpHandshakeTimeout bounds the wait in tryACP. Zero means
 	// defaultACPHandshakeTimeout; tests shorten it via SetACPHandshakeTimeout.
 	acpHandshakeTimeout time.Duration
+
+	// recorder, when non-nil, is attached to the ACP adapter before Connect
+	// so its wire frames are mirrored to a replay script. Nil (default)
+	// keeps recording off. Only the ACP path records — PTY has no frames.
+	recorder *replay.Recorder
 }
 
 // NewManager creates a new protocol manager
@@ -32,6 +44,12 @@ func NewManager() *Manager {
 // and must not sit through the production timeout.
 func (m *Manager) SetACPHandshakeTimeout(d time.Duration) {
 	m.acpHandshakeTimeout = d
+}
+
+// SetRecorder enables replay recording for the next ACP connection. Must be
+// called before Connect; a nil recorder (the default) keeps recording off.
+func (m *Manager) SetRecorder(r *replay.Recorder) {
+	m.recorder = r
 }
 
 // handshakeTimeout returns the configured timeout, or the default.
@@ -84,6 +102,9 @@ func (m *Manager) tryACP(config AdapterConfig) error {
 	if m.acpHandshakeTimeout > 0 {
 		adapter.SetInitTimeout(m.acpHandshakeTimeout)
 	}
+	// Wire-frame recording, if requested. Must precede Connect so the
+	// initialize handshake itself is captured. Nil is a no-op.
+	adapter.SetRecorder(m.recorder)
 
 	// Channel to receive initialization status
 	// We wait up to 60 seconds for initial connection, but once connected,
@@ -92,7 +113,9 @@ func (m *Manager) tryACP(config AdapterConfig) error {
 	initError := make(chan error, 1)
 
 	// Subscribe to messages to detect initialization
+	m.mu.RLock()
 	originalCallback := m.callback
+	m.mu.RUnlock()
 	initCallback := func(msg Message) {
 		// Any status message means ACP is working
 		if msg.Type == MessageTypeStatus {
@@ -120,12 +143,14 @@ func (m *Manager) tryACP(config AdapterConfig) error {
 	// This only waits for the ACP process to respond, not for full session setup
 	select {
 	case <-initialized:
+		m.mu.Lock()
 		m.adapter = adapter
 		// Restore original callback after initialization
 		if originalCallback != nil {
 			adapter.Subscribe(originalCallback)
 			m.callback = originalCallback
 		}
+		m.mu.Unlock()
 		logger.Info("[%s] ACP initialized successfully", logger.ModProtocol)
 		return nil
 	case err := <-initError:
@@ -148,58 +173,77 @@ func (m *Manager) tryPTY(config AdapterConfig) error {
 		return err
 	}
 
+	m.mu.Lock()
 	m.adapter = adapter
+	m.mu.Unlock()
 	return nil
 }
 
 // Disconnect disconnects the current adapter
 func (m *Manager) Disconnect() error {
-	if m.adapter == nil {
+	m.mu.RLock()
+	adapter := m.adapter
+	m.mu.RUnlock()
+	if adapter == nil {
 		return nil
 	}
-	return m.adapter.Disconnect()
+	return adapter.Disconnect()
 }
 
 // IsConnected returns whether the adapter is connected
 func (m *Manager) IsConnected() bool {
-	if m.adapter == nil {
+	m.mu.RLock()
+	adapter := m.adapter
+	m.mu.RUnlock()
+	if adapter == nil {
 		return false
 	}
-	return m.adapter.IsConnected()
+	return adapter.IsConnected()
 }
 
 // SendMessage sends a message through the current adapter
 func (m *Manager) SendMessage(msg Message) error {
-	logger.Debug("[%s] SendMessage: adapter=%s, type=%s", logger.ModProtocol, m.adapter.Name(), msg.Type)
-	if m.adapter == nil {
+	m.mu.RLock()
+	adapter := m.adapter
+	m.mu.RUnlock()
+	if adapter == nil {
 		return fmt.Errorf("no adapter connected")
 	}
-	err := m.adapter.SendMessage(msg)
+	logger.Debug("[%s] SendMessage: adapter=%s, type=%s", logger.ModProtocol, adapter.Name(), msg.Type)
+	err := adapter.SendMessage(msg)
 	if err != nil {
-		logger.Warn("[%s] Adapter %s returned error: %v", logger.ModProtocol, m.adapter.Name(), err)
+		logger.Warn("[%s] Adapter %s returned error: %v", logger.ModProtocol, adapter.Name(), err)
 	}
 	return err
 }
 
 // Subscribe sets the message callback
 func (m *Manager) Subscribe(callback func(Message)) {
+	m.mu.Lock()
 	m.callback = callback
-	if m.adapter != nil {
-		m.adapter.Subscribe(callback)
+	adapter := m.adapter
+	m.mu.Unlock()
+	if adapter != nil {
+		adapter.Subscribe(callback)
 	}
 }
 
 // GetAdapter returns the current adapter
 func (m *Manager) GetAdapter() Adapter {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.adapter
 }
 
 // GetProtocolName returns the name of the current protocol
 func (m *Manager) GetProtocolName() string {
-	if m.adapter == nil {
+	m.mu.RLock()
+	adapter := m.adapter
+	m.mu.RUnlock()
+	if adapter == nil {
 		return "none"
 	}
-	return m.adapter.Name()
+	return adapter.Name()
 }
 
 // Reconnect attempts to reconnect a disconnected session
@@ -212,7 +256,7 @@ func (m *Manager) Reconnect(config AdapterConfig) error {
 	logger.Info("[%s] Attempting to reconnect...", logger.ModProtocol)
 
 	// Disconnect old adapter if exists
-	if m.adapter != nil {
+	if m.GetAdapter() != nil {
 		m.Disconnect()
 	}
 
