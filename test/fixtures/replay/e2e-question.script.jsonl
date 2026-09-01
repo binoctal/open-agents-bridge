@@ -1,0 +1,8 @@
+{"kind": "header", "cliType": "replay", "adapterVersion": "fixture", "recordedAt": "2026-09-01T00:00:00Z", "recipe": "e2e question: [QUESTION] marker, continue after injected answer (parity rule 5)"}
+{"kind": "frame", "seq": 0, "dir": "in", "frame": {"jsonrpc": "2.0", "id": "bridge_1", "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": true, "writeTextFile": true}, "terminal": true}}}}
+{"kind": "frame", "seq": 1, "dir": "out", "frame": {"jsonrpc": "2.0", "id": "bridge_1", "result": {"protocolVersion": 1, "agentInfo": {"name": "replay-fixture", "version": "1.0.0"}}}, "after": "initialize"}
+{"kind": "frame", "seq": 2, "dir": "in", "frame": {"jsonrpc": "2.0", "id": "bridge_2", "method": "session/new", "params": {"cwd": "/workspace", "mcpServers": []}}}
+{"kind": "frame", "seq": 3, "dir": "out", "frame": {"jsonrpc": "2.0", "id": "bridge_2", "result": {"sessionId": "fixture-session-1"}}, "after": "session/new"}
+{"kind": "frame", "seq": 4, "dir": "in", "frame": {"jsonrpc": "2.0", "id": "bridge_3", "method": "session/prompt", "params": {"sessionId": "fixture-session-1", "prompt": [{"type": "text", "text": "task"}]}}}
+{"kind": "frame", "seq": 5, "dir": "out", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "fixture-session-1", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "[QUESTION] Should the cache layer use Redis or in-memory LRU?\n"}}}}, "after": "session/prompt"}
+{"kind": "frame", "seq": 6, "dir": "out", "frame": {"jsonrpc": "2.0", "id": "bridge_3", "result": {"stopReason": "end_turn"}}, "after": "session/prompt", "afterCount": 2}

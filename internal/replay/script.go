@@ -44,12 +44,16 @@ const (
 // naming an inbound JSON-RPC method that must be received before the
 // frame is emitted during replay; this keeps the handshake order
 // (initialize -> session/new -> session/prompt) stable across replays.
+// AfterCount (default 1) makes the gate wait for the Nth occurrence of
+// the method — mid-task interactions replay as: first prompt -> partial
+// output, second prompt (the user's injected answer) -> continuation.
 type Frame struct {
-	Kind  string          `json:"kind"`
-	Seq   int             `json:"seq"`
-	Dir   Direction       `json:"dir"`
-	Frame json.RawMessage `json:"frame"`
-	After string          `json:"after,omitempty"`
+	Kind       string          `json:"kind"`
+	Seq        int             `json:"seq"`
+	Dir        Direction       `json:"dir"`
+	Frame      json.RawMessage `json:"frame"`
+	After      string          `json:"after,omitempty"`
+	AfterCount int             `json:"afterCount,omitempty"`
 }
 
 // Script is a parsed replay script.

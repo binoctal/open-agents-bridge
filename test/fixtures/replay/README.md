@@ -11,6 +11,7 @@ ACP 帧回放脚本、golden 上行序列、以及供 fs 读写帧命中的工�
 | `success.golden.jsonl` | 成功路径的 golden 上行序列（与 script 成对） |
 | `failure.script.jsonl` | 失败路径：`stopReason=max_tokens` → `workflow:task_error` |
 | `hang.script.jsonl` | 回合永不结束（排队路径测试用它占住进程池） |
+| `e2e-*.script.jsonl` | parity e2e 六场景（上游产出/下游消费/虚报完成/中途提问/并行改动×2），配合 `scripts/e2e/shim`（add-parity-e2e-verification）；`e2e-question` 用 `afterCount:2` 把 `end_turn` 门控在用户回答注入的第二个 `session/prompt` 上 |
 | `workspace/` | fixture 工作区（纯文件，无 git；任务配置 `workDir="."` 非 worktree，规避真实 CommitAll/PushBranch） |
 
 当前已提交的脚本/golden 对是**手工编写的确定性 fixture**（脚本帧格式与真实录制

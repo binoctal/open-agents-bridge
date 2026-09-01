@@ -141,3 +141,70 @@ func TestPlayerStaysAliveAfterScriptExhausted(t *testing.T) {
 		t.Fatal("player ignored cancellation")
 	}
 }
+
+// Spec scenario (add-parity-e2e-verification D2): mid-task interaction
+// replays need the gate to distinguish the FIRST session/prompt (the task)
+// from the SECOND (the user's injected answer). afterCount=1 frames play
+// on the first arrival; afterCount=2 frames must hold until the method
+// arrives a second time. Back-compat: a frame with no afterCount still
+// behaves as count=1 (asserted by every other test in this file).
+func TestPlayerAfterCountWaitsForNthOccurrence(t *testing.T) {
+	script := loadOrFatal(t,
+		`{"kind":"header","cliType":"claude"}`,
+		`{"kind":"frame","seq":0,"dir":"out","after":"session/prompt","afterCount":1,"frame":{"id":"1","result":{"stopReason":"max_tokens"}}}`,
+		`{"kind":"frame","seq":1,"dir":"out","after":"session/prompt","afterCount":2,"frame":{"id":"2","result":{"stopReason":"end_turn"}}}`,
+	)
+
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	defer stdinW.Close()
+	defer stdoutR.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- RunPlayer(ctx, stdinR, stdoutW, script) }()
+
+	lines := lineChan(stdoutR)
+
+	// No prompt yet: nothing may play.
+	select {
+	case l := <-lines:
+		t.Fatalf("frame played before any session/prompt: %s", l)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// First prompt: only the afterCount=1 frame plays.
+	writeLine(t, stdinW, `{"jsonrpc":"2.0","id":"b1","method":"session/prompt","params":{}}`)
+	select {
+	case l := <-lines:
+		if !strings.Contains(l, "max_tokens") {
+			t.Fatalf("after first prompt, frame = %s, want the count=1 frame", l)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("count=1 frame never played")
+	}
+	select {
+	case l := <-lines:
+		t.Fatalf("count=2 frame leaked after a single prompt: %s", l)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Second prompt (the user's injected answer): the count=2 frame plays.
+	writeLine(t, stdinW, `{"jsonrpc":"2.0","id":"b2","method":"session/prompt","params":{}}`)
+	select {
+	case l := <-lines:
+		if !strings.Contains(l, "end_turn") {
+			t.Fatalf("after second prompt, frame = %s, want the count=2 frame", l)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("count=2 frame never played after the second prompt")
+	}
+}
+
+func writeLine(t *testing.T, w io.Writer, line string) {
+	t.Helper()
+	if _, err := w.Write([]byte(line + "\n")); err != nil {
+		t.Fatalf("write inbound line: %v", err)
+	}
+}

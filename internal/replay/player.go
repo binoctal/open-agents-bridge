@@ -22,7 +22,7 @@ type Player struct {
 	out    *bufio.Writer
 
 	mu       sync.Mutex
-	seen     map[string]bool
+	seen     map[string]int
 	gateChan chan struct{} // closed and replaced whenever a method arrives
 
 	// err holds the first player error; checked by RunPlayer.
@@ -42,7 +42,7 @@ func RunPlayer(ctx context.Context, in io.Reader, out io.Writer, script *Script)
 		script:   script,
 		in:       scanner,
 		out:      bufio.NewWriter(out),
-		seen:     make(map[string]bool),
+		seen:     make(map[string]int),
 		gateChan: make(chan struct{}),
 		done:     make(chan struct{}),
 	}
@@ -67,7 +67,7 @@ func (p *Player) run(ctx context.Context) error {
 				continue
 			}
 			p.mu.Lock()
-			p.seen[probe.Method] = true
+			p.seen[probe.Method]++
 			close(p.gateChan)
 			p.gateChan = make(chan struct{})
 			p.mu.Unlock()
@@ -82,7 +82,11 @@ func (p *Player) run(ctx context.Context) error {
 			continue
 		}
 		if fr.After != "" {
-			if err := p.waitGate(ctx, fr.After); err != nil {
+			count := fr.AfterCount
+			if count < 1 {
+				count = 1
+			}
+			if err := p.waitGate(ctx, fr.After, count); err != nil {
 				return err
 			}
 		}
@@ -100,12 +104,13 @@ func (p *Player) run(ctx context.Context) error {
 	return nil
 }
 
-// waitGate blocks until the named inbound method has been seen or ctx is
-// cancelled. Uses the replace-closed-channel broadcast pattern.
-func (p *Player) waitGate(ctx context.Context, method string) error {
+// waitGate blocks until the named inbound method has been seen `count`
+// times or ctx is cancelled. Uses the replace-closed-channel broadcast
+// pattern.
+func (p *Player) waitGate(ctx context.Context, method string, count int) error {
 	for {
 		p.mu.Lock()
-		if p.seen[method] {
+		if p.seen[method] >= count {
 			p.mu.Unlock()
 			return nil
 		}
