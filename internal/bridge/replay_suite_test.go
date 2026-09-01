@@ -302,3 +302,42 @@ func renderGolden(events []goldenEvent) string {
 	}
 	return out + "\n]"
 }
+
+// TestReplayHandshakeReportArrivesAndMismatchSurvives is the rule-8 slice:
+// the capability report must arrive right after the WS dial (it is the
+// whole point of the registration handshake — the server cannot pair what
+// it never receives), and the server's mismatch verdict must not take the
+// bridge down: a degraded device that stops processing work would turn a
+// loud failure back into the silent one this change exists to prevent.
+func TestReplayHandshakeReportArrivesAndMismatchSurvives(t *testing.T) {
+	sink := newReplaySink(t)
+	startReplayBridge(t, sink, fixtureScript(t, "success.script.jsonl"), 1)
+
+	report := sink.waitFor(20*time.Second, "WS bridge:capability_report after connect",
+		func(ev sinkEvent) bool {
+			return ev.Channel == sinkChannelWS && ev.Type == "bridge:capability_report"
+		})
+
+	// The sink's catch-all answers the probe route with 200, so the report
+	// must carry a healthy probe conclusion and the build's version.
+	if got := payloadString(t, report, "version"); got == "" {
+		t.Error("capability_report version is empty — updater.Version must reach the wire")
+	}
+	if got := payloadString(t, report, "callbackProbe"); got != probeOK {
+		t.Errorf("capability_report callbackProbe = %q, want %q (sink answers 200)", got, probeOK)
+	}
+
+	// The verdict arrives; the bridge must keep living with it. Liveness is
+	// proven the only way that cannot lie: dispatch real work afterwards
+	// and watch the lifecycle start.
+	sink.sendHandshakeMismatch()
+	sink.sendTaskAssign("job-hs", "task-hs", "replay")
+	sink.waitFor(20*time.Second, "WS workflow:task_started for task-hs after a mismatch verdict",
+		func(ev sinkEvent) bool {
+			return ev.Channel == sinkChannelWS && isTaskEvent(ev, "workflow:task_started", "task-hs")
+		})
+	terminal := sink.assertExactlyOneTerminal(t, "task-hs")
+	if terminal.Type != "workflow:task_result" {
+		t.Fatalf("post-mismatch task must still complete, got %s", terminal.Type)
+	}
+}

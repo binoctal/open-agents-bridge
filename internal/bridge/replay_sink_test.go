@@ -195,6 +195,36 @@ func (s *replaySink) sendTaskAssign(jobID, taskID, agent string) {
 	}
 }
 
+// sendHandshakeMismatch delivers the server's pairing verdict over the WS,
+// exactly as the real room would after evaluating a capability report.
+func (s *replaySink) sendHandshakeMismatch() {
+	s.t.Helper()
+	msg := Message{
+		Type: "handshake:mismatch",
+		Payload: map[string]interface{}{
+			"mismatches": []map[string]interface{}{
+				{"reason": "callback_unreachable", "detail": "replay sink synthetic verdict"},
+			},
+		},
+		Timestamp: time.Now().UnixMilli(),
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		s.t.Fatalf("marshal handshake:mismatch: %v", err)
+	}
+	s.mu.Lock()
+	conn := s.wsConn
+	s.mu.Unlock()
+	if conn == nil {
+		s.t.Fatal("sendHandshakeMismatch: bridge WS not connected yet")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		s.t.Fatalf("write handshake:mismatch: %v", err)
+	}
+}
+
 // snapshot returns the merged sequence observed so far.
 func (s *replaySink) snapshot() []sinkEvent {
 	s.mu.Lock()

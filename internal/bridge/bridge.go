@@ -382,6 +382,10 @@ func (b *Bridge) Start() error {
 		return err
 	}
 
+	// Registration handshake: report what this bridge holds right after
+	// the first connection; the reconnect path in readLoop re-sends it.
+	go b.sendCapabilityReport()
+
 	// Clean up stale worktrees from previous sessions
 	if b.worktreeManager != nil {
 		cleaned, err := b.worktreeManager.CleanupStaleWorktrees(nil)
@@ -648,6 +652,9 @@ func (b *Bridge) readLoop() {
 			b.flushOffline() // Send buffered messages from offline period
 			b.notifyStaleSessionsStopped()
 			go b.sendSessionRestore() // Push historical sessions to frontend
+			// Re-send the capability report: the probe conclusion may have
+			// changed while disconnected (e.g. API moved, token rotated).
+			go b.sendCapabilityReport()
 			b.reconnectCallback.Notify(reconnect.Event{
 				Type:      reconnect.EventSuccess,
 				Attempts:  b.reconnectStrategy.Attempts(),
@@ -1061,6 +1068,8 @@ func (b *Bridge) handleMessage(msg Message) {
 		b.handleStorageSync(msg)
 	case "device:restart":
 		b.handleDeviceRestart(msg)
+	case "handshake:mismatch":
+		b.handleHandshakeMismatch(msg)
 	case "prompts:sync":
 		b.handlePromptsSync(msg)
 	case "mcp:sync":
