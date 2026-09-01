@@ -12,7 +12,7 @@ type Notification struct {
 	Title   string
 	Message string
 	Icon    string // Optional: icon name or path
-	 Urgency string // "low", "normal", "critical"
+	Urgency string // "low", "normal", "critical"
 }
 
 // Send sends a desktop notification using notify-send (Linux)

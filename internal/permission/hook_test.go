@@ -61,10 +61,10 @@ func TestClassifyRisk(t *testing.T) {
 
 func TestBuildDescription(t *testing.T) {
 	cases := []struct {
-		name    string
-		tool    string
-		input   map[string]any
-		want    string
+		name  string
+		tool  string
+		input map[string]any
+		want  string
 	}{
 		{
 			name:  "fs_write with path",

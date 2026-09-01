@@ -27,11 +27,11 @@ type HealthCheck struct {
 
 // HealthReport represents the overall health report
 type HealthReport struct {
-	Status    HealthStatus            `json:"status"`
-	Timestamp int64                   `json:"timestamp"`
-	Uptime    int64                   `json:"uptime"`
-	Checks    map[string]HealthCheck  `json:"checks"`
-	System    SystemMetrics           `json:"system"`
+	Status    HealthStatus           `json:"status"`
+	Timestamp int64                  `json:"timestamp"`
+	Uptime    int64                  `json:"uptime"`
+	Checks    map[string]HealthCheck `json:"checks"`
+	System    SystemMetrics          `json:"system"`
 }
 
 // HealthChecker is a function that performs a health check
@@ -39,8 +39,8 @@ type HealthChecker func() HealthCheck
 
 // HealthManager manages health checks
 type HealthManager struct {
-	checkers map[string]HealthChecker
-	mu       sync.RWMutex
+	checkers  map[string]HealthChecker
+	mu        sync.RWMutex
 	startTime time.Time
 }
 
@@ -182,7 +182,7 @@ func LiveHandler() http.HandlerFunc {
 func MemoryHealthChecker(maxMB float64) HealthChecker {
 	return func() HealthCheck {
 		metrics := GetSystemMetrics()
-		
+
 		if metrics.MemoryAllocMB > maxMB {
 			return HealthCheck{
 				Status:   HealthStatusUnhealthy,

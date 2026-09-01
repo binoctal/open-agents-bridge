@@ -14,9 +14,9 @@ import (
 type Level string
 
 const (
-	LevelInfo    Level = "info"
-	LevelWarning Level = "warning"
-	LevelError   Level = "error"
+	LevelInfo     Level = "info"
+	LevelWarning  Level = "warning"
+	LevelError    Level = "error"
 	LevelCritical Level = "critical"
 )
 
@@ -50,12 +50,12 @@ type Config struct {
 
 // EmailConfig for email alerts
 type EmailConfig struct {
-	SMTPHost     string   `json:"smtpHost"`
-	SMTPPort     int      `json:"smtpPort"`
-	Username     string   `json:"username"`
-	Password     string   `json:"password"`
-	From         string   `json:"from"`
-	Recipients   []string `json:"recipients"`
+	SMTPHost   string   `json:"smtpHost"`
+	SMTPPort   int      `json:"smtpPort"`
+	Username   string   `json:"username"`
+	Password   string   `json:"password"`
+	From       string   `json:"from"`
+	Recipients []string `json:"recipients"`
 }
 
 // Manager manages alert delivery
@@ -205,7 +205,7 @@ func (h *LogHandler) Name() string {
 
 // Send logs an alert to console
 func (h *LogHandler) Send(alert Alert) error {
-	fmt.Printf("[%s] [%s] %s: %s\n", 
+	fmt.Printf("[%s] [%s] %s: %s\n",
 		alert.Level,
 		alert.Source,
 		alert.Title,
@@ -244,9 +244,9 @@ func (h *SlackHandler) Send(alert Alert) error {
 	payload := map[string]interface{}{
 		"attachments": []map[string]interface{}{
 			{
-				"color":  color,
-				"title":  alert.Title,
-				"text":   alert.Message,
+				"color": color,
+				"title": alert.Title,
+				"text":  alert.Message,
 				"fields": []map[string]interface{}{
 					{"title": "Level", "value": alert.Level, "short": true},
 					{"title": "Source", "value": alert.Source, "short": true},
@@ -354,7 +354,7 @@ func Critical(alertType, title, message string, metadata map[string]interface{})
 
 // SessionError sends a session error alert
 func SessionError(sessionID, cliType, errorMsg string) {
-	Error("session_error", "Session Error", 
+	Error("session_error", "Session Error",
 		fmt.Sprintf("Session %s (%s) encountered an error: %s", sessionID, cliType, errorMsg),
 		map[string]interface{}{
 			"sessionId": sessionID,
@@ -368,7 +368,7 @@ func HighMemoryUsage(currentMB, thresholdMB float64) {
 	Warning("high_memory", "High Memory Usage",
 		fmt.Sprintf("Memory usage (%.2f MB) exceeds threshold (%.2f MB)", currentMB, thresholdMB),
 		map[string]interface{}{
-			"currentMB":  currentMB,
+			"currentMB":   currentMB,
 			"thresholdMB": thresholdMB,
 		},
 	)

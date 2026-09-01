@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/binoctal/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/replay"
 )
 
 // TaskResult encapsulates the result of a workflow task execution
@@ -21,12 +22,12 @@ type TaskResult struct {
 	TaskID     string `json:"taskId"`
 	Success    bool   `json:"success"`
 	ExitCode   int    `json:"exitCode"`
-	Summary    string `json:"summary"`     // Last 500 characters of output
-	Artifacts  string `json:"artifacts"`   // Full output (limited to 100KB)
-	Error      string `json:"error"`       // Error message if any
-	ErrorType  string `json:"errorType"`   // "crash", "timeout", "cancelled"
+	Summary    string `json:"summary"`   // Last 500 characters of output
+	Artifacts  string `json:"artifacts"` // Full output (limited to 100KB)
+	Error      string `json:"error"`     // Error message if any
+	ErrorType  string `json:"errorType"` // "crash", "timeout", "cancelled"
 	DurationMs int64  `json:"durationMs"`
-	CommitHash string `json:"commitHash"`  // Git commit hash from worktree (if applicable)
+	CommitHash string `json:"commitHash"` // Git commit hash from worktree (if applicable)
 }
 
 // CallbackConfig holds configuration for the callback mechanism
@@ -54,9 +55,17 @@ func DefaultCallbackConfig() CallbackConfig {
 
 // CallbackManager handles task completion callbacks to the Orchestrator
 type CallbackManager struct {
-	config   CallbackConfig
-	client   *http.Client
-	cacheMu  sync.Mutex
+	config  CallbackConfig
+	client  *http.Client
+	cacheMu sync.Mutex
+	// golden, when non-nil, mirrors every outbound callback event into the
+	// replay golden sequence (G17). Nil-safe no-op hooks.
+	golden *replay.GoldenRecorder
+}
+
+// SetGoldenRecorder enables golden recording of callback events.
+func (m *CallbackManager) SetGoldenRecorder(g *replay.GoldenRecorder) {
+	m.golden = g
 }
 
 // NewCallbackManager creates a new callback manager
@@ -151,11 +160,11 @@ func (m *CallbackManager) SendTaskError(result TaskResult) error {
 	event := map[string]interface{}{
 		"type": "workflow:task_error",
 		"payload": map[string]interface{}{
-			"missionId":  result.JobID,
-			"jobId":      result.JobID,
-			"taskId":     result.TaskID,
-			"error":      result.Error,
-			"errorType":  result.ErrorType,
+			"missionId": result.JobID,
+			"jobId":     result.JobID,
+			"taskId":    result.TaskID,
+			"error":     result.Error,
+			"errorType": result.ErrorType,
 		},
 		"timestamp": time.Now().UnixMilli(),
 	}
@@ -165,6 +174,16 @@ func (m *CallbackManager) SendTaskError(result TaskResult) error {
 
 // sendEventWithRetry sends an event with exponential backoff retry
 func (m *CallbackManager) sendEventWithRetry(event map[string]interface{}, taskID string) error {
+	// Record the logical event once, before any retry loop: the golden
+	// contract is "the bridge reported this", not the transport attempts.
+	if m.golden != nil {
+		typ, _ := event["type"].(string)
+		if err := m.golden.Event(replay.ChannelCallback, typ, event); err != nil {
+			logger.Warn("[%s] golden callback recording stopped: %v", logger.ModWorkflow, err)
+			m.golden = nil
+		}
+	}
+
 	var lastErr error
 
 	for attempt := 0; attempt < m.config.MaxRetries; attempt++ {
@@ -329,10 +348,10 @@ func (m *CallbackManager) SendTaskOutput(jobID, taskID, stream, content string) 
 		"type": "workflow:task_output",
 		"payload": map[string]interface{}{
 			"missionId": jobID,
-			"jobId":   jobID,
-			"taskId":  taskID,
-			"stream":  stream,
-			"content": content,
+			"jobId":     jobID,
+			"taskId":    taskID,
+			"stream":    stream,
+			"content":   content,
 		},
 		"timestamp": time.Now().UnixMilli(),
 	}

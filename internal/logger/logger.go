@@ -43,16 +43,16 @@ var levelFromString = map[string]int{
 
 // Module constants for structured log prefixes
 const (
-	ModBridge    = "bridge"
-	ModSession   = "session"
-	ModProtocol  = "protocol"
-	ModHeartbeat = "heartbeat"
+	ModBridge     = "bridge"
+	ModSession    = "session"
+	ModProtocol   = "protocol"
+	ModHeartbeat  = "heartbeat"
 	ModPermission = "perm"
-	ModWorkflow  = "workflow"
-	ModScanner   = "scanner"
-	ModACP       = "acp"
-	ModPTY       = "pty"
-	ModAdapter   = "adapter"
+	ModWorkflow   = "workflow"
+	ModScanner    = "scanner"
+	ModACP        = "acp"
+	ModPTY        = "pty"
+	ModAdapter    = "adapter"
 )
 
 // Global logger instance
@@ -64,7 +64,7 @@ type Logger struct {
 	file         *os.File
 	size         int64
 	level        int
-	consoleLevel int // minimum level for console (stderr) output
+	consoleLevel int  // minimum level for console (stderr) output
 	skipConsole  bool // true when stderr points to the log file (avoid duplicates)
 	mu           sync.Mutex
 }

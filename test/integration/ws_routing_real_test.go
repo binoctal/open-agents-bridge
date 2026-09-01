@@ -15,7 +15,7 @@ const wsBase = "ws://localhost:8989"
 
 // devSetupResponse mirrors the API response from POST /api/dev/setup
 type devSetupResponse struct {
-	User   *struct {
+	User *struct {
 		ID string `json:"id"`
 	} `json:"user"`
 	Device *struct {

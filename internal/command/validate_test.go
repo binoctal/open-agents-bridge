@@ -6,10 +6,10 @@ import (
 
 func TestHasShellMetacharacters(t *testing.T) {
 	tests := []struct {
-		name      string
-		cmd       string
-		want      bool
-		wantName  string
+		name     string
+		cmd      string
+		want     bool
+		wantName string
 	}{
 		{"simple command", "git status", false, ""},
 		{"pipe", "ls | grep foo", true, "pipe"},

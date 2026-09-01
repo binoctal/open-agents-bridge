@@ -10,8 +10,8 @@ import (
 // cliDetectMap maps CLI type names to the executable they need on PATH.
 // Must stay in sync with session/manager.go:getCLICommand.
 var cliDetectMap = map[string]string{
-	"claude":     "claude",     // claude-pty mode needs the claude binary
-	"claude-pty": "claude",     // same binary
+	"claude":     "claude", // claude-pty mode needs the claude binary
+	"claude-pty": "claude", // same binary
 	"qwen":       "qwen-code",
 	"goose":      "goose",
 	"gemini":     "gemini-cli",

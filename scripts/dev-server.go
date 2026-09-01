@@ -24,10 +24,10 @@ var upgrader = websocket.Upgrader{
 }
 
 type Client struct {
-	conn     *websocket.Conn
-	userID   string
+	conn       *websocket.Conn
+	userID     string
 	clientType string // "web" or "bridge"
-	deviceID string
+	deviceID   string
 }
 
 type Hub struct {

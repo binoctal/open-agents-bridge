@@ -23,12 +23,12 @@ func (f *fakeAdapter) SendMessage(protocol.Message) error {
 func (f *fakeAdapter) ReceiveMessage() (protocol.Message, error) {
 	return protocol.Message{}, nil
 }
-func (f *fakeAdapter) Subscribe(func(protocol.Message))        {}
-func (f *fakeAdapter) Capabilities() []string                  { return nil }
-func (f *fakeAdapter) SupportsPermissions() bool               { return false }
-func (f *fakeAdapter) SupportsFileOps() bool                   { return false }
-func (f *fakeAdapter) SupportsToolCalls() bool                 { return false }
-func (f *fakeAdapter) Resize(int, int) error                   { return nil }
+func (f *fakeAdapter) Subscribe(func(protocol.Message)) {}
+func (f *fakeAdapter) Capabilities() []string           { return nil }
+func (f *fakeAdapter) SupportsPermissions() bool        { return false }
+func (f *fakeAdapter) SupportsFileOps() bool            { return false }
+func (f *fakeAdapter) SupportsToolCalls() bool          { return false }
+func (f *fakeAdapter) Resize(int, int) error            { return nil }
 
 // Known-issue #20: a re-dispatch for a task this bridge is already executing
 // used to REPLACE the healthy session (worktree branch existed → workDir

@@ -23,9 +23,9 @@ func TestGenerateKeyPair(t *testing.T) {
 
 func TestEncryptDecrypt(t *testing.T) {
 	kp, _ := crypto.GenerateKeyPair()
-	
+
 	plaintext := []byte("Hello, World!")
-	
+
 	encrypted, err := kp.Encrypt(plaintext, nil)
 	if err != nil {
 		t.Fatalf("Encrypt failed: %v", err)
@@ -47,7 +47,7 @@ func TestEncryptDecrypt(t *testing.T) {
 
 func TestPublicKeyBase64(t *testing.T) {
 	kp, _ := crypto.GenerateKeyPair()
-	
+
 	b64 := kp.PublicKeyBase64()
 	if len(b64) == 0 {
 		t.Error("PublicKeyBase64 returned empty string")

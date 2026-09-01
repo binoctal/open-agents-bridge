@@ -4,18 +4,18 @@ package protocol
 type MessageType string
 
 const (
-	MessageTypeContent       MessageType = "content"        // AI response text
-	MessageTypeThought       MessageType = "thought"        // AI thinking process
-	MessageTypeToolCall      MessageType = "tool_call"      // Tool invocation
-	MessageTypePermission    MessageType = "permission"     // Permission request
-	MessageTypeStatus        MessageType = "status"         // Agent status change
-	MessageTypePlan          MessageType = "plan"           // Task plan
-	MessageTypeError         MessageType = "error"          // Error message
-	MessageTypeCancel        MessageType = "cancel"         // Cancel/interrupt operation
-	MessageTypeUsage         MessageType = "usage"          // Token usage statistics
-	MessageTypePing          MessageType = "ping"           // Ping message for connection verification
-	MessageTypePong          MessageType = "pong"           // Pong response to ping
-	MessageTypeAuthRequired  MessageType = "auth_required"  // Authentication required
+	MessageTypeContent      MessageType = "content"       // AI response text
+	MessageTypeThought      MessageType = "thought"       // AI thinking process
+	MessageTypeToolCall     MessageType = "tool_call"     // Tool invocation
+	MessageTypePermission   MessageType = "permission"    // Permission request
+	MessageTypeStatus       MessageType = "status"        // Agent status change
+	MessageTypePlan         MessageType = "plan"          // Task plan
+	MessageTypeError        MessageType = "error"         // Error message
+	MessageTypeCancel       MessageType = "cancel"        // Cancel/interrupt operation
+	MessageTypeUsage        MessageType = "usage"         // Token usage statistics
+	MessageTypePing         MessageType = "ping"          // Ping message for connection verification
+	MessageTypePong         MessageType = "pong"          // Pong response to ping
+	MessageTypeAuthRequired MessageType = "auth_required" // Authentication required
 )
 
 // AgentStatus represents the current state of the agent

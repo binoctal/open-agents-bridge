@@ -275,13 +275,13 @@ func TestProtocolToWireTypeMapping(t *testing.T) {
 	// This mapping documents how internal protocol messages map to wire messages
 	// The bridge's forwardSessionOutput() performs this translation
 	mapping := map[string]string{
-		"content":    "chat:response",  // MessageTypeContent → chat:response
-		"thought":    "chat:thought",   // MessageTypeThought → chat:thought
-		"tool_call":  "tool:call",      // MessageTypeToolCall → tool:call
+		"content":    "chat:response",      // MessageTypeContent → chat:response
+		"thought":    "chat:thought",       // MessageTypeThought → chat:thought
+		"tool_call":  "tool:call",          // MessageTypeToolCall → tool:call
 		"permission": "permission:request", // MessageTypePermission → permission:request
-		"status":     "agent:status",   // MessageTypeStatus → agent:status
-		"usage":      "session:usage",  // MessageTypeUsage → session:usage
-		"error":      "session:error",  // MessageTypeError → session:error
+		"status":     "agent:status",       // MessageTypeStatus → agent:status
+		"usage":      "session:usage",      // MessageTypeUsage → session:usage
+		"error":      "session:error",      // MessageTypeError → session:error
 	}
 
 	for protoType, wireType := range mapping {

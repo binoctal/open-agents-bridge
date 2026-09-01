@@ -26,7 +26,7 @@ func main() {
 	// Set up message callback
 	manager.SetOutputCallback(func(sessionID string, msg protocol.Message) {
 		timestamp := time.Now().Format("15:04:05")
-		
+
 		switch msg.Type {
 		case protocol.MessageTypeContent:
 			fmt.Printf("[%s] 💬 Content: %v\n", timestamp, msg.Content)
@@ -40,7 +40,7 @@ func main() {
 
 		case protocol.MessageTypePermission:
 			permReq := msg.Content.(protocol.PermissionRequest)
-			fmt.Printf("[%s] 🔐 Permission: %s - %s (risk: %s)\n", 
+			fmt.Printf("[%s] 🔐 Permission: %s - %s (risk: %s)\n",
 				timestamp, permReq.ToolName, permReq.Description, permReq.Risk)
 
 		case protocol.MessageTypeStatus:
@@ -74,7 +74,7 @@ func main() {
 
 	for _, tc := range testCases {
 		fmt.Printf("\n--- Testing: %s ---\n", tc.name)
-		
+
 		sess, err := manager.Create(tc.cliType, tc.workDir)
 		if err != nil {
 			log.Printf("❌ Failed to create session: %v\n", err)

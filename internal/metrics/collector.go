@@ -30,14 +30,14 @@ type Metric struct {
 
 // SessionMetrics tracks metrics for a single session
 type SessionMetrics struct {
-	SessionID       string    `json:"sessionId"`
-	StartTime       time.Time `json:"startTime"`
-	EndTime         time.Time `json:"endTime,omitempty"`
-	MessageCount    int64     `json:"messageCount"`
+	SessionID       string     `json:"sessionId"`
+	StartTime       time.Time  `json:"startTime"`
+	EndTime         time.Time  `json:"endTime,omitempty"`
+	MessageCount    int64      `json:"messageCount"`
 	TokenUsage      TokenUsage `json:"tokenUsage"`
-	PermissionCount int64     `json:"permissionCount"`
-	ErrorCount      int64     `json:"errorCount"`
-	ToolCallCount   int64     `json:"toolCallCount"`
+	PermissionCount int64      `json:"permissionCount"`
+	ErrorCount      int64      `json:"errorCount"`
+	ToolCallCount   int64      `json:"toolCallCount"`
 }
 
 // TokenUsage tracks token consumption
@@ -173,10 +173,10 @@ func (c *Collector) EndSession(sessionID string) {
 		duration := session.EndTime.Sub(session.StartTime).Milliseconds()
 
 		c.notifyHook(Metric{
-			Name:  "session.ended",
-			Type:  MetricTypeHistogram,
-			Value: float64(duration),
-			Tags:  c.mergeTags(map[string]string{"sessionId": sessionID}),
+			Name:      "session.ended",
+			Type:      MetricTypeHistogram,
+			Value:     float64(duration),
+			Tags:      c.mergeTags(map[string]string{"sessionId": sessionID}),
 			Timestamp: time.Now().UnixMilli(),
 			Metadata: map[string]interface{}{
 				"messageCount":    session.MessageCount,
@@ -316,13 +316,13 @@ func (c *Collector) Export() ([]byte, error) {
 	defer c.mu.RUnlock()
 
 	export := struct {
-		Timestamp    int64                       `json:"timestamp"`
-		Uptime       int64                       `json:"uptime"`
-		System       SystemMetrics               `json:"system"`
-		Counters     map[string]int64            `json:"counters"`
-		Gauges       map[string]float64          `json:"gauges"`
-		Sessions     map[string]*SessionMetrics  `json:"sessions"`
-		GlobalTags   map[string]string           `json:"globalTags"`
+		Timestamp  int64                      `json:"timestamp"`
+		Uptime     int64                      `json:"uptime"`
+		System     SystemMetrics              `json:"system"`
+		Counters   map[string]int64           `json:"counters"`
+		Gauges     map[string]float64         `json:"gauges"`
+		Sessions   map[string]*SessionMetrics `json:"sessions"`
+		GlobalTags map[string]string          `json:"globalTags"`
 	}{
 		Timestamp:  time.Now().UnixMilli(),
 		Uptime:     int64(time.Since(c.startTime).Seconds()),

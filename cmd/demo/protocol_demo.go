@@ -18,19 +18,19 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/binoctal/open-agents-bridge/internal/protocol"
+	"github.com/gorilla/websocket"
 )
 
 // Config for demo
 type DemoConfig struct {
-	ServerURL  string
-	DeviceID   string
-	UserID     string
+	ServerURL   string
+	DeviceID    string
+	UserID      string
 	DeviceToken string
-	WorkDir    string
-	Command    string
-	Args       []string
+	WorkDir     string
+	Command     string
+	Args        []string
 }
 
 // Message represents a WebSocket message
@@ -42,11 +42,11 @@ type Message struct {
 
 // WebForwarder handles forwarding messages to Web UI via WebSocket
 type WebForwarder struct {
-	conn       *websocket.Conn
-	deviceID   string
-	sessionID  string
-	pending    map[string]chan bool // permission ID -> response channel
-	mu         sync.Mutex
+	conn      *websocket.Conn
+	deviceID  string
+	sessionID string
+	pending   map[string]chan bool // permission ID -> response channel
+	mu        sync.Mutex
 }
 
 // NewWebForwarder creates a new forwarder
@@ -62,9 +62,9 @@ func NewWebForwarder(serverURL, deviceID, userID, deviceToken string) (*WebForwa
 	}
 
 	f := &WebForwarder{
-		conn:    conn,
+		conn:     conn,
 		deviceID: deviceID,
-		pending: make(map[string]chan bool),
+		pending:  make(map[string]chan bool),
 	}
 
 	go f.readLoop()

@@ -59,7 +59,7 @@ func (t *Tray) ShowNotification(title, message string) error {
 // OpenStatusPage opens the web dashboard
 func (t *Tray) OpenStatusPage() error {
 	url := "http://localhost:8080/status" // Local status page
-	
+
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
@@ -71,7 +71,7 @@ func (t *Tray) OpenStatusPage() error {
 	default:
 		return fmt.Errorf("unsupported platform")
 	}
-	
+
 	return cmd.Start()
 }
 

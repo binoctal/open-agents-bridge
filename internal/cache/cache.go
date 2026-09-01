@@ -177,7 +177,7 @@ func Exists(ctx context.Context, key string) (bool, error) {
 	defer globalCacheMu.RUnlock()
 	if globalCache == nil {
 		return false, ErrNoCache
-	 }
+	}
 	return globalCache.Exists(ctx, key)
 }
 

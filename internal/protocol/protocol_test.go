@@ -152,6 +152,8 @@ func TestACPIntegration(t *testing.T) {
 		t.Fatalf("Failed to connect: %v", err)
 	}
 
+	t.Cleanup(func() { _ = manager.Disconnect() })
+
 	// Should fallback to PTY for echo command
 	if manager.GetProtocolName() != "pty" {
 		t.Errorf("Expected PTY protocol for echo, got '%s'", manager.GetProtocolName())
@@ -172,6 +174,4 @@ func TestACPIntegration(t *testing.T) {
 			return
 		}
 	}
-
-	manager.Disconnect()
 }

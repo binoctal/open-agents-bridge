@@ -10,8 +10,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/binoctal/open-agents-bridge/internal/config"
+	"github.com/gorilla/websocket"
 )
 
 type Message struct {
@@ -65,7 +65,7 @@ func main() {
 		}
 
 		log.Printf("Received: %s", response.Type)
-		
+
 		if response.Type == "session:output" {
 			payload := response.Payload.(map[string]interface{})
 			content := payload["content"].(string)
@@ -76,7 +76,7 @@ func main() {
 			sessionId := payload["sessionId"].(string)
 			log.Printf("Session started: %s", sessionId)
 		}
-		
+
 		time.Sleep(100 * time.Millisecond)
 	}
 }

@@ -6,8 +6,8 @@ import (
 	"os/exec"
 	"sync"
 
-	"github.com/creack/pty"
 	"github.com/binoctal/open-agents-bridge/internal/logger"
+	"github.com/creack/pty"
 )
 
 // getSocketPath returns the Open Agents socket path from environment

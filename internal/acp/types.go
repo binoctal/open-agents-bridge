@@ -35,21 +35,21 @@ type Notification struct {
 
 // ACP Methods
 const (
-	MethodInitialize            = "initialize"
-	MethodAuthenticate          = "authenticate"
-	MethodSessionNew            = "session/new"
-	MethodSessionPrompt         = "session/prompt"
-	MethodSessionUpdate         = "session/update"
-	MethodRequestPermission     = "session/request_permission"
-	MethodSessionCancel         = "session/cancel"
-	MethodSessionClose          = "session/close"
-	MethodSessionResume         = "session/resume"
-	MethodSessionList           = "session/list"
-	MethodSessionLoad           = "session/load"
-	MethodSessionSetMode        = "session/set_mode"
+	MethodInitialize             = "initialize"
+	MethodAuthenticate           = "authenticate"
+	MethodSessionNew             = "session/new"
+	MethodSessionPrompt          = "session/prompt"
+	MethodSessionUpdate          = "session/update"
+	MethodRequestPermission      = "session/request_permission"
+	MethodSessionCancel          = "session/cancel"
+	MethodSessionClose           = "session/close"
+	MethodSessionResume          = "session/resume"
+	MethodSessionList            = "session/list"
+	MethodSessionLoad            = "session/load"
+	MethodSessionSetMode         = "session/set_mode"
 	MethodSessionSetConfigOption = "session/set_config_option"
-	MethodReadTextFile          = "fs/read_text_file"
-	MethodWriteTextFile         = "fs/write_text_file"
+	MethodReadTextFile           = "fs/read_text_file"
+	MethodWriteTextFile          = "fs/write_text_file"
 )
 
 // InitializeParams for initialize request
@@ -75,8 +75,8 @@ type SessionNewParams struct {
 
 // SessionPromptParams for session/prompt request
 type SessionPromptParams struct {
-	SessionID string        `json:"sessionId"`
-	Prompt    []PromptPart  `json:"prompt"`
+	SessionID string       `json:"sessionId"`
+	Prompt    []PromptPart `json:"prompt"`
 }
 
 type PromptPart struct {
@@ -95,13 +95,12 @@ type SessionUpdateData struct {
 	// For agent_message_chunk / agent_thought_chunk
 	Content *ContentItem `json:"content,omitempty"`
 	// For tool_call
-	ToolCallID string            `json:"toolCallId,omitempty"`
-	Status     string            `json:"status,omitempty"`
-	Title      string            `json:"title,omitempty"`
-	Kind       string            `json:"kind,omitempty"`
+	ToolCallID string                 `json:"toolCallId,omitempty"`
+	Status     string                 `json:"status,omitempty"`
+	Title      string                 `json:"title,omitempty"`
+	Kind       string                 `json:"kind,omitempty"`
 	RawInput   map[string]interface{} `json:"rawInput,omitempty"`
-	ToolContent []ToolContentItem `json:"content,omitempty"`
-	Locations  []LocationItem    `json:"locations,omitempty"`
+	Locations  []LocationItem         `json:"locations,omitempty"`
 	// For plan
 	Entries []PlanEntry `json:"entries,omitempty"`
 }

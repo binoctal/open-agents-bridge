@@ -55,6 +55,26 @@ func (s *alertSink) next(t *testing.T) api.SecurityAlert {
 	}
 }
 
+// nextWithRuleID waits for the alert raised by the given rule. The
+// auto-approval notice and command alerts are posted from separate
+// goroutines, so an unrelated alert (e.g. the user's own auto-approval
+// notification) may land first — those are skipped, not a failure.
+func (s *alertSink) nextWithRuleID(t *testing.T, ruleID string) api.SecurityAlert {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case a := <-s.reports:
+			if a.RuleID == ruleID {
+				return a
+			}
+		case <-deadline:
+			t.Fatalf("no alert from rule %q was reported", ruleID)
+			return api.SecurityAlert{}
+		}
+	}
+}
+
 func (s *alertSink) expectNone(t *testing.T) {
 	t.Helper()
 	select {
@@ -169,7 +189,7 @@ func TestAutoApprovalWinsButStillAlerts(t *testing.T) {
 	if !approved {
 		t.Error("the user's own auto-approval rule must win over a command alert")
 	}
-	if got := sink.next(t); got.RuleID != "dd" {
+	if got := sink.nextWithRuleID(t, "dd"); got.Command != "dd if=/dev/zero of=/dev/sda" {
 		t.Errorf("an auto-approved request must still raise its alert, got %+v", got)
 	}
 }

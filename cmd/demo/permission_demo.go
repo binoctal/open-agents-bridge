@@ -10,8 +10,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/binoctal/open-agents-bridge/internal/config"
+	"github.com/gorilla/websocket"
 )
 
 type Message struct {

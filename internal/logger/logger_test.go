@@ -248,7 +248,7 @@ func TestConsoleNoDebug(t *testing.T) {
 	globalLogger = l
 
 	// Capture stderr
-oldStderr := os.Stderr
+	oldStderr := os.Stderr
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 

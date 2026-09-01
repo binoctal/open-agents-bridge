@@ -115,5 +115,5 @@ type testHandler struct {
 	fn func(Alert) error
 }
 
-func (h *testHandler) Name() string               { return "test" }
-func (h *testHandler) Send(a Alert) error          { return h.fn(a) }
+func (h *testHandler) Name() string       { return "test" }
+func (h *testHandler) Send(a Alert) error { return h.fn(a) }
