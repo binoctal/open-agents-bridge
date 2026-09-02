@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"os/exec"
 	"sort"
 
@@ -29,6 +30,19 @@ func DetectInstalledCLIs() map[string]bool {
 	for cliType, binary := range cliDetectMap {
 		_, err := exec.LookPath(binary)
 		result[cliType] = err == nil
+	}
+
+	// "replay" has no PATH binary — its executable IS the OA_REPLAY_SHIM env
+	// var (session/manager.go:getCLICommand). Reporting it installed when the
+	// shim is configured keeps three things consistent: cliEnabled survives
+	// the startup sanitizer, the connect handshake advertises it, and the
+	// orchestrator's per-task CLI capability filter can match tasks whose
+	// agent is "replay". Without it, a replay-configured bridge is excluded
+	// from exactly the tasks it exists to run.
+	if shim := os.Getenv("OA_REPLAY_SHIM"); shim != "" {
+		if _, err := os.Stat(shim); err == nil {
+			result["replay"] = true
+		}
 	}
 
 	// Log summary
