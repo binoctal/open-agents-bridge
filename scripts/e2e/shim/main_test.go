@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/binoctal/open-agents-bridge/internal/replay"
 )
 
 func writeState(t *testing.T, content string) string {
@@ -94,5 +96,60 @@ func TestResolveScriptSeqRejectsGarbageCounter(t *testing.T) {
 
 	if _, err := resolveScript(); err == nil {
 		t.Fatal("expected error for unparseable counter")
+	}
+}
+
+func TestApplyWritesLandsFilesUnderCwd(t *testing.T) {
+	dir := t.TempDir()
+	// applyWrites resolves against the process cwd; chdir for the test.
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+
+	writes := []replay.Write{
+		{Kind: "write", Path: "src/payments/registry.ts", Content: "region A"},
+		{Kind: "write", Path: "docs/notes.md", Content: "hello"},
+	}
+	if err := applyWrites(writes); err != nil {
+		t.Fatalf("applyWrites: %v", err)
+	}
+	for path, want := range map[string]string{
+		"src/payments/registry.ts": "region A",
+		"docs/notes.md":            "hello",
+	} {
+		got, err := os.ReadFile(filepath.Join(dir, path))
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if string(got) != want {
+			t.Fatalf("%s = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestApplyWritesRejectsEscape(t *testing.T) {
+	dir := t.TempDir()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+
+	for _, path := range []string{"../outside.txt", "/etc/passwd"} {
+		if err := applyWrites([]replay.Write{{Kind: "write", Path: path, Content: "x"}}); err == nil {
+			t.Fatalf("expected error for escaping path %q", path)
+		}
+	}
+	// Nothing was created outside the cwd.
+	if _, err := os.Stat(filepath.Join(dir, "..", "outside.txt")); err == nil {
+		t.Fatal("write escaped the working directory")
 	}
 }

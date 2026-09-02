@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -45,12 +46,43 @@ func main() {
 		fmt.Fprintf(os.Stderr, "e2e shim: %v\n", err)
 		os.Exit(1)
 	}
+	// File side effects first: the bridge launches this process with cwd =
+	// the task's worktree, so a script's write entries land in that
+	// worktree and CommitAll/PushBranch have real content to work with.
+	if err := applyWrites(script.Writes); err != nil {
+		fmt.Fprintf(os.Stderr, "e2e shim: %v\n", err)
+		os.Exit(1)
+	}
 	// Blocks until the process is killed — the bridge, not the shim,
 	// decides when the CLI dies (design D3 of add-replay-testing).
 	if err := replay.RunPlayer(context.Background(), os.Stdin, os.Stdout, script); err != nil {
 		fmt.Fprintf(os.Stderr, "e2e shim: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// applyWrites writes each script-declared file relative to the current
+// working directory. Paths are kept inside the cwd: a script escaping its
+// worktree would corrupt the shared repo the e2e drives.
+func applyWrites(writes []replay.Write) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	for _, w := range writes {
+		path := filepath.Clean(w.Path)
+		if filepath.IsAbs(path) || strings.HasPrefix(path, "..") {
+			return fmt.Errorf("write entry %q must be a relative path inside the working directory", w.Path)
+		}
+		full := filepath.Join(cwd, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return fmt.Errorf("write %s: %w", w.Path, err)
+		}
+		if err := os.WriteFile(full, []byte(w.Content), 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", w.Path, err)
+		}
+	}
+	return nil
 }
 
 // resolveScript picks the script path for this invocation according to the

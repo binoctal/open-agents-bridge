@@ -17,7 +17,23 @@ import (
 const (
 	KindHeader = "header"
 	KindFrame  = "frame"
+	// KindWrite is a side effect, not a wire frame: the e2e shim applies
+	// these file writes relative to its working directory before replaying
+	// frames. The wire-level replay player (G17 suite) ignores them — an
+	// agent that "changed files" is only meaningful when the surrounding
+	// system (worktrees, commits, merges) is real, which is the e2e shim's
+	// job. Without this, every worktree the bridge creates stays pristine,
+	// CommitAll has nothing to commit, and a merge e2e would assert on
+	// empty branches.
+	KindWrite = "write"
 )
+
+// Write is one file side effect declared by a script.
+type Write struct {
+	Kind    string `json:"kind"`
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
 
 // Header is the provenance record on the first line of every script. The
 // replay fixtures are living artifacts: this metadata answers "which
@@ -60,6 +76,7 @@ type Frame struct {
 type Script struct {
 	Header Header
 	Frames []Frame
+	Writes []Write
 }
 
 // LoadScript reads and validates a script file.
@@ -108,6 +125,18 @@ func LoadScript(path string) (*Script, error) {
 				return nil, fmt.Errorf("replay: line %d: frame seq %d, want %d (must be dense and ordered)", line, fr.Seq, len(script.Frames))
 			}
 			script.Frames = append(script.Frames, fr)
+		case KindWrite:
+			if line == 1 {
+				return nil, fmt.Errorf("replay: line 1: first entry must be a header")
+			}
+			var wr Write
+			if err := json.Unmarshal(scanner.Bytes(), &wr); err != nil {
+				return nil, fmt.Errorf("replay: line %d: bad write: %w", line, err)
+			}
+			if wr.Path == "" {
+				return nil, fmt.Errorf("replay: line %d: write entry has no path", line)
+			}
+			script.Writes = append(script.Writes, wr)
 		default:
 			return nil, fmt.Errorf("replay: line %d: unknown kind %q", line, probe.Kind)
 		}
