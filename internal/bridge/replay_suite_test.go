@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -339,5 +340,54 @@ func TestReplayHandshakeReportArrivesAndMismatchSurvives(t *testing.T) {
 	terminal := sink.assertExactlyOneTerminal(t, "task-hs")
 	if terminal.Type != "workflow:task_result" {
 		t.Fatalf("post-mismatch task must still complete, got %s", terminal.Type)
+	}
+}
+
+// TestReplayQuestionAnswerFlow is the parity rule 5 slice: an agent that
+// asks a [QUESTION] mid-task must pause, not finish — the turn that carries
+// the question ends (end_turn) while the question is pending, and that turn
+// boundary must NOT report the half-done task as completed. The answer is
+// injected as the next prompt, and only the FOLLOWING end_turn produces the
+// terminal callback. Before the guard this exact fixture reported
+// workflow:task_result the moment the asking turn ended.
+func TestReplayQuestionAnswerFlow(t *testing.T) {
+	sink := newReplaySink(t)
+	startReplayBridge(t, sink, fixtureScript(t, "e2e-question.script.jsonl"), 1)
+
+	sink.sendTaskAssign("job-q", "task-q", "replay")
+
+	question := sink.waitFor(20*time.Second, "WS workflow:task_question for task-q",
+		func(ev sinkEvent) bool {
+			return ev.Channel == sinkChannelWS && isTaskEvent(ev, "workflow:task_question", "task-q")
+		})
+	var q struct {
+		Question string `json:"question"`
+	}
+	if err := json.Unmarshal(question.Payload, &q); err != nil || !strings.Contains(q.Question, "Redis") {
+		t.Fatalf("task_question payload must carry the fixture question, got %s (%v)", question.Payload, err)
+	}
+
+	// The asking turn ends while the question is pending: wait for the idle
+	// status that end_turn produces, then prove no terminal callback fires.
+	sink.waitFor(20*time.Second, "WS agent:status idle after the asking turn",
+		func(ev sinkEvent) bool {
+			if ev.Channel != sinkChannelWS || ev.Type != "agent:status" {
+				return false
+			}
+			var p struct {
+				Status string `json:"status"`
+			}
+			return json.Unmarshal(ev.Payload, &p) == nil && p.Status == "idle"
+		})
+	time.Sleep(500 * time.Millisecond)
+	if n := sink.countMatching(func(ev sinkEvent) bool { return isTerminalCallback(ev, "task-q") }); n != 0 {
+		t.Fatalf("turn ended on a pending question: %d terminal callback(s) fired — the task is blocked on a human answer, not finished", n)
+	}
+
+	sink.sendTaskAnswer("task-q", "Use an in-memory LRU cache.")
+
+	terminal := sink.assertExactlyOneTerminal(t, "task-q")
+	if terminal.Type != "workflow:task_result" {
+		t.Fatalf("answered question must let the task complete, got %s (%s)", terminal.Type, terminal.Payload)
 	}
 }

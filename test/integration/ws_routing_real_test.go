@@ -1,6 +1,7 @@
 package integration_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,10 @@ import (
 
 const apiBase = "http://localhost:8989"
 const wsBase = "ws://localhost:8989"
+
+// testOrigin satisfies the API's CSRF origin check (must match an allowed
+// dev origin).
+const testOrigin = "http://localhost:5173"
 
 // devSetupResponse mirrors the API response from POST /api/dev/setup
 type devSetupResponse struct {
@@ -55,7 +60,7 @@ func createRealTestUser(t *testing.T, suffix int64) (userID, deviceID, deviceTok
 	email := fmt.Sprintf("e2e-go-%d@test.local", suffix)
 	payload, _ := json.Marshal(map[string]string{"email": email, "password": "testpassword123"})
 
-	resp, err := http.Post(apiBase+"/api/dev/setup", "application/json", bytesReader(payload))
+	resp, err := postJSON(t, "/api/dev/setup", payload)
 	if err != nil {
 		t.Fatalf("dev/setup request failed: %v", err)
 	}
@@ -82,7 +87,7 @@ func createRealTestUser(t *testing.T, suffix int64) (userID, deviceID, deviceTok
 
 	// POST /api/auth/login
 	loginPayload, _ := json.Marshal(map[string]string{"email": email, "password": "testpassword123"})
-	loginResp, err := http.Post(apiBase+"/api/auth/login", "application/json", bytesReader(loginPayload))
+	loginResp, err := postJSON(t, "/api/auth/login", loginPayload)
 	if err != nil {
 		t.Fatalf("auth/login request failed: %v", err)
 	}
@@ -253,17 +258,22 @@ func TestMessageRoutingsessionOutput(t *testing.T) {
 		t.Fatalf("WriteMessage failed: %v", err)
 	}
 
-	// Web should receive it
-	received := waitForWSType(t, webWS, "session:output", 5*time.Second)
+	// Web receives it: the room batches session:output per session (50ms
+	// flush) and broadcasts a session:output-batch carrying the lines.
+	received := waitForWSType(t, webWS, "session:output-batch", 5*time.Second)
 	payloadBytes, _ := json.Marshal(received.Payload)
 	var payload struct {
-		Content string `json:"content"`
+		SessionId string   `json:"sessionId"`
+		Lines     []string `json:"lines"`
 	}
 	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-		t.Fatalf("Failed to parse session:output payload: %v", err)
+		t.Fatalf("Failed to parse session:output-batch payload: %v", err)
 	}
-	if payload.Content != "Hello from Go bridge" {
-		t.Errorf("content = %s, want 'Hello from Go bridge'", payload.Content)
+	if payload.SessionId != "sess_go_1" {
+		t.Errorf("sessionId = %s, want sess_go_1", payload.SessionId)
+	}
+	if len(payload.Lines) != 1 || payload.Lines[0] != "Hello from Go bridge" {
+		t.Errorf("lines = %v, want [Hello from Go bridge]", payload.Lines)
 	}
 }
 
@@ -329,21 +339,25 @@ func TestPermissionRoundTrip(t *testing.T) {
 	}
 }
 
-// bytesReader helper
-type bytesReaderImpl struct {
-	data []byte
-	pos  int
+// bytesReader helper. This used to be a hand-rolled reader whose exhaustion
+// path returned fmt.Errorf("EOF") instead of the io.EOF sentinel — the HTTP
+// client treats any non-sentinel read error as a real failure and aborts the
+// request, so every POST failed with `Post ... EOF` whenever the dev server
+// was actually up to receive it (masked in CI, where these tests skip).
+func bytesReader(data []byte) *bytes.Reader {
+	return bytes.NewReader(data)
 }
 
-func bytesReader(data []byte) *bytesReaderImpl {
-	return &bytesReaderImpl{data: data}
-}
-
-func (r *bytesReaderImpl) Read(p []byte) (n int, err error) {
-	if r.pos >= len(r.data) {
-		return 0, fmt.Errorf("EOF")
+// postJSON posts a JSON body with the Origin header the CSRF middleware
+// requires (auth-hardening): an Origin-less request is rejected 403 before
+// the route ever runs.
+func postJSON(t *testing.T, path string, payload []byte) (*http.Response, error) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, apiBase+path, bytesReader(payload))
+	if err != nil {
+		t.Fatalf("build %s request: %v", path, err)
 	}
-	n = copy(p, r.data[r.pos:])
-	r.pos += n
-	return
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", testOrigin)
+	return http.DefaultClient.Do(req)
 }

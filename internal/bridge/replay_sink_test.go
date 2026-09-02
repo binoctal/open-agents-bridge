@@ -195,6 +195,35 @@ func (s *replaySink) sendTaskAssign(jobID, taskID, agent string) {
 	}
 }
 
+// sendTaskAnswer delivers the user's answer to a pending [QUESTION], exactly
+// as the orchestrator would after POST /tasks/:taskId/answer.
+func (s *replaySink) sendTaskAnswer(taskID, answer string) {
+	s.t.Helper()
+	msg := Message{
+		Type: "workflow:task_answer",
+		Payload: map[string]interface{}{
+			"taskId": taskID,
+			"answer": answer,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		s.t.Fatalf("marshal task_answer: %v", err)
+	}
+	s.mu.Lock()
+	conn := s.wsConn
+	s.mu.Unlock()
+	if conn == nil {
+		s.t.Fatal("sendTaskAnswer: bridge WS not connected yet")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		s.t.Fatalf("write task_answer: %v", err)
+	}
+}
+
 // sendHandshakeMismatch delivers the server's pairing verdict over the WS,
 // exactly as the real room would after evaluating a capability report.
 func (s *replaySink) sendHandshakeMismatch() {

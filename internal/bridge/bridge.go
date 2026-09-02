@@ -147,6 +147,15 @@ type Bridge struct {
 	lineBoundary   map[string]bool
 	lineBoundaryMu sync.Mutex
 
+	// Per-session ordered dispatch of protocol messages. The adapter emits a
+	// [QUESTION] content chunk BEFORE the end_turn result, but a bare
+	// `go forwardSessionOutput` per message gave the two goroutines no
+	// ordering guarantee — the turn-end branch could decide "task finished"
+	// before the question registered (found by the parity rule 5 e2e). One
+	// worker goroutine per session restores wire order.
+	sessionDisp   map[string]chan protocol.Message
+	sessionDispMu sync.Mutex
+
 	// Task metadata for workflow tasks (sessionID -> taskMeta)
 	taskMeta   map[string]*taskMeta
 	taskMetaMu sync.RWMutex
@@ -241,6 +250,7 @@ func New(cfg *config.Config) (*Bridge, error) {
 		permSessionMap:    make(map[string]string),
 		pendingQuestions:  make(map[string]chan string),
 		lineBoundary:      make(map[string]bool),
+		sessionDisp:       make(map[string]chan protocol.Message),
 		taskMeta:          make(map[string]*taskMeta),
 		reconnectStrategy: reconnect.NewStrategy(),
 		stateManager:      NewStateManager(),
@@ -369,10 +379,10 @@ func (b *Bridge) Start() error {
 	// Set up session output forwarding
 	// NOTE: outputCallback is called from ACP's readMessages goroutine.
 	// All sendMessage calls are dispatched asynchronously to avoid deadlock
-	// between logger mutex and bridge mutex across goroutines.
-	b.sessions.SetOutputCallback(func(sessionID string, msg protocol.Message) {
-		go b.forwardSessionOutput(sessionID, msg)
-	})
+	// between logger mutex and bridge mutex across goroutines — and through
+	// dispatchSessionOutput, strictly in per-session wire order (see the
+	// sessionDisp field comment).
+	b.sessions.SetOutputCallback(b.dispatchSessionOutput)
 	b.sessions.SetExitCallback(func(sessionID string, exitCode int, output []byte) {
 		go b.handleSessionExit(sessionID, exitCode, output)
 	})
@@ -763,6 +773,68 @@ func (b *Bridge) messageWorker() {
 	}
 }
 
+// dispatchSessionOutput hands a protocol message to the session's ordered
+// worker. The adapter's read loop calls this synchronously, so it must never
+// block on bridge mutexes (deadlock class the old `go forward` existed to
+// avoid): enqueue is non-blocking, and an overflowing queue falls back to a
+// bare goroutine — order is only best-effort for a session producing 256+
+// unprocessed messages, which is already pathological.
+func (b *Bridge) dispatchSessionOutput(sessionID string, msg protocol.Message) {
+	b.sessionDispMu.Lock()
+	ch, ok := b.sessionDisp[sessionID]
+	if !ok {
+		ch = make(chan protocol.Message, 256)
+		b.sessionDisp[sessionID] = ch
+		go b.sessionOutputWorker(sessionID, ch)
+	}
+	b.sessionDispMu.Unlock()
+
+	select {
+	case ch <- msg:
+	default:
+		go b.forwardSessionOutput(sessionID, msg)
+	}
+}
+
+// sessionOutputWorker processes one session's protocol messages in wire
+// order and retires once the session itself is gone.
+func (b *Bridge) sessionOutputWorker(sessionID string, ch chan protocol.Message) {
+	for {
+		for {
+			select {
+			case msg := <-ch:
+				b.forwardSessionOutput(sessionID, msg)
+				continue
+			default:
+			}
+			break
+		}
+		if b.sessions.Get(sessionID) == nil {
+			// Session gone: claim the queue, drain stragglers, retire.
+			b.sessionDispMu.Lock()
+			delete(b.sessionDisp, sessionID)
+			b.sessionDispMu.Unlock()
+			for {
+				select {
+				case msg := <-ch:
+					b.forwardSessionOutput(sessionID, msg)
+					continue
+				default:
+				}
+				return
+			}
+		}
+		select {
+		case msg := <-ch:
+			b.forwardSessionOutput(sessionID, msg)
+		case <-b.done:
+			return
+		case <-time.After(5 * time.Second):
+			// idle tick: loop to re-check the session's existence
+		}
+	}
+}
+
 // forwardSessionOutput forwards protocol messages from CLI to WebSocket
 func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 	// Record metrics
@@ -921,16 +993,28 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 		// execution deadline swept it (live-observed in the local end-to-end
 		// on 2026-08-31: the file was edited, stopReason=end_turn arrived, no
 		// result was ever reported). For a task session the end of the turn IS
-		// the end of the task; interactive sessions must survive their turns,
-		// so this is gated on the workflow metadata.
+		// the end of the task — UNLESS the turn ended on a [QUESTION]: the
+		// agent asked and stopped, the task is blocked on a human answer, not
+		// finished. Stopping here would report a half-done task as completed
+		// and the answer would arrive to a dead session (found by the parity
+		// rule 5 e2e). Keep the session alive; the answer waiter
+		// (handleQuestionMarker) sends the answer as the next prompt and the
+		// FOLLOWING end_turn completes the task. Interactive sessions survive
+		// their turns regardless, so this stays gated on the workflow
+		// metadata.
 		if code, terminal := taskTurnExitCode(msg.Meta, sess.IsTaskSession()); terminal {
-			sid, exitCode := sessionID, code
-			b.logInfo("[%s] ACP turn ended for task session %s (exit %d), reporting result", logger.ModWorkflow, sid, exitCode)
-			go func() {
-				if err := b.sessions.StopWithExitCode(sid, exitCode); err != nil {
-					b.logWarn("[%s] Failed to stop finished task session %s: %v", logger.ModSession, sid, err)
-				}
-			}()
+			_, taskID, _ := sess.GetMultiAgentMetadata()
+			if b.hasPendingQuestion(taskID) {
+				b.logInfo("[%s] ACP turn ended with a pending question for task %s, waiting for the answer", logger.ModWorkflow, taskID)
+			} else {
+				sid, exitCode := sessionID, code
+				b.logInfo("[%s] ACP turn ended for task session %s (exit %d), reporting result", logger.ModWorkflow, sid, exitCode)
+				go func() {
+					if err := b.sessions.StopWithExitCode(sid, exitCode); err != nil {
+						b.logWarn("[%s] Failed to stop finished task session %s: %v", logger.ModSession, sid, err)
+					}
+				}()
+			}
 		}
 
 	case protocol.MessageTypeUsage:
@@ -3384,7 +3468,13 @@ func (b *Bridge) handleQuestionMarker(sessionID string, sess *session.Session, c
 			b.logInfo("[%s] Received answer for task %s, injecting into session", logger.ModWorkflow, taskID)
 			answerPrompt := fmt.Sprintf("User answered your question:\n%s\n\nContinue with this information.", answer)
 			if s := b.sessions.Get(sessionID); s != nil {
-				s.Send(answerPrompt)
+				// An unchecked error here drops the answer silently: the task
+				// sits in `awaiting` until the question timeout kills the
+				// session (found by the parity rule 5 e2e — the injection
+				// raced the still-processing turn and the failure vanished).
+				if err := s.Send(answerPrompt); err != nil {
+					b.logError("[%s] Failed to inject answer into session %s for task %s: %v", logger.ModWorkflow, sessionID, taskID, err)
+				}
 			}
 		case <-time.After(5 * time.Minute):
 			b.logInfo("[%s] Task %s question timed out (5min), continuing", logger.ModWorkflow, taskID)
@@ -3396,12 +3486,27 @@ func (b *Bridge) handleQuestionMarker(sessionID string, sess *session.Session, c
 			// the bridge: every later task queues behind the dead session
 			// forever (live-observed in dogfood run 17: a retry-created
 			// session re-asked after the web had already answered, timed
-			// out, and the pool never drained).
-			if err := b.sessions.Stop(sessionID); err != nil {
+			// out, and the pool never drained). A plain Stop reports exit 0
+			// ("completed"): work abandoned on an unanswered question is a
+			// failure, not a finish — the orchestrator must retry or
+			// downgrade, not ship the half-done task.
+			if err := b.sessions.StopWithExitCode(sessionID, 1); err != nil {
 				b.logInfo("[%s] Task %s: stopping timed-out question session: %v", logger.ModWorkflow, taskID, err)
 			}
 		}
 	}()
+}
+
+// hasPendingQuestion reports whether a [QUESTION] from this task is still
+// waiting for a human answer.
+func (b *Bridge) hasPendingQuestion(taskID string) bool {
+	if taskID == "" {
+		return false
+	}
+	b.pendingQuestionsMu.RLock()
+	defer b.pendingQuestionsMu.RUnlock()
+	_, exists := b.pendingQuestions[taskID]
+	return exists
 }
 
 // handleWorkflowTaskAnswer handles user answers to agent questions
