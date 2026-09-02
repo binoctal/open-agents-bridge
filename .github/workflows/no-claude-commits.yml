@@ -1,0 +1,45 @@
+# Guard: no commit may name Claude/Anthropic as a contributor.
+#
+# Fails when any commit reachable from the pushed refs has:
+#   - an author or committer name/email containing claude/anthropic, or
+#   - an attribution trailer (Co-Authored-By / Generated with) naming them.
+#
+# Commit MESSAGES are otherwise exempt on purpose: this repo's product IS a
+# CLI orchestrator, so prose mentioning the `claude` CLI is legitimate.
+name: no-claude-commits
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reject Claude authorship in any commit
+        run: |
+          set -e
+          fail=0
+
+          identities=$(git log --all --format='%an%n%ae%n%cn%n%ce')
+          if printf '%s' "$identities" | grep -iE 'claude|anthropic'; then
+            echo "::error::Claude/Anthropic appears as an author or committer identity"
+            fail=1
+          fi
+
+          trailers=$(git log --all --format='%B')
+          if printf '%s' "$trailers" | grep -inE '^[[:space:]]*(-[[:space:]]+)?(co[[:space:]]?-?authored[[:space:]]?-?by|generated[[:space:]]with).*(claude|anthropic)'; then
+            echo "::error::An attribution trailer names Claude/Anthropic"
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            echo "Found offending commits above. Rewrite history to fix (see docs or repo owner)."
+            exit 1
+          fi
+          echo "OK: no Claude authorship in $(git rev-list --all --count) commits"
