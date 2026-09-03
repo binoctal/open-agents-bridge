@@ -16,12 +16,19 @@ type OutputCallback func(sessionID string, msg protocol.Message)
 // ExitCallback is called when a session exits
 type ExitCallback func(sessionID string, exitCode int, output []byte)
 
+// RemovedCallback is called (asynchronously) whenever a session is deleted
+// from the manager, on every removal path (stop, replace, idle cleanup,
+// create-failure rollback). The bridge uses it to drop per-session state
+// (G18 status trackers) so it cannot leak across the six delete sites.
+type RemovedCallback func(sessionID string)
+
 type Manager struct {
 	sessions         map[string]*Session
 	mu               sync.RWMutex
 	outputCallback   OutputCallback
 	exitCallback     ExitCallback
 	capacityCallback func()
+	removedCallback  RemovedCallback
 	maxConcurrent    int
 	queue            []QueueItem
 	queueMu          sync.Mutex
@@ -145,6 +152,20 @@ func (m *Manager) SetExitCallback(callback ExitCallback) {
 	m.exitCallback = callback
 }
 
+// SetRemovedCallback registers the session-removal notification. Fired
+// asynchronously from every delete site — safe to re-enter the manager.
+func (m *Manager) SetRemovedCallback(callback RemovedCallback) {
+	m.removedCallback = callback
+}
+
+// notifyRemoved fires the removal callback off the lock. Callers hold m.mu
+// at the delete sites, so the callback must never block on the manager.
+func (m *Manager) notifyRemoved(sessionID string) {
+	if m.removedCallback != nil {
+		go m.removedCallback(sessionID)
+	}
+}
+
 // SetIOLogger sets the I/O logger for the session manager
 func (m *Manager) SetIOLogger(ioLogger *logger.IOLogger) {
 	m.ioLogger = ioLogger
@@ -244,6 +265,7 @@ func (m *Manager) cleanupIdleSessions(maxIdleTime time.Duration) {
 					sess.Protocol.Disconnect()
 				}
 				delete(m.sessions, id)
+				m.notifyRemoved(id)
 				cleaned++
 				logger.Debug("[%s] Cleaned up idle session %s (status: %s, idle: %v)",
 					logger.ModSession, id, sess.Status, idleTime)
@@ -468,6 +490,7 @@ func (m *Manager) StopWithExitCode(id string, exitCode int) error {
 	jobID, taskID, _ := sess.GetMultiAgentMetadata()
 
 	delete(m.sessions, id)
+	m.notifyRemoved(id)
 
 	// A pool slot just freed — let the bridge drain queued tasks.
 	if m.capacityCallback != nil {

@@ -121,6 +121,10 @@ type Bridge struct {
 	commandAlertsMu   sync.Mutex
 	commandAlertRules []compiledCommandRule
 	loopDetectors     map[string]*loopdetect.Detector
+	// G18 per-session status trackers (AgentStatus derivation). Cleaned via
+	// the session manager's removed-callback — see status_tracker.go.
+	statusTrackers    map[string]*statusTracker
+	statusTrackersMu  sync.Mutex
 	callbackManager   *workflows.CallbackManager
 	worktreeManager   *workflows.WorktreeManager
 	reconnectStrategy *reconnect.Strategy
@@ -252,6 +256,7 @@ func New(cfg *config.Config) (*Bridge, error) {
 		done:              make(chan struct{}),
 		scanner:           scanner.New(),
 		loopDetectors:     make(map[string]*loopdetect.Detector),
+		statusTrackers:    make(map[string]*statusTracker),
 		permSessionMap:    make(map[string]string),
 		pendingQuestions:  make(map[string]chan string),
 		lineBoundary:      make(map[string]bool),
@@ -393,6 +398,8 @@ func (b *Bridge) Start() error {
 	})
 	// Freed pool slots drain queued tasks (see drainTaskQueue).
 	b.sessions.SetCapacityCallback(b.drainTaskQueue)
+	// Session removal (all six delete paths) drops the G18 status tracker.
+	b.sessions.SetRemovedCallback(b.removeStatusTracker)
 	if err := b.connect(); err != nil {
 		return err
 	}
@@ -447,7 +454,15 @@ func (b *Bridge) Stop() {
 	// Flush remaining batched messages before shutdown
 	b.batchMu.Lock()
 	if b.batchTimer != nil {
-		b.batchTimer.Stop()
+		// If Stop() returns true the callback will never fire, so the
+		// flushBatches goroutine that owns the pending batchWait.Done() is
+		// gone — release it here or Wait() below blocks forever. Exposed by
+		// a test that shuts down within batchFlushInterval of the last
+		// batched chunk (question sessions wait for an answer, so no
+		// terminal report ever drains the batch).
+		if b.batchTimer.Stop() {
+			b.batchWait.Done()
+		}
 		b.doFlushLocked()
 		b.batchTimer = nil
 	}
@@ -855,6 +870,10 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 	}
 	protocolName := sess.GetProtocolName()
 
+	// G18: derive agent status from the message stream before any forwarding
+	// — both protocols funnel through here, so one tracker covers PTY and ACP.
+	b.observeSessionStatus(sessionID, protocolName, msg)
+
 	// Security scan output content
 	if contentStr, ok := msg.Content.(string); ok {
 		if alerts := b.scanner.Scan(contentStr); len(alerts) > 0 {
@@ -956,16 +975,14 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 		})
 
 	case protocol.MessageTypeStatus:
-		b.sendMessage(Message{
-			Type: "agent:status",
-			Payload: map[string]interface{}{
-				"sessionId": sessionID,
-				"deviceId":  b.config.DeviceID,
-				"status":    msg.Content,
-				"protocol":  protocolName,
-			},
-			Timestamp: time.Now().UnixMilli(),
-		})
+		// Real AgentStatus transitions (typed content) already went through
+		// the tracker at the top of forwardSessionOutput. What is left here
+		// is the label class ("commands_update"/"mode_update"/...): a plain
+		// string that must never occupy the status field — old builds of the
+		// web mapped unknown strings to idle and reset the UI mid-turn.
+		if label, isLabel := statusLabel(msg); isLabel {
+			b.sendStatusLabel(sessionID, protocolName, label)
+		}
 
 		// A CLI that finishes by itself only reports status=idle with an
 		// exit_code meta (protocol/pty.go wait goroutine). Without stopping
@@ -1727,6 +1744,8 @@ func (b *Bridge) handleSessionSend(msg Message) {
 		})
 	} else {
 		b.logDebug("[%s] Message sent successfully to CLI", logger.ModSession)
+		// G18: server-side "thinking" fact — the web no longer fakes it.
+		b.notePromptSent(sessionID, sess.GetProtocolName())
 	}
 }
 
@@ -3111,6 +3130,8 @@ func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, row
 	// Send the prompt to the CLI agent
 	if err := sess.Send(prompt); err != nil {
 		b.logDebug("[%s] Failed to send prompt for task %s: %v", logger.ModWorkflow, taskId, err)
+	} else {
+		b.notePromptSent(sess.ID, sess.GetProtocolName())
 	}
 
 	// Store task meta for worktree handling on exit
@@ -3466,6 +3487,12 @@ func (b *Bridge) handleQuestionMarker(sessionID string, sess *session.Session, c
 	jobID, taskID, _ := sess.GetMultiAgentMetadata()
 	b.logInfo("[%s] Task %s asking question: %s", logger.ModWorkflow, taskID, question)
 
+	// G18: a [QUESTION] on the PTY path is the permission-pending signal —
+	// reuse of the one pattern matcher we have, no second copy of it.
+	if s, changed := b.statusTrackerFor(sessionID).transition(protocol.StatusPermissionPending); changed {
+		b.sendStatus(sessionID, sess.GetProtocolName(), s, "")
+	}
+
 	// Send question to frontend via WebSocket
 	b.sendMessage(Message{
 		Type: "workflow:task_question",
@@ -3501,6 +3528,8 @@ func (b *Bridge) handleQuestionMarker(sessionID string, sess *session.Session, c
 				// raced the still-processing turn and the failure vanished).
 				if err := s.Send(answerPrompt); err != nil {
 					b.logError("[%s] Failed to inject answer into session %s for task %s: %v", logger.ModWorkflow, sessionID, taskID, err)
+				} else {
+					b.notePromptSent(sessionID, s.GetProtocolName())
 				}
 			}
 		case <-time.After(5 * time.Minute):

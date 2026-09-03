@@ -67,6 +67,7 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 		}
 		existingSess.Status = "replaced"
 		delete(m.sessions, sessionID)
+		m.notifyRemoved(sessionID)
 		logger.Info("[%s] Old session cleaned up and removed", logger.ModSession)
 	} else {
 		logger.Info("[%s] Creating new session: ID=%s, cliType=%s, workDir=%s",
@@ -125,6 +126,7 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 		m.mu.Lock()
 		delete(m.sessions, sess.ID)
 		m.mu.Unlock()
+		m.notifyRemoved(sess.ID)
 		return nil, err
 	}
 	config := protocol.AdapterConfig{
@@ -161,6 +163,7 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 			m.mu.Lock()
 			delete(m.sessions, sess.ID)
 			m.mu.Unlock()
+			m.notifyRemoved(sess.ID)
 			return nil, fmt.Errorf("replay recording setup: %w", err)
 		}
 		protocolMgr.SetRecorder(rec)
@@ -171,6 +174,7 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 		m.mu.Lock()
 		delete(m.sessions, sess.ID)
 		m.mu.Unlock()
+		m.notifyRemoved(sess.ID)
 		return nil, err
 	}
 
