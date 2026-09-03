@@ -361,6 +361,13 @@ func (m *Manager) getCLICommand(cliType string) (string, []string, error) {
 		return "goose", []string{"acp"}, nil
 	case "gemini":
 		return "gemini-cli", []string{"--acp"}, nil
+	case "dsh":
+		// DeepSeek Harness ACP server. The published launcher has no built-in
+		// acp profile; users create it once with
+		// `dsh plugin --profile acp add @deepseek-ai/dsh-acp`. A missing
+		// profile exits non-zero with that same fix-it hint, which fails loud
+		// up the session error channel — no detection probe needed here.
+		return "dsh", []string{"--profile", "acp"}, nil
 	case "kiro":
 		return "kiro", []string{"chat"}, nil
 	case "cline":

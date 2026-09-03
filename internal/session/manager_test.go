@@ -477,6 +477,7 @@ func TestManager_getCLICommand(t *testing.T) {
 		{"qwen", "qwen-code", "--experimental-acp"},
 		{"goose", "goose", "acp"},
 		{"gemini", "gemini-cli", "--acp"},
+		{"dsh", "dsh", "--profile"},
 		{"kiro", "kiro", "chat"},
 		{"cline", "cline", ""},
 		{"codex", "codex", ""},
