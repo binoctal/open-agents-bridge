@@ -361,6 +361,9 @@ func (m *Manager) getCLICommand(cliType string) (string, []string, error) {
 		return "goose", []string{"acp"}, nil
 	case "gemini":
 		return "gemini-cli", []string{"--acp"}, nil
+	case "opencode":
+		// OpenCode (opencode.ai) ships a native ACP server as a subcommand
+		return "opencode", []string{"acp"}, nil
 	case "dsh":
 		// DeepSeek Harness ACP server. The published launcher has no built-in
 		// acp profile; users create it once with
