@@ -28,6 +28,12 @@ type TaskResult struct {
 	ErrorType  string `json:"errorType"` // "crash", "timeout", "cancelled"
 	DurationMs int64  `json:"durationMs"`
 	CommitHash string `json:"commitHash"` // Git commit hash from worktree (if applicable)
+	// Attempt is the dispatch generation this execution was started by,
+	// echoed verbatim from the workflow:task_assign payload (G19). The
+	// orchestrator pairs it against its current generation and rejects
+	// superseded ones; the bridge never generates or infers it. 0 means the
+	// assign carried no attempt field (pre-G19 orchestrator).
+	Attempt int `json:"attempt"`
 }
 
 // CallbackConfig holds configuration for the callback mechanism
@@ -143,6 +149,7 @@ func (m *CallbackManager) SendTaskResult(result TaskResult) error {
 			"artifacts":  result.Artifacts,
 			"summary":    result.Summary,
 			"commitHash": result.CommitHash,
+			"attempt":    result.Attempt,
 		},
 		"timestamp": time.Now().UnixMilli(),
 	}
@@ -165,6 +172,7 @@ func (m *CallbackManager) SendTaskError(result TaskResult) error {
 			"taskId":    result.TaskID,
 			"error":     result.Error,
 			"errorType": result.ErrorType,
+			"attempt":   result.Attempt,
 		},
 		"timestamp": time.Now().UnixMilli(),
 	}

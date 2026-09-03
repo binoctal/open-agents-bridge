@@ -202,6 +202,11 @@ type taskMeta struct {
 	Title    string
 	WorkDir  string
 	Worktree bool
+	// Attempt is the dispatch generation from the task_assign payload (G19).
+	// Carried alongside the task so the terminal callback echoes the
+	// generation that STARTED this run, not whatever is current when the
+	// session ends. 0 = the assign carried no attempt (pre-G19 orchestrator).
+	Attempt int
 }
 
 func New(cfg *config.Config) (*Bridge, error) {
@@ -2127,6 +2132,16 @@ func getString(m map[string]interface{}, key string) string {
 	return ""
 }
 
+// getInt reads an integer payload field. WS payloads arrive JSON-decoded, so
+// numbers are float64; a fractional or non-numeric value reads as 0 (same
+// absent-means-zero contract the G19 attempt field uses).
+func getInt(m map[string]interface{}, key string) int {
+	if v, ok := m[key].(float64); ok {
+		return int(v)
+	}
+	return 0
+}
+
 func (b *Bridge) handleChatSend(msg Message) {
 	payload, ok := msg.Payload.(map[string]interface{})
 	if !ok {
@@ -2932,6 +2947,12 @@ func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 	description := getString(payload, "description")
 	context := getString(payload, "context")
 	worktreeBranch := getString(payload, "worktreeBranch")
+	// G19 attempt binding: the dispatch generation minted by the
+	// orchestrator's claim. Read once here and threaded through the session
+	// lifecycle (queue included) so the terminal callback reports the
+	// generation that started the run. Absent field -> 0, which the
+	// orchestrator soft-passes for pre-G19 peers.
+	attempt := getInt(payload, "attempt")
 
 	b.logInfo("[%s] Workflow task assign: %s (agent: %s) in job %s", logger.ModWorkflow, taskId, agent, jobId)
 
@@ -2972,6 +2993,7 @@ func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 			WorkDir:   workDir,
 			SessionID: taskId,
 			JobID:     jobId,
+			Attempt:   attempt,
 			Cols:      120,
 			Rows:      30,
 			PermMode:  "accept-edits",
@@ -2980,7 +3002,7 @@ func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 		return
 	}
 
-	b.startTaskSession(jobId, taskId, agent, title, description, context, workDir)
+	b.startTaskSession(jobId, taskId, agent, title, description, context, workDir, attempt)
 }
 
 // taskStartedMessage builds the workflow:task_started frame for the
@@ -3031,16 +3053,16 @@ func taskStartedMessage(jobId, taskId, deviceId string) Message {
 	}
 }
 
-func (b *Bridge) startTaskSession(jobId, taskId, agent, title, description, context, workDir string) {
+func (b *Bridge) startTaskSession(jobId, taskId, agent, title, description, context, workDir string, attempt int) {
 	prompt := buildTaskPrompt(title, description, context)
-	b.launchTaskSession(jobId, taskId, agent, workDir, 120, 30, "accept-edits", prompt, title)
+	b.launchTaskSession(jobId, taskId, agent, workDir, 120, 30, "accept-edits", prompt, title, attempt)
 }
 
 // launchTaskSession creates the task session and emits its start signals.
 // Shared by the direct dispatch path (startTaskSession) and the queue drain
 // (drainTaskQueue) so a queued task gets the identical lifecycle — including
 // the completion exit callback, which keys on the session's job/task metadata.
-func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, rows int, permMode, prompt, title string) {
+func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, rows int, permMode, prompt, title string, attempt int) {
 	sess, err := b.sessions.CreateWithIDAndSize(cli, workDir, taskId, cols, rows, permMode)
 	if err != nil {
 		b.logInfo("[%s] Failed to create session for task %s: %v", logger.ModWorkflow, taskId, err)
@@ -3052,6 +3074,9 @@ func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, row
 				"deviceId":  b.config.DeviceID,
 				"error":     err.Error(),
 				"errorType": "crash",
+				// Terminal report for a session that never started still
+				// belongs to the dispatch generation that tried (G19).
+				"attempt": attempt,
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
@@ -3097,6 +3122,7 @@ func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, row
 		Title:    title,
 		WorkDir:  workDir,
 		Worktree: isWorktree,
+		Attempt:  attempt,
 	}
 	b.taskMetaMu.Unlock()
 }
@@ -3118,7 +3144,7 @@ func (b *Bridge) drainTaskQueue() {
 		b.logInfo("[%s] Draining queued task %s (job %s, waited %s)", logger.ModWorkflow,
 			item.SessionID, item.JobID, time.Since(item.EnqueuedAt).Round(time.Second))
 		b.launchTaskSession(item.JobID, item.SessionID, item.CLIType, item.WorkDir,
-			item.Cols, item.Rows, item.PermMode, item.Prompt, "")
+			item.Cols, item.Rows, item.PermMode, item.Prompt, "", item.Attempt)
 	}
 }
 
@@ -3364,6 +3390,7 @@ func (b *Bridge) handleSessionExit(sessionID string, exitCode int, output []byte
 			Summary:    summary,
 			Artifacts:  artifacts,
 			DurationMs: 0, // Duration tracked by orchestrator
+			Attempt:    meta.Attempt,
 		}
 
 		if commitHash != "" {

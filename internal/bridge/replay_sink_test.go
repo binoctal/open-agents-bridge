@@ -164,8 +164,11 @@ func (s *replaySink) record(channel, typ string, payload json.RawMessage) {
 }
 
 // sendTaskAssign dispatches a workflow:task_assign from the orchestrator
-// side, exactly as the real server would.
-func (s *replaySink) sendTaskAssign(jobID, taskID, agent string) {
+// side, exactly as the real server would. attempt is the dispatch generation
+// (G19) the real server mints per claim; the suite passes it explicitly so
+// fixtures can exercise non-consecutive generations (a self-counting bridge
+// would emit 0,1,... and get caught).
+func (s *replaySink) sendTaskAssign(jobID, taskID, agent string, attempt int) {
 	s.t.Helper()
 	msg := Message{
 		Type: "workflow:task_assign",
@@ -175,6 +178,7 @@ func (s *replaySink) sendTaskAssign(jobID, taskID, agent string) {
 			"agent":       agent,
 			"title":       "Replay fixture task " + taskID,
 			"description": "Deterministic fixture task for the replay suite.",
+			"attempt":     attempt,
 		},
 		Timestamp: time.Now().UnixMilli(),
 	}
@@ -326,6 +330,30 @@ func payloadString(t *testing.T, ev sinkEvent, fields ...string) string {
 		t.Fatalf("event %s %s: field %q is not a string", ev.Channel, ev.Type, fields[len(fields)-1])
 	}
 	return str
+}
+
+// payloadInt digs a nested numeric field out of a JSON payload.
+func payloadInt(t *testing.T, ev sinkEvent, fields ...string) int {
+	t.Helper()
+	var cur any
+	if err := json.Unmarshal(ev.Payload, &cur); err != nil {
+		t.Fatalf("event %s %s: payload is not JSON: %s", ev.Channel, ev.Type, ev.Payload)
+	}
+	for _, f := range fields {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			t.Fatalf("event %s %s: payload is not an object at field %q", ev.Channel, ev.Type, f)
+		}
+		cur, ok = m[f]
+		if !ok {
+			t.Fatalf("event %s %s: no field %q in payload %s", ev.Channel, ev.Type, f, ev.Payload)
+		}
+	}
+	n, ok := cur.(float64)
+	if !ok {
+		t.Fatalf("event %s %s: field %q is not a number", ev.Channel, ev.Type, fields[len(fields)-1])
+	}
+	return int(n)
 }
 
 // startReplayBridge boots a real Bridge against the sink with the replay

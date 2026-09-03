@@ -37,7 +37,11 @@ type QueueItem struct {
 	SessionID string
 	// JobID pairs with SessionID (the task ID) so a drained task keeps its
 	// completion reporting: the exit callback reports results per job/task.
-	JobID      string
+	JobID string
+	// Attempt is the dispatch generation (G19) from the task_assign payload;
+	// carried through the queue so a drained task's terminal callback echoes
+	// the generation that dispatched it, not a stale one.
+	Attempt    int
 	Cols       int
 	Rows       int
 	PermMode   string

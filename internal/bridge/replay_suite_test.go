@@ -100,7 +100,7 @@ func TestReplayTaskReachesTerminalState(t *testing.T) {
 	sink := newReplaySink(t)
 	startReplayBridge(t, sink, fixtureScript(t, "success.script.jsonl"), 3)
 
-	sink.sendTaskAssign("job-success", "task-success", "replay")
+	sink.sendTaskAssign("job-success", "task-success", "replay", 1)
 
 	started := sink.waitFor(20*time.Second, "WS workflow:task_started for task-success",
 		func(ev sinkEvent) bool {
@@ -127,6 +127,11 @@ func TestReplayTaskReachesTerminalState(t *testing.T) {
 	if got := payloadString(t, terminal, "summary"); got == "" {
 		t.Error("task_result summary is empty — the fixture's agent_message_chunk output should survive into the report")
 	}
+	// G19: the terminal callback must echo the dispatch generation verbatim
+	// (task_assign attempt=1). A bridge that self-counts sessions would send 0.
+	if got := payloadInt(t, terminal, "attempt"); got != 1 {
+		t.Errorf("task_result attempt = %d, want 1 (echo of the task_assign payload)", got)
+	}
 }
 
 // TestReplayTaskFailureReportsTaskError drives the failure fixture: the
@@ -137,7 +142,7 @@ func TestReplayTaskFailureReportsTaskError(t *testing.T) {
 	sink := newReplaySink(t)
 	startReplayBridge(t, sink, fixtureScript(t, "failure.script.jsonl"), 3)
 
-	sink.sendTaskAssign("job-failure", "task-failure", "replay")
+	sink.sendTaskAssign("job-failure", "task-failure", "replay", 1)
 
 	terminal := sink.assertExactlyOneTerminal(t, "task-failure")
 	if terminal.Type != "workflow:task_error" {
@@ -145,6 +150,9 @@ func TestReplayTaskFailureReportsTaskError(t *testing.T) {
 	}
 	if got := payloadString(t, terminal, "taskId"); got != "task-failure" {
 		t.Errorf("task_error taskId = %q, want task-failure", got)
+	}
+	if got := payloadInt(t, terminal, "attempt"); got != 1 {
+		t.Errorf("task_error attempt = %d, want 1 (echo of the task_assign payload)", got)
 	}
 }
 
@@ -158,14 +166,14 @@ func TestReplayQueuedTaskDrains(t *testing.T) {
 	sink := newReplaySink(t)
 	b := startReplayBridge(t, sink, fixtureScript(t, "hang.script.jsonl"), 1)
 
-	sink.sendTaskAssign("job-queued", "task-first", "replay")
+	sink.sendTaskAssign("job-queued", "task-first", "replay", 1)
 	sink.waitFor(20*time.Second, "WS workflow:task_started for task-first",
 		func(ev sinkEvent) bool {
 			return ev.Channel == sinkChannelWS && isTaskEvent(ev, "workflow:task_started", "task-first")
 		})
 
 	// Pool is full and will stay full (the fixture's turn never ends).
-	sink.sendTaskAssign("job-queued", "task-second", "replay")
+	sink.sendTaskAssign("job-queued", "task-second", "replay", 4)
 	time.Sleep(500 * time.Millisecond)
 	if n := sink.countMatching(func(ev sinkEvent) bool {
 		return ev.Channel == sinkChannelWS && isTaskEvent(ev, "workflow:task_started", "task-second")
@@ -198,6 +206,12 @@ func TestReplayQueuedTaskDrains(t *testing.T) {
 	if !(terminalFirst.Seq < terminalSecond.Seq) {
 		t.Errorf("task-second terminal (seq %d) must follow task-first terminal (seq %d)", terminalSecond.Seq, terminalFirst.Seq)
 	}
+	// G19 through the QUEUE path: task-second was enqueued (not started) with
+	// attempt=4 — a deliberately non-consecutive generation, so neither a
+	// dropped field (0) nor a session self-counter (1) can pass by accident.
+	if got := payloadInt(t, terminalSecond, "attempt"); got != 4 {
+		t.Errorf("drained task-second attempt = %d, want 4 (echoed through the queue)", got)
+	}
 }
 
 // TestReplayGoldenSequenceMatches is the script-rot guard: replaying the
@@ -209,7 +223,7 @@ func TestReplayGoldenSequenceMatches(t *testing.T) {
 	sink := newReplaySink(t)
 	startReplayBridge(t, sink, fixtureScript(t, "success.script.jsonl"), 3)
 
-	sink.sendTaskAssign("job-success", "task-success", "replay")
+	sink.sendTaskAssign("job-success", "task-success", "replay", 1)
 	sink.assertExactlyOneTerminal(t, "task-success")
 
 	goldenPath := fixtureScript(t, "success.golden.jsonl")
@@ -332,7 +346,7 @@ func TestReplayHandshakeReportArrivesAndMismatchSurvives(t *testing.T) {
 	// proven the only way that cannot lie: dispatch real work afterwards
 	// and watch the lifecycle start.
 	sink.sendHandshakeMismatch()
-	sink.sendTaskAssign("job-hs", "task-hs", "replay")
+	sink.sendTaskAssign("job-hs", "task-hs", "replay", 1)
 	sink.waitFor(20*time.Second, "WS workflow:task_started for task-hs after a mismatch verdict",
 		func(ev sinkEvent) bool {
 			return ev.Channel == sinkChannelWS && isTaskEvent(ev, "workflow:task_started", "task-hs")
@@ -354,7 +368,7 @@ func TestReplayQuestionAnswerFlow(t *testing.T) {
 	sink := newReplaySink(t)
 	startReplayBridge(t, sink, fixtureScript(t, "e2e-question.script.jsonl"), 1)
 
-	sink.sendTaskAssign("job-q", "task-q", "replay")
+	sink.sendTaskAssign("job-q", "task-q", "replay", 1)
 
 	question := sink.waitFor(20*time.Second, "WS workflow:task_question for task-q",
 		func(ev sinkEvent) bool {
@@ -389,5 +403,89 @@ func TestReplayQuestionAnswerFlow(t *testing.T) {
 	terminal := sink.assertExactlyOneTerminal(t, "task-q")
 	if terminal.Type != "workflow:task_result" {
 		t.Fatalf("answered question must let the task complete, got %s (%s)", terminal.Type, terminal.Payload)
+	}
+}
+
+// waitForTaskReady blocks until the session for taskID exists AND its
+// multi-agent metadata (jobID/taskID) is set. The WS start signals
+// (task_started, progress-0) are emitted BEFORE SetMultiAgentMetadata, so a
+// test that stops the session on task_started races the metadata write — and
+// StopWithExitCode skips the exit callback for a session with no task
+// metadata, silently dropping the terminal report. Polling the metadata is
+// the deterministic gate.
+func waitForTaskReady(t *testing.T, b *Bridge, taskID string) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if sess := b.sessions.Get(taskID); sess != nil {
+			if jobID, tid, _ := sess.GetMultiAgentMetadata(); jobID != "" && tid != "" {
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("session %s never reported multi-agent metadata", taskID)
+}
+
+// TestReplayAttemptBindingAcrossRedispatch is the G19 slice: the same task
+// dispatched twice — attempt 0 first, then re-dispatched as attempt 1 after
+// its first terminal — and each terminal callback must carry ITS dispatch's
+// generation, never the other's. The hang fixture keeps both sessions
+// deterministic: the turn never ends on its own, so each round is ended
+// explicitly — failure (nonzero exit) for the first generation, success (exit
+// 0) for the second — matching the real-world sequence the guard exists for
+// (a failed attempt retried and succeeding). A bridge that reports the
+// "current" generation instead of the starting one, or mixes the two rounds'
+// metadata, fails here even though the API-side guard would catch it later —
+// the two ends assert independently by design.
+func TestReplayAttemptBindingAcrossRedispatch(t *testing.T) {
+	sink := newReplaySink(t)
+	b := startReplayBridge(t, sink, fixtureScript(t, "hang.script.jsonl"), 1)
+
+	// Generation 0: dispatch, then fail the run with a nonzero exit.
+	sink.sendTaskAssign("job-redispatch", "task-redispatch", "replay", 0)
+	sink.waitFor(20*time.Second, "WS workflow:task_started for task-redispatch (attempt 0)",
+		func(ev sinkEvent) bool {
+			return ev.Channel == sinkChannelWS && isTaskEvent(ev, "workflow:task_started", "task-redispatch")
+		})
+	waitForTaskReady(t, b, "task-redispatch")
+	if err := b.sessions.StopWithExitCode("task-redispatch", 1); err != nil {
+		t.Fatalf("stop task-redispatch (attempt 0): %v", err)
+	}
+
+	first := sink.waitFor(20*time.Second, "terminal callback for task-redispatch (attempt 0)",
+		func(ev sinkEvent) bool { return isTerminalCallback(ev, "task-redispatch") })
+	if first.Type != "workflow:task_error" {
+		t.Fatalf("attempt 0 (nonzero exit) must report workflow:task_error, got %s (%s)", first.Type, first.Payload)
+	}
+	if got := payloadInt(t, first, "attempt"); got != 0 {
+		t.Fatalf("attempt-0 terminal carries attempt = %d, want 0", got)
+	}
+
+	// Generation 1: re-dispatch the SAME task after its terminal, then let it
+	// succeed.
+	sink.sendTaskAssign("job-redispatch", "task-redispatch", "replay", 1)
+	sink.waitFor(20*time.Second, "WS workflow:task_started for task-redispatch (attempt 1)",
+		func(ev sinkEvent) bool {
+			return ev.Channel == sinkChannelWS && isTaskEvent(ev, "workflow:task_started", "task-redispatch")
+		})
+	waitForTaskReady(t, b, "task-redispatch")
+	if err := b.sessions.StopWithExitCode("task-redispatch", 0); err != nil {
+		t.Fatalf("stop task-redispatch (attempt 1): %v", err)
+	}
+
+	second := sink.waitFor(20*time.Second, "second terminal callback for task-redispatch (attempt 1)",
+		func(ev sinkEvent) bool { return isTerminalCallback(ev, "task-redispatch") && ev.Seq > first.Seq })
+	if second.Type != "workflow:task_result" {
+		t.Fatalf("attempt 1 (exit 0) must report workflow:task_result, got %s (%s)", second.Type, second.Payload)
+	}
+	if got := payloadInt(t, second, "attempt"); got != 1 {
+		t.Fatalf("attempt-1 terminal carries attempt = %d, want 1 — generations crossed", got)
+	}
+
+	// Exactly two terminals for the task, in order, one per generation.
+	terminals := sink.countMatching(func(ev sinkEvent) bool { return isTerminalCallback(ev, "task-redispatch") })
+	if terminals != 2 {
+		t.Fatalf("expected exactly 2 terminal callbacks (one per dispatch generation), got %d", terminals)
 	}
 }
