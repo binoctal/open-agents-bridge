@@ -53,6 +53,7 @@ const (
 	ModACP        = "acp"
 	ModPTY        = "pty"
 	ModAdapter    = "adapter"
+	ModPreview    = "preview"
 )
 
 // Global logger instance

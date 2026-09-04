@@ -28,6 +28,7 @@ import (
 	mcpPkg "github.com/binoctal/open-agents-bridge/internal/mcp"
 	"github.com/binoctal/open-agents-bridge/internal/metrics"
 	"github.com/binoctal/open-agents-bridge/internal/permission"
+	"github.com/binoctal/open-agents-bridge/internal/preview"
 	"github.com/binoctal/open-agents-bridge/internal/protocol"
 	"github.com/binoctal/open-agents-bridge/internal/reconnect"
 	"github.com/binoctal/open-agents-bridge/internal/replay"
@@ -197,6 +198,12 @@ type Bridge struct {
 	// Keep-alive data frame for preventing proxy idle timeout
 	keepAliveDone chan struct{}
 	lastSendTime  int64 // unix milliseconds of last business message send
+
+	// add-preview-hosting (task 4): on-disk cache of built preview
+	// artifacts, keyed by missionId, so a revive can re-upload without
+	// rebuilding. Nil-safe: preview.RunAndUpload/RunRevive treat a nil
+	// cache as "cache unavailable" and skip caching, never erroring.
+	previewCache *preview.Cache
 }
 
 // taskMeta stores metadata for workflow tasks
@@ -297,6 +304,17 @@ func New(cfg *config.Config) (*Bridge, error) {
 
 	// Initialize MCP manager
 	b.mcpManager = mcpPkg.NewManager(config.ConfigDir())
+
+	// add-preview-hosting: artifact cache is created unconditionally (it's
+	// just a directory) even when the feature is off, so flipping the
+	// config toggle on later doesn't need a restart to have somewhere to
+	// write. A cache init failure is logged and left nil — preview.RunAndUpload
+	// and RunRevive both treat nil as "no caching available" and continue.
+	if cache, err := preview.NewCache(filepath.Join(config.ConfigDir(), "preview-cache")); err != nil {
+		logger.Warn("[%s] preview artifact cache unavailable: %v", logger.ModPreview, err)
+	} else {
+		b.previewCache = cache
+	}
 
 	// Load E2EE keys if available
 	if cfg.PrivateKey != "" {
@@ -438,6 +456,14 @@ func (b *Bridge) Start() error {
 	// Start keep-alive data frame loop
 	b.logInfo("[%s] Launching keepAliveLoop goroutine...", logger.ModBridge)
 	go b.keepAliveLoop()
+
+	// add-preview-hosting (task 4.4): poll for user-requested preview
+	// revives. No existing ticker-based poll loop was found in bridge.go to
+	// piggyback on (permission/scanner rules are synced once, on connect —
+	// see syncRulesFromAPI — not on a recurring timer), so this starts its
+	// own, gated on the same config toggle as the build step.
+	b.logInfo("[%s] Launching previewRevivePollLoop goroutine...", logger.ModBridge)
+	go b.previewRevivePollLoop()
 
 	b.logInfo("[%s] All goroutines started, entering main loop", logger.ModBridge)
 
@@ -3258,6 +3284,70 @@ func (b *Bridge) handleWorkflowTaskMerge(msg Message) {
 		},
 		Timestamp: time.Now().UnixMilli(),
 	})
+
+	// add-preview-hosting (task 4.1-4.3): fire-and-forget build+upload of a
+	// static preview from the just-merged repo. Kicked off in a goroutine
+	// AFTER the merge-succeeded message above so a slow or failing build
+	// never delays it; jobId here is what the platform calls missionId.
+	b.maybeBuildPreview(jobId)
+}
+
+// maybeBuildPreview kicks off the preview build+upload flow for a mission
+// whose merge just succeeded, unless the feature is disabled (default) or
+// the artifact cache failed to initialize. It never blocks the caller and
+// never surfaces an error to it — see preview.RunAndUpload for why.
+func (b *Bridge) maybeBuildPreview(jobId string) {
+	if !b.config.PreviewBuildEnabled {
+		return
+	}
+	repoRoot := b.worktreeManager.ProjectDir()
+	go preview.RunAndUpload(b.apiClient, b.previewCache, jobId, repoRoot, b.logInfo)
+}
+
+// previewRevivePollInterval is how often the bridge asks the platform for
+// preview revive requests raised while this device was offline, busy, or
+// simply between merges. Revives are user-initiated and not time-critical
+// (the mission detail page shows an explicit "regenerate" action), so a
+// slow cadence is fine and keeps this well clear of the account-wide
+// Workers call budget (see do-free-tier-hardening in project memory).
+const previewRevivePollInterval = 5 * time.Minute
+
+// previewRevivePollLoop periodically checks for pending preview revives
+// (task 4.4) and re-uploads each mission's cached artifact. Skips the poll
+// entirely — no HTTP call at all — when the feature is disabled, matching
+// the "zero side effects when off" contract of the config toggle (task 4.5).
+func (b *Bridge) previewRevivePollLoop() {
+	ticker := time.NewTicker(previewRevivePollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-b.done:
+			return
+		case <-ticker.C:
+			b.pollPreviewRevives()
+		}
+	}
+}
+
+// pollPreviewRevives fetches and processes one batch of pending revives.
+// Every failure (network, per-item build/upload) is logged and skipped —
+// same best-effort contract as the merge-triggered build path.
+func (b *Bridge) pollPreviewRevives() {
+	if !b.config.PreviewBuildEnabled {
+		return
+	}
+
+	revives, err := b.apiClient.GetPendingRevives()
+	if err != nil {
+		b.logDebug("[%s] preview: pending-revives poll failed: %v", logger.ModPreview, err)
+		return
+	}
+
+	for _, r := range revives {
+		b.logInfo("[%s] preview: revive requested for mission %s", logger.ModPreview, r.MissionID)
+		go preview.RunRevive(b.apiClient, b.previewCache, r.MissionID, b.logInfo)
+	}
 }
 
 // handleWorkflowMergeAll handles multi-branch merge request for multi-device jobs
@@ -3295,6 +3385,13 @@ func (b *Bridge) handleWorkflowMergeAll(msg Message) {
 
 	b.logInfo("[%s] Workflow merge_all: %d branches for job %s", logger.ModWorkflow, len(branches), jobId)
 
+	// allMerged tracks whether every branch made it in cleanly. The preview
+	// build (task 4.1) only makes sense once the whole multi-device job has
+	// landed in main — a partial merge_all (fetch failure, merge error, or a
+	// conflict that stopped the loop) must not trigger a build against a
+	// half-merged tree.
+	allMerged := len(branches) > 0
+
 	// Execute sequential merge
 	for _, branch := range branches {
 		b.logInfo("[%s] Merging branch %s (task %s)", logger.ModWorkflow, branch.BranchName, branch.TaskID)
@@ -3311,6 +3408,7 @@ func (b *Bridge) handleWorkflowMergeAll(msg Message) {
 				},
 				Timestamp: time.Now().UnixMilli(),
 			})
+			allMerged = false
 			continue
 		}
 
@@ -3327,6 +3425,7 @@ func (b *Bridge) handleWorkflowMergeAll(msg Message) {
 				},
 				Timestamp: time.Now().UnixMilli(),
 			})
+			allMerged = false
 			continue
 		}
 
@@ -3342,6 +3441,7 @@ func (b *Bridge) handleWorkflowMergeAll(msg Message) {
 				},
 				Timestamp: time.Now().UnixMilli(),
 			})
+			allMerged = false
 			// Stop merging on conflict
 			break
 		}
@@ -3360,6 +3460,13 @@ func (b *Bridge) handleWorkflowMergeAll(msg Message) {
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
+	}
+
+	// add-preview-hosting (task 4.1-4.3): only once every branch in this
+	// merge_all landed cleanly, same fire-and-forget contract as the
+	// single-task merge path.
+	if allMerged {
+		b.maybeBuildPreview(jobId)
 	}
 }
 

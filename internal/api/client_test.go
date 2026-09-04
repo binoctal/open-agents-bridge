@@ -118,3 +118,155 @@ func TestClient_ApiError(t *testing.T) {
 		t.Fatal("expected error for 403 response")
 	}
 }
+
+// Preview hosting (add-preview-hosting, task 4.3)
+
+func TestClient_CreatePreview(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/api/missions/internal/mission-1/previews" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		var body struct {
+			Files []PreviewFile `json:"files"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Files) != 1 || body.Files[0].Path != "index.html" {
+			t.Fatalf("unexpected files in request: %+v", body.Files)
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"previewId": "p1",
+			"subdomain": "abc123",
+			"url":       "https://preview.openagents.top/abc123/",
+			"revived":   false,
+			"uploads": []map[string]string{
+				{"path": "index.html", "url": "https://r2.example.com/put-index"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	c := NewClient(cfg)
+
+	resp, err := c.CreatePreview("mission-1", []PreviewFile{{Path: "index.html", SHA256: "abc", Size: 5}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.PreviewID != "p1" || len(resp.Uploads) != 1 {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
+
+func TestClient_CreatePreview_QuotaError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]string{
+				"code":    "PREVIEW_QUOTA_EXCEEDED",
+				"message": "Free plan allows one active preview",
+			},
+		})
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	c := NewClient(cfg)
+
+	_, err := c.CreatePreview("mission-1", []PreviewFile{{Path: "index.html", SHA256: "abc", Size: 5}})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	previewErr, ok := err.(*PreviewAPIError)
+	if !ok {
+		t.Fatalf("expected *PreviewAPIError, got %T: %v", err, err)
+	}
+	if previewErr.Code != "PREVIEW_QUOTA_EXCEEDED" {
+		t.Errorf("unexpected code: %s", previewErr.Code)
+	}
+}
+
+func TestClient_CompletePreview(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/missions/internal/mission-1/previews/p1/complete" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "previewId": "p1"})
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	c := NewClient(cfg)
+
+	if err := c.CompletePreview("mission-1", "p1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClient_GetPendingRevives(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/missions/internal/previews/pending-revives" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"revives": []map[string]string{
+				{"missionId": "m1", "previewId": "p1"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	c := NewClient(cfg)
+
+	revives, err := c.GetPendingRevives()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revives) != 1 || revives[0].MissionID != "m1" {
+		t.Fatalf("unexpected revives: %+v", revives)
+	}
+}
+
+func TestClient_UploadPreviewFile(t *testing.T) {
+	var receivedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("expected PUT, got %s", r.Method)
+		}
+		body := make([]byte, r.ContentLength)
+		r.Body.Read(body)
+		receivedBody = body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	c := NewClient(cfg)
+
+	if err := c.UploadPreviewFile(server.URL+"/put-target", []byte("hello world")); err != nil {
+		t.Fatal(err)
+	}
+	if string(receivedBody) != "hello world" {
+		t.Errorf("unexpected uploaded body: %q", receivedBody)
+	}
+}
+
+func TestClient_UploadPreviewFile_NonSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	c := NewClient(cfg)
+
+	if err := c.UploadPreviewFile(server.URL, []byte("data")); err == nil {
+		t.Fatal("expected error for non-2xx PUT response")
+	}
+}

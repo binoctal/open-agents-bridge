@@ -58,6 +58,12 @@ type Config struct {
 
 	// v2.6: I/O Logging for debugging and auditing
 	IOLogging *IOLoggingConfig `json:"ioLogging,omitempty"`
+
+	// add-preview-hosting: build+upload a static preview after a workflow
+	// task's branch merges. Default OFF (zero value) — this runs an
+	// untrusted project's own build script on the user's device and uploads
+	// its output, so it stays opt-in until proven safe in the wild.
+	PreviewBuildEnabled bool `json:"previewBuildEnabled,omitempty"`
 }
 
 // fileConfig is the top-level structure of ~/.open-agents-bridge/config.json

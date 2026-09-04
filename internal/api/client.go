@@ -38,18 +38,26 @@ func NewClient(cfg *config.Config) *Client {
 }
 
 func (c *Client) request(method, path string, body interface{}) ([]byte, error) {
+	data, _, err := c.requestWithStatus(method, path, body)
+	return data, err
+}
+
+// requestWithStatus is like request but also returns the HTTP status code,
+// which preview-hosting error handling needs to distinguish error codes
+// (e.g. PREVIEW_QUOTA_EXCEEDED) without re-parsing the wrapped error string.
+func (c *Client) requestWithStatus(method, path string, body interface{}) ([]byte, int, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		bodyReader = bytes.NewReader(data)
 	}
 
 	req, err := http.NewRequest(method, c.baseURL+path, bodyReader)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	req.Header.Set("Authorization", "Bearer "+c.deviceToken)
@@ -57,20 +65,20 @@ func (c *Client) request(method, path string, body interface{}) ([]byte, error) 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, resp.StatusCode, err
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
+		return respBody, resp.StatusCode, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return respBody, nil
+	return respBody, resp.StatusCode, nil
 }
 
 // Permission Rules
@@ -339,4 +347,151 @@ func (c *Client) StoreMessage(msg MessageReport) (string, error) {
 	}
 
 	return resp.ID, nil
+}
+
+// Preview hosting (add-preview-hosting, task 4.3)
+//
+// The bridge is the only party that ever touches source: it builds the
+// merged worktree locally, hashes the static output, and uploads just the
+// bytes over these three calls. Every method here is best-effort by design
+// from the caller's point of view — see preview.RunAndUpload, which is the
+// only place that calls them and never lets a failure reach the mission.
+
+// PreviewFile is one entry in an upload manifest: a relative, forward-slash
+// path plus its content hash and byte size. Mirrors the platform's
+// ManifestFile (apps/api/src/services/preview-deployments.ts).
+type PreviewFile struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+}
+
+// PreviewUpload is one presigned PUT target the platform wants filled in.
+// Files already present in the bucket (a revive hitting the skip-list) are
+// simply absent from this list — nothing to compare against, just upload
+// exactly what comes back.
+type PreviewUpload struct {
+	Path string `json:"path"`
+	URL  string `json:"url"`
+}
+
+// DeclarePreviewResponse is the 201 body from POST .../previews.
+type DeclarePreviewResponse struct {
+	PreviewID string          `json:"previewId"`
+	Subdomain string          `json:"subdomain"`
+	URL       string          `json:"url"`
+	Revived   bool            `json:"revived"`
+	Uploads   []PreviewUpload `json:"uploads"`
+}
+
+// PreviewAPIError is the {"error":{"code","message"}} shape every
+// preview-hosting failure response carries. Codes include
+// PREVIEW_QUOTA_EXCEEDED, PREVIEW_DAILY_LIMIT_EXCEEDED, PREVIEW_TAKEN_DOWN,
+// PREVIEW_UPLOAD_UNAVAILABLE, PREVIEW_PLATFORM_BUSY, PREVIEW_INVALID_MANIFEST.
+// The bridge never branches on the code — every one of them means "log and
+// stop" — but callers may want it for the log line.
+type PreviewAPIError struct {
+	StatusCode int
+	Code       string
+	Message    string
+}
+
+func (e *PreviewAPIError) Error() string {
+	return fmt.Sprintf("preview API error %d %s: %s", e.StatusCode, e.Code, e.Message)
+}
+
+// parsePreviewError turns a non-2xx preview response body into a
+// PreviewAPIError when it parses as the documented error shape, otherwise
+// returns the original error unchanged.
+func parsePreviewError(status int, body []byte, orig error) error {
+	if len(body) == 0 {
+		return orig
+	}
+	var wrapped struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &wrapped); err != nil || wrapped.Error.Code == "" {
+		return orig
+	}
+	return &PreviewAPIError{StatusCode: status, Code: wrapped.Error.Code, Message: wrapped.Error.Message}
+}
+
+// CreatePreview declares (or revives) a preview deployment for a mission
+// from a file manifest. jobId here is the bridge-side name for what the
+// platform calls missionId.
+func (c *Client) CreatePreview(jobID string, files []PreviewFile) (*DeclarePreviewResponse, error) {
+	body := struct {
+		Files []PreviewFile `json:"files"`
+	}{Files: files}
+
+	data, status, err := c.requestWithStatus("POST", "/api/missions/internal/"+jobID+"/previews", body)
+	if err != nil {
+		return nil, parsePreviewError(status, data, err)
+	}
+
+	var resp DeclarePreviewResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// CompletePreview tells the platform every presigned upload for previewID
+// landed, flipping the preview to ready.
+func (c *Client) CompletePreview(jobID, previewID string) error {
+	data, status, err := c.requestWithStatus("POST", "/api/missions/internal/"+jobID+"/previews/"+previewID+"/complete", nil)
+	if err != nil {
+		return parsePreviewError(status, data, err)
+	}
+	return nil
+}
+
+// PendingRevive is one mission whose preview the user asked to regenerate
+// while this device was offline or busy.
+type PendingRevive struct {
+	MissionID string `json:"missionId"`
+	PreviewID string `json:"previewId"`
+}
+
+// GetPendingRevives polls for user-requested preview rebuilds. Piggybacked
+// on whatever periodic poll loop the bridge already runs (task 4.4).
+func (c *Client) GetPendingRevives() ([]PendingRevive, error) {
+	data, err := c.request("GET", "/api/missions/internal/previews/pending-revives", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Revives []PendingRevive `json:"revives"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Revives, nil
+}
+
+// UploadPreviewFile PUTs raw file bytes to a presigned R2 upload URL. The
+// signature covers UNSIGNED-PAYLOAD with SignedHeaders=host only, so this
+// deliberately sends no headers beyond what net/http sets automatically
+// (Content-Length) — an extra header (e.g. Content-Type) can invalidate the
+// signature.
+func (c *Client) UploadPreviewFile(url string, data []byte) error {
+	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	// Use a client with no default headers of its own; c.httpClient carries
+	// only a timeout, so it's safe to reuse here too.
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("preview upload PUT failed %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
 }

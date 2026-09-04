@@ -26,6 +26,13 @@ func NewWorktreeManager(projectDir string) *WorktreeManager {
 	return &WorktreeManager{projectDir: projectDir}
 }
 
+// ProjectDir returns the base project directory (the main worktree, not any
+// task worktree) — where a merge lands and thus where a post-merge preview
+// build must run.
+func (w *WorktreeManager) ProjectDir() string {
+	return w.projectDir
+}
+
 // IsGitRepo checks if the project directory is a git repository
 func (w *WorktreeManager) IsGitRepo() bool {
 	gitDir := filepath.Join(w.projectDir, ".git")
