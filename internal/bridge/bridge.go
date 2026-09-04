@@ -204,6 +204,18 @@ type Bridge struct {
 	// rebuilding. Nil-safe: preview.RunAndUpload/RunRevive treat a nil
 	// cache as "cache unavailable" and skip caching, never erroring.
 	previewCache *preview.Cache
+
+	// preview-hosting-ux-parity (D3): per-mission in-flight guard so
+	// overlapping task completions in one mission skip instead of stacking
+	// builds. The merge path is deliberately exempt — it is the
+	// final-authority rebuild and must always run.
+	previewInFlightMu sync.Mutex
+	previewInFlight   map[string]bool
+
+	// previewBuildRun is the launch seam for the task-completed preview
+	// path (nil = preview.RunAndUpload). Tests substitute it to observe
+	// launches without an HTTP boundary; set before serving, never after.
+	previewBuildRun func(client preview.Uploader, cache *preview.Cache, jobID, repoRoot string, logf preview.Logf)
 }
 
 // taskMeta stores metadata for workflow tasks
@@ -269,6 +281,7 @@ func New(cfg *config.Config) (*Bridge, error) {
 		lineBoundary:      make(map[string]bool),
 		sessionDisp:       make(map[string]chan protocol.Message),
 		taskMeta:          make(map[string]*taskMeta),
+		previewInFlight:   make(map[string]bool),
 		reconnectStrategy: reconnect.NewStrategy(),
 		stateManager:      NewStateManager(),
 		reconnectCallback: reconnect.NewCallbackManager(),
@@ -3333,11 +3346,70 @@ func (b *Bridge) handleWorkflowTaskMerge(msg Message) {
 // the artifact cache failed to initialize. It never blocks the caller and
 // never surfaces an error to it — see preview.RunAndUpload for why.
 func (b *Bridge) maybeBuildPreview(jobId string) {
-	if !b.config.PreviewBuildEnabled {
+	if !b.config.PreviewBuildEffective() {
 		return
 	}
 	repoRoot := b.worktreeManager.ProjectDir()
 	go preview.RunAndUpload(b.apiClient, b.previewCache, jobId, repoRoot, b.logInfo)
+}
+
+// maybeBuildPreviewFromWorktree (preview-hosting-ux-parity D3) builds a
+// preview from the task's OWN worktree the moment the task completes —
+// previews no longer wait for the user to trigger a merge. Conditions:
+// toggle effective-ON, exitCode 0 (a failed task has nothing worth
+// previewing), and the task actually ran in a worktree (an in-place task
+// shares the live repo; building here would race whatever comes next).
+//
+// Fire-and-forget by construction: the caller invokes this AFTER
+// SendTaskResult returned, and the goroutine works exclusively off values
+// captured here (jobId/workDir), so a slow build can never delay the task
+// callback. The merge path remains as the final-authority rebuild on top.
+func (b *Bridge) maybeBuildPreviewFromWorktree(meta *taskMeta, exitCode int) {
+	if !b.config.PreviewBuildEffective() {
+		return
+	}
+	if exitCode != 0 {
+		return
+	}
+	if meta == nil || !meta.Worktree || meta.WorkDir == "" {
+		return
+	}
+	jobId, workDir := meta.JobID, meta.WorkDir
+	if !b.previewBuildStart(jobId) {
+		b.logInfo("[%s] preview: build already in flight for mission %s, skipping (merge path will finalize)", logger.ModWorkflow, jobId)
+		return
+	}
+	run := b.previewBuildRun
+	if run == nil {
+		run = preview.RunAndUpload
+	}
+	go func() {
+		defer b.previewBuildDone(jobId)
+		run(b.apiClient, b.previewCache, jobId, workDir, b.logInfo)
+	}()
+}
+
+// previewBuildStart claims the mission's in-flight slot; false means a
+// build is already running and this trigger must skip. Lazily initializes
+// the map so a hand-built Bridge (tests) is safe without the constructor.
+func (b *Bridge) previewBuildStart(jobId string) bool {
+	b.previewInFlightMu.Lock()
+	defer b.previewInFlightMu.Unlock()
+	if b.previewInFlight == nil {
+		b.previewInFlight = make(map[string]bool)
+	}
+	if b.previewInFlight[jobId] {
+		return false
+	}
+	b.previewInFlight[jobId] = true
+	return true
+}
+
+// previewBuildDone releases the mission's in-flight slot.
+func (b *Bridge) previewBuildDone(jobId string) {
+	b.previewInFlightMu.Lock()
+	defer b.previewInFlightMu.Unlock()
+	delete(b.previewInFlight, jobId)
 }
 
 // previewRevivePollInterval is how often the bridge asks the platform for
@@ -3370,7 +3442,7 @@ func (b *Bridge) previewRevivePollLoop() {
 // Every failure (network, per-item build/upload) is logged and skipped —
 // same best-effort contract as the merge-triggered build path.
 func (b *Bridge) pollPreviewRevives() {
-	if !b.config.PreviewBuildEnabled {
+	if !b.config.PreviewBuildEffective() {
 		return
 	}
 
@@ -3579,6 +3651,11 @@ func (b *Bridge) handleSessionExit(sessionID string, exitCode int, output []byte
 			b.callbackManager.SendTaskError(result)
 		} else {
 			b.callbackManager.SendTaskResult(result)
+			// preview-hosting-ux-parity (D3): the preview no longer waits
+			// for merge — build from this task's worktree now that the
+			// result callback is on the wire. meta was captured above; the
+			// map delete already happened, the struct itself is still ours.
+			b.maybeBuildPreviewFromWorktree(meta, exitCode)
 		}
 	}
 }
