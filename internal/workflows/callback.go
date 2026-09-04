@@ -53,10 +53,43 @@ func DefaultCallbackConfig() CallbackConfig {
 	homeDir, _ := os.UserHomeDir()
 	return CallbackConfig{
 		Timeout:         30 * time.Minute,
-		MaxRetries:      3,
+		MaxRetries:      len(callbackRetryDelays) + 1,
 		CacheDir:        filepath.Join(homeDir, ".open-agents-bridge", "callback-cache"),
 		MaxArtifactSize: 100 * 1024, // 100KB
 	}
+}
+
+// Terminal-callback retry schedule. The old 1s/2s/4s (7s total) exhausted
+// inside the API's 1102 CPU-limit penalty window, which lasts 60-80s
+// account-wide (prod job_1788524351375, 2026-09-04): a task_result burned
+// its whole retry budget while every attempt still hit the limit, and with
+// no cache directory configured the event was lost for good. This schedule
+// spans the window; past the last entry the delay repeats.
+var callbackRetryDelays = []time.Duration{
+	1 * time.Second,
+	15 * time.Second,
+	30 * time.Second,
+	60 * time.Second,
+}
+
+// Output batching (design D2): a real ACP turn flushes one content block per
+// assistant message — a chatty task meant one HTTP POST per frame and, API
+// side, one D1 write + DO fetch per frame, which is what tripped the CPU
+// limit above. Frames for a task are coalesced into one request per flush
+// window; a full buffer flushes early and overflow past the per-window cap
+// is dropped with a marker (output is display-only; task state travels in
+// task_result).
+const (
+	outputFlushInterval = 200 * time.Millisecond
+	outputFlushBytes    = 64 * 1024
+	outputMaxBuffer     = 1024 * 1024
+)
+
+type outputBatch struct {
+	jobID, taskID, stream string
+	buf                   strings.Builder
+	dropped               int
+	timer                 *time.Timer
 }
 
 // CallbackManager handles task completion callbacks to the Orchestrator
@@ -67,6 +100,9 @@ type CallbackManager struct {
 	// golden, when non-nil, mirrors every outbound callback event into the
 	// replay golden sequence (G17). Nil-safe no-op hooks.
 	golden *replay.GoldenRecorder
+
+	outputMu      sync.Mutex
+	outputBatches map[string]*outputBatch
 }
 
 // SetGoldenRecorder enables golden recording of callback events.
@@ -81,13 +117,23 @@ func NewCallbackManager(config CallbackConfig) *CallbackManager {
 	// with "unsupported protocol scheme".
 	config.APIURL = httpURLFromWS(config.APIURL)
 	if config.MaxRetries == 0 {
-		config.MaxRetries = 3
+		config.MaxRetries = len(callbackRetryDelays) + 1
 	}
 	if config.Timeout == 0 {
 		config.Timeout = 30 * time.Minute
 	}
 	if config.MaxArtifactSize == 0 {
 		config.MaxArtifactSize = 100 * 1024
+	}
+	// The bridge core constructs CallbackConfig without CacheDir, and the
+	// cacheEvent fallback is gated on it — without this default a terminal
+	// callback that exhausts its retries is lost forever and the orchestrator
+	// re-dispatches the task into an infinite loop (prod
+	// job_1788524351375, 2026-09-04). RetryCachedEvents drains the cache on
+	// reconnect and heartbeat.
+	if config.CacheDir == "" {
+		homeDir, _ := os.UserHomeDir()
+		config.CacheDir = filepath.Join(homeDir, ".open-agents-bridge", "callback-cache")
 	}
 
 	// Ensure cache directory exists
@@ -196,8 +242,10 @@ func (m *CallbackManager) sendEventWithRetry(event map[string]interface{}, taskI
 
 	for attempt := 0; attempt < m.config.MaxRetries; attempt++ {
 		if attempt > 0 {
-			// Exponential backoff: 1s, 2s, 4s
-			delay := time.Second * time.Duration(1<<uint(attempt-1))
+			delay := callbackRetryDelays[attempt-1]
+			if attempt-1 >= len(callbackRetryDelays) {
+				delay = callbackRetryDelays[len(callbackRetryDelays)-1]
+			}
 			logger.Debug("[%s] Retrying callback for task %s after %v (attempt %d/%d)",
 				logger.ModWorkflow, taskID, delay, attempt+1, m.config.MaxRetries)
 			time.Sleep(delay)
@@ -346,28 +394,93 @@ func (m *CallbackManager) GetTimeout() time.Duration {
 	return m.config.Timeout
 }
 
-// SendTaskOutput sends real-time task output to the orchestrator
+// SendTaskOutput buffers real-time task output into a per-task batch. Frames
+// coalesce for outputFlushInterval (or until the buffer fills) and go out as
+// one request — see the outputBatch comment for why per-frame posts are not
+// survivable.
 func (m *CallbackManager) SendTaskOutput(jobID, taskID, stream, content string) {
 	if m.config.APIURL == "" {
 		return
 	}
 
+	m.outputMu.Lock()
+	defer m.outputMu.Unlock()
+
+	if m.outputBatches == nil {
+		m.outputBatches = make(map[string]*outputBatch)
+	}
+
+	batch, ok := m.outputBatches[taskID]
+	if !ok || batch.jobID != jobID || batch.stream != stream {
+		if ok {
+			// Key reuse with changed job/stream: ship what's buffered under
+			// the old identity before starting the new batch.
+			m.flushOutputLocked(batch)
+		}
+		batch = &outputBatch{jobID: jobID, taskID: taskID, stream: stream}
+		m.outputBatches[taskID] = batch
+		batch.timer = time.AfterFunc(outputFlushInterval, func() { m.flushTaskOutput(taskID) })
+	}
+
+	if room := outputMaxBuffer - batch.buf.Len(); room > 0 {
+		if len(content) > room {
+			batch.buf.WriteString(content[:room])
+			batch.dropped += len(content) - room
+		} else {
+			batch.buf.WriteString(content)
+		}
+	} else {
+		batch.dropped += len(content)
+	}
+
+	if batch.buf.Len() >= outputFlushBytes {
+		m.flushOutputLocked(batch)
+	}
+}
+
+// flushTaskOutput is the timer entry: flush the task's batch if still open.
+func (m *CallbackManager) flushTaskOutput(taskID string) {
+	m.outputMu.Lock()
+	defer m.outputMu.Unlock()
+	if batch, ok := m.outputBatches[taskID]; ok {
+		m.flushOutputLocked(batch)
+	}
+}
+
+// flushOutputLocked ships a batch as one task_output event. Caller holds
+// outputMu.
+func (m *CallbackManager) flushOutputLocked(batch *outputBatch) {
+	if batch.timer != nil {
+		batch.timer.Stop()
+	}
+	delete(m.outputBatches, batch.taskID)
+
+	content := batch.buf.String()
+	if content == "" && batch.dropped == 0 {
+		return
+	}
+	if batch.dropped > 0 {
+		content += fmt.Sprintf("\n[... %d bytes of task output dropped by bridge flush cap ...]", batch.dropped)
+	}
+
 	event := map[string]interface{}{
 		"type": "workflow:task_output",
 		"payload": map[string]interface{}{
-			"missionId": jobID,
-			"jobId":     jobID,
-			"taskId":    taskID,
-			"stream":    stream,
+			"missionId": batch.jobID,
+			"jobId":     batch.jobID,
+			"taskId":    batch.taskID,
+			"stream":    batch.stream,
 			"content":   content,
 		},
 		"timestamp": time.Now().UnixMilli(),
 	}
 
-	// Send asynchronously without retry (real-time streaming)
+	// Async without retry: output frames are display-only. The batcher
+	// already cut request volume by orders of magnitude; a lost window costs
+	// a scrollback update, never task state (task_result carries that).
 	go func() {
 		if err := m.postEvent(event); err != nil {
-			logger.Warn("[%s] Failed to send task output: %v", logger.ModWorkflow, err)
+			logger.Warn("[%s] Failed to send batched task output for task %s: %v", logger.ModWorkflow, batch.taskID, err)
 		}
 	}()
 }

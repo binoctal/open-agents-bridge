@@ -711,6 +711,11 @@ func (b *Bridge) readLoop() {
 			// Re-send the capability report: the probe conclusion may have
 			// changed while disconnected (e.g. API moved, token rotated).
 			go b.sendCapabilityReport()
+			// Drain terminal callbacks (task_result/task_error) that exhausted
+			// their retries while the API was rate-limiting or unreachable and
+			// were persisted to the callback cache. Without this the cache
+			// write is dead code and those results are lost forever.
+			go b.retryCachedCallbacks()
 			b.reconnectCallback.Notify(reconnect.Event{
 				Type:      reconnect.EventSuccess,
 				Attempts:  b.reconnectStrategy.Attempts(),
@@ -2296,6 +2301,21 @@ func (b *Bridge) sendMessage(msg Message) error {
 	return err
 }
 
+// retryCachedCallbacks drains terminal callbacks (task_result / task_error)
+// that exhausted their in-memory retries and were persisted to the callback
+// cache. Runs on WS reconnect and every heartbeat tick — the two moments the
+// API is most likely to be reachable again after an outage or rate-limit
+// penalty window. G19 attempt binding on the API side rejects a cached
+// result whose task was already re-dispatched, which is the correct outcome.
+func (b *Bridge) retryCachedCallbacks() {
+	if b.callbackManager == nil {
+		return
+	}
+	if err := b.callbackManager.RetryCachedEvents(); err != nil {
+		b.logDebug("[%s] Cached callback drain incomplete: %v", logger.ModWorkflow, err)
+	}
+}
+
 // sendTaskOutput sends task output to the workflow orchestrator via the callback
 func (b *Bridge) sendTaskOutput(jobID, taskID, stream, content string) {
 	if b.callbackManager == nil {
@@ -2331,6 +2351,12 @@ func (b *Bridge) heartbeat() {
 				}
 			}
 			lastTickTime = now
+
+			// Periodic drain of cached terminal callbacks: covers penalty
+			// windows that outlive a single reconnect (the API's 1102
+			// CPU-limit window is 60-80s account-wide) and bridges that
+			// start with a leftover cache from a previous run.
+			b.retryCachedCallbacks()
 
 			b.connMu.Lock()
 			if b.conn != nil {
