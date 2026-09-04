@@ -2457,12 +2457,22 @@ func (b *Bridge) updateLastSeen() {
 	// This ensures the connection is properly closed after the server finishes writing
 	_, _ = io.ReadAll(resp.Body)
 
+	// A non-2xx status is a heartbeat failure even though the transport
+	// succeeded: the counter used to reset here unconditionally, so a
+	// persistent 401 (stale device token) only ever DEBUG-logged and the
+	// reconnect that re-establishes the WebSocket never fired.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b.heartbeatFailures++
+		b.logWarn("[%s] Heartbeat returned status %d (%d/5)", logger.ModHeartbeat, resp.StatusCode, b.heartbeatFailures)
+		if b.heartbeatFailures >= 5 {
+			b.logWarn("[%s] 5 consecutive heartbeat failures, reconnecting...", logger.ModHeartbeat)
+			b.reconnect()
+		}
+		return
+	}
+
 	// Reset failure counter on success
 	b.heartbeatFailures = 0
-
-	if resp.StatusCode != 200 {
-		b.logDebug("[%s] Heartbeat returned status %d", logger.ModHeartbeat, resp.StatusCode)
-	}
 }
 
 func (b *Bridge) reconnect() {
