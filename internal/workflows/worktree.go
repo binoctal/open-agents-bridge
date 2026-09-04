@@ -19,11 +19,38 @@ type WorktreeManager struct {
 // The base is absolutized here: every path the manager derives (worktree paths
 // handed to ACP session/new as cwd) must be absolute, and callers pass a
 // literal relative base (".") — known-issue #10.
+//
+// The base is then resolved upward to the repository root: bridges routinely
+// start from a monorepo subdirectory (e.g. apps/api) where `.git` lives at
+// the repo root, and an unresolved subdirectory silently disabled worktree
+// isolation entirely (workDir-blindspot incident 2026-09-04) — IsGitRepo
+// found no .git, the task ran in the live repo, and the orchestrator's
+// contract gate saw no file evidence.
 func NewWorktreeManager(projectDir string) *WorktreeManager {
 	if abs, err := filepath.Abs(projectDir); err == nil {
 		projectDir = abs
 	}
+	if root, ok := findRepoRoot(projectDir); ok {
+		projectDir = root
+	}
 	return &WorktreeManager{projectDir: projectDir}
+}
+
+// findRepoRoot walks up from dir looking for a `.git` entry (a directory for
+// a normal repository, or a file for a linked worktree). ok is false when no
+// ancestor carries one — the caller then keeps the original directory and
+// the existing non-git fallbacks apply.
+func findRepoRoot(dir string) (string, bool) {
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
 }
 
 // ProjectDir returns the base project directory (the main worktree, not any
@@ -116,6 +143,41 @@ func (w *WorktreeManager) CommitAll(worktreePath, taskID, taskTitle string) (str
 	}
 
 	return strings.TrimSpace(string(hashOutput)), nil
+}
+
+// ListChangedFiles reports the paths git sees as changed (staged, unstaged,
+// or untracked) under dir — filesystem truth for the orchestrator's contract
+// gate, independent of whatever the CLI's prose output mentions. Rename
+// entries report the destination path; quoted paths are unquoted.
+func (w *WorktreeManager) ListChangedFiles(dir string) []string {
+	// -uall: porcelain collapses an untracked directory to "dir/" — the
+	// contract gate needs the individual file paths inside it.
+	cmd := exec.Command("git", "status", "--porcelain", "-uall")
+	cmd.Dir = dir
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	var files []string
+	for _, line := range strings.Split(string(output), "\n") {
+		// Porcelain format: "XY <path>", path starts at column 4
+		if len(line) < 4 {
+			continue
+		}
+		path := strings.TrimSpace(line[3:])
+		// Rename entries: "R  old -> new" — the destination is the truth
+		if idx := strings.LastIndex(path, " -> "); idx >= 0 {
+			path = path[idx+4:]
+		}
+		if len(path) >= 2 && path[0] == '"' && path[len(path)-1] == '"' {
+			path = path[1 : len(path)-1]
+		}
+		if path != "" {
+			files = append(files, path)
+		}
+	}
+	return files
 }
 
 // RemoveWorktree removes a worktree and its branch

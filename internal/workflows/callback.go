@@ -34,6 +34,12 @@ type TaskResult struct {
 	// superseded ones; the bridge never generates or infers it. 0 means the
 	// assign carried no attempt field (pre-G19 orchestrator).
 	Attempt int `json:"attempt"`
+	// ChangedFiles is the filesystem truth collected from `git status
+	// --porcelain` in the task's workDir at turn end — the non-LLM source
+	// the orchestrator's contract gate unions with its LLM extraction
+	// (workDir-blindspot incident 2026-09-04). nil = not collected (no git
+	// / clean tree); the callback payload then omits the field.
+	ChangedFiles []string `json:"changedFiles,omitempty"`
 }
 
 // CallbackConfig holds configuration for the callback mechanism
@@ -186,17 +192,24 @@ func (m *CallbackManager) SendTaskResult(result TaskResult) error {
 		return nil
 	}
 
+	payload := map[string]interface{}{
+		"missionId":  result.JobID,
+		"jobId":      result.JobID,
+		"taskId":     result.TaskID,
+		"artifacts":  result.Artifacts,
+		"summary":    result.Summary,
+		"commitHash": result.CommitHash,
+		"attempt":    result.Attempt,
+	}
+	// Filesystem truth for the contract gate; only attached when collected so
+	// legacy orchestrators and golden-replay fixtures see an unchanged shape.
+	if len(result.ChangedFiles) > 0 {
+		payload["changedFiles"] = result.ChangedFiles
+	}
+
 	event := map[string]interface{}{
-		"type": "workflow:task_result",
-		"payload": map[string]interface{}{
-			"missionId":  result.JobID,
-			"jobId":      result.JobID,
-			"taskId":     result.TaskID,
-			"artifacts":  result.Artifacts,
-			"summary":    result.Summary,
-			"commitHash": result.CommitHash,
-			"attempt":    result.Attempt,
-		},
+		"type":      "workflow:task_result",
+		"payload":   payload,
 		"timestamp": time.Now().UnixMilli(),
 	}
 

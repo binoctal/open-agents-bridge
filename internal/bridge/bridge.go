@@ -3523,6 +3523,14 @@ func (b *Bridge) handleSessionExit(sessionID string, exitCode int, output []byte
 	delete(b.taskMeta, sessionID)
 	b.taskMetaMu.Unlock()
 
+	// Filesystem truth for the orchestrator's contract gate: collect what git
+	// sees as changed BEFORE the worktree auto-commit below sweeps it into a
+	// commit (afterwards the tree is clean and the evidence is gone). This
+	// runs regardless of worktree isolation — when isolation was skipped the
+	// CLI wrote into the live repo, and that output must still be reported
+	// (workDir-blindspot incident 2026-09-04).
+	changedFiles := b.worktreeManager.ListChangedFiles(meta.WorkDir)
+
 	// Auto-commit in worktree if applicable
 	var commitHash string
 	if meta.Worktree {
@@ -3559,6 +3567,10 @@ func (b *Bridge) handleSessionExit(sessionID string, exitCode int, output []byte
 
 		if commitHash != "" {
 			result.CommitHash = commitHash
+		}
+
+		if len(changedFiles) > 0 {
+			result.ChangedFiles = changedFiles
 		}
 
 		if exitCode != 0 {

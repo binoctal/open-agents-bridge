@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -379,6 +380,22 @@ func startReplayBridge(t *testing.T, sink *replaySink, scriptPath string, maxCon
 		ServerURL:   sink.url,
 		// No E2EE keys: uplink stays plaintext, which is what the sink parses.
 	}
+
+	// The task_result callback embeds `git status --porcelain` truth from the
+	// session workDir ("." = this process's cwd). Chdir into an isolated
+	// plain temp dir (no .git anywhere up the chain, so nothing is collected)
+	// — otherwise the developer's dirty bridge checkout leaks into the
+	// payload and the golden replay is nondeterministic. The shim script path
+	// was absolutized above; sessions spawn with cwd "." from here on.
+	prevWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatalf("chdir to isolated workdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prevWd) })
+
 	b, err := New(cfg)
 	if err != nil {
 		t.Fatalf("bridge.New: %v", err)
@@ -408,8 +425,14 @@ func startReplayBridge(t *testing.T, sink *replaySink, scriptPath string, maxCon
 	return b
 }
 
-// fixtureScript returns the absolute path of a committed replay fixture.
+// fixtureScript returns the absolute path of a committed replay fixture,
+// anchored to this source file (not the process cwd — startReplayBridge
+// chdirs into an isolated dir for deterministic changedFiles collection).
 func fixtureScript(t *testing.T, name string) string {
 	t.Helper()
-	return filepath.Join("..", "..", "test", "fixtures", "replay", name)
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed for fixture path anchor")
+	}
+	return filepath.Join(filepath.Dir(thisFile), "..", "..", "test", "fixtures", "replay", name)
 }
