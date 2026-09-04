@@ -3489,7 +3489,7 @@ func (b *Bridge) handleQuestionMarker(sessionID string, sess *session.Session, c
 
 	// G18: a [QUESTION] on the PTY path is the permission-pending signal —
 	// reuse of the one pattern matcher we have, no second copy of it.
-	if s, changed := b.statusTrackerFor(sessionID).transition(protocol.StatusPermissionPending); changed {
+	if s, changed := b.statusTrackerFor(sessionID).transition(protocol.StatusPermissionPending, false); changed {
 		b.sendStatus(sessionID, sess.GetProtocolName(), s, "")
 	}
 

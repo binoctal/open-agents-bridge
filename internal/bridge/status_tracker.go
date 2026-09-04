@@ -42,18 +42,20 @@ type statusTracker struct {
 
 // observe maps one protocol message to a status transition. It returns the
 // new status and whether it should be reported (a real transition that
-// survived the dwell throttle).
+// survived the dwell throttle and the post-idle straggler window).
 func (t *statusTracker) observe(msg protocol.Message) (protocol.AgentStatus, bool) {
 	next, ok := statusFromMessage(msg)
 	if !ok {
 		return t.reported, false
 	}
-	return t.transition(next)
+	return t.transition(next, false)
 }
 
 // observePrompt reports thinking right after a prompt was handed to the CLI.
+// Forced: a new prompt always restarts the turn, bypassing the post-idle
+// straggler suppression.
 func (t *statusTracker) observePrompt() (protocol.AgentStatus, bool) {
-	return t.transition(protocol.StatusThinking)
+	return t.transition(protocol.StatusThinking, true)
 }
 
 // current returns the last reported status (idle before anything reported).
@@ -66,19 +68,29 @@ func (t *statusTracker) current() protocol.AgentStatus {
 	return t.reported
 }
 
-func (t *statusTracker) transition(next protocol.AgentStatus) (protocol.AgentStatus, bool) {
+func (t *statusTracker) transition(next protocol.AgentStatus, force bool) (protocol.AgentStatus, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := time.Now()
 	if t.hasReported && next == t.reported {
 		return t.reported, false
 	}
-	// A backward move within the active states inside the dwell window is a
-	// flap — keep showing the more advanced state.
-	if t.hasReported {
-		nextRank, nextActive := activeStatusRank[next]
+	if t.hasReported && !force {
+		_, nextActive := activeStatusRank[next]
+		// A backward move within the active states inside the dwell window
+		// is a flap — keep showing the more advanced state.
+		nextRank, _ := activeStatusRank[next]
 		curRank, curActive := activeStatusRank[t.reported]
 		if nextActive && curActive && nextRank < curRank && now.Sub(t.lastReport) < statusDwell {
+			return t.reported, false
+		}
+		// Straggler after idle: ACP agents can emit the prompt response
+		// (stopReason → idle) ahead of their final session/update chunks, so
+		// content arriving just after an idle report belongs to the turn
+		// that already ended. Swallow it or the session sticks in streaming
+		// forever (live-observed on staging with opencode). A forced
+		// transition (new prompt) always passes.
+		if nextActive && t.reported == protocol.StatusIdle && now.Sub(t.lastReport) < statusDwell {
 			return t.reported, false
 		}
 	}

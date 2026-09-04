@@ -100,6 +100,46 @@ func TestTrackerBackwardAllowedAfterDwell(t *testing.T) {
 	}
 }
 
+// Straggler after idle: the ACP prompt response (stopReason → idle) can beat
+// the agent's final content chunks, so active observations landing inside the
+// dwell window after an idle report belong to the ended turn and must be
+// swallowed — otherwise the session sticks in streaming forever
+// (live-observed on staging with opencode). A new prompt forces through.
+func TestTrackerPostIdleStragglerSuppressed(t *testing.T) {
+	tr := &statusTracker{}
+	tr.observePrompt()       // thinking
+	tr.observe(contentMsg()) // streaming
+
+	// Turn end races ahead of the last chunks.
+	if s, changed := tr.observe(typedStatusMsg(protocol.StatusIdle)); !changed || s != protocol.StatusIdle {
+		t.Fatalf("turn end: got (%v,%v), want (idle,true)", s, changed)
+	}
+	if _, changed := tr.observe(thoughtMsg()); changed {
+		t.Fatal("thought straggler right after idle must be suppressed")
+	}
+	if _, changed := tr.observe(contentMsg()); changed {
+		t.Fatal("content straggler right after idle must be suppressed")
+	}
+	if got := tr.current(); got != protocol.StatusIdle {
+		t.Fatalf("current after stragglers: got %v, want idle", got)
+	}
+
+	// A genuinely new prompt restarts the turn immediately.
+	if s, changed := tr.observePrompt(); !changed || s != protocol.StatusThinking {
+		t.Fatalf("new prompt after idle: got (%v,%v), want (thinking,true)", s, changed)
+	}
+
+	// Once the dwell window has passed, late content is treated as a real
+	// transition again (rewind lastReport to simulate elapsed time).
+	tr.observe(typedStatusMsg(protocol.StatusIdle))
+	tr.mu.Lock()
+	tr.lastReport = time.Now().Add(-2 * statusDwell)
+	tr.mu.Unlock()
+	if s, changed := tr.observe(contentMsg()); !changed || s != protocol.StatusStreaming {
+		t.Fatalf("content after dwell: got (%v,%v), want (streaming,true)", s, changed)
+	}
+}
+
 func TestStatusFromMessageLabelVsTyped(t *testing.T) {
 	if _, ok := statusFromMessage(labelStatusMsg("mode_update")); ok {
 		t.Fatal("label-class status must not map to an agent status")
