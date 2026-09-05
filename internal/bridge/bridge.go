@@ -215,7 +215,7 @@ type Bridge struct {
 	// previewBuildRun is the launch seam for the task-completed preview
 	// path (nil = preview.RunAndUpload). Tests substitute it to observe
 	// launches without an HTTP boundary; set before serving, never after.
-	previewBuildRun func(client preview.Uploader, cache *preview.Cache, jobID, repoRoot string, logf preview.Logf)
+	previewBuildRun func(client preview.Uploader, cache *preview.Cache, jobID, repoRoot, taskID string, logf preview.Logf)
 }
 
 // taskMeta stores metadata for workflow tasks
@@ -3338,19 +3338,22 @@ func (b *Bridge) handleWorkflowTaskMerge(msg Message) {
 	// static preview from the just-merged repo. Kicked off in a goroutine
 	// AFTER the merge-succeeded message above so a slow or failing build
 	// never delays it; jobId here is what the platform calls missionId.
-	b.maybeBuildPreview(jobId)
+	b.maybeBuildPreview(jobId, preview.TaskIDMerge)
 }
 
 // maybeBuildPreview kicks off the preview build+upload flow for a mission
 // whose merge just succeeded, unless the feature is disabled (default) or
-// the artifact cache failed to initialize. It never blocks the caller and
-// never surfaces an error to it — see preview.RunAndUpload for why.
-func (b *Bridge) maybeBuildPreview(jobId string) {
+// the artifact cache failed to initialize. taskID is the snapshot key for
+// the complete call — the merge paths pass the "merge" sentinel because the
+// artifact is the merged tree's final state, not any single task's product.
+// It never blocks the caller and never surfaces an error to it — see
+// preview.RunAndUpload for why.
+func (b *Bridge) maybeBuildPreview(jobId, taskID string) {
 	if !b.config.PreviewBuildEffective() {
 		return
 	}
 	repoRoot := b.worktreeManager.ProjectDir()
-	go preview.RunAndUpload(b.apiClient, b.previewCache, jobId, repoRoot, b.logInfo)
+	go preview.RunAndUpload(b.apiClient, b.previewCache, jobId, repoRoot, taskID, b.logInfo)
 }
 
 // maybeBuildPreviewFromWorktree (preview-hosting-ux-parity D3) builds a
@@ -3374,7 +3377,7 @@ func (b *Bridge) maybeBuildPreviewFromWorktree(meta *taskMeta, exitCode int) {
 	if meta == nil || !meta.Worktree || meta.WorkDir == "" {
 		return
 	}
-	jobId, workDir := meta.JobID, meta.WorkDir
+	jobId, workDir, taskID := meta.JobID, meta.WorkDir, meta.TaskID
 	if !b.previewBuildStart(jobId) {
 		b.logInfo("[%s] preview: build already in flight for mission %s, skipping (merge path will finalize)", logger.ModWorkflow, jobId)
 		return
@@ -3385,7 +3388,7 @@ func (b *Bridge) maybeBuildPreviewFromWorktree(meta *taskMeta, exitCode int) {
 	}
 	go func() {
 		defer b.previewBuildDone(jobId)
-		run(b.apiClient, b.previewCache, jobId, workDir, b.logInfo)
+		run(b.apiClient, b.previewCache, jobId, workDir, taskID, b.logInfo)
 	}()
 }
 
@@ -3574,7 +3577,7 @@ func (b *Bridge) handleWorkflowMergeAll(msg Message) {
 	// merge_all landed cleanly, same fire-and-forget contract as the
 	// single-task merge path.
 	if allMerged {
-		b.maybeBuildPreview(jobId)
+		b.maybeBuildPreview(jobId, preview.TaskIDMerge)
 	}
 }
 

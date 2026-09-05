@@ -419,13 +419,23 @@ func parsePreviewError(status int, body []byte, orig error) error {
 	return &PreviewAPIError{StatusCode: status, Code: wrapped.Error.Code, Message: wrapped.Error.Message}
 }
 
+// DeclarePreviewMeta rides the declare body as observability metadata
+// (add-deployment-previews D4: rewrite-rate telemetry — how many HTML
+// attribute rewrites over how many files). The platform ignores unknown
+// body fields, so an older API is unaffected.
+type DeclarePreviewMeta struct {
+	HTMLRewrites int `json:"htmlRewrites"`
+	FileCount    int `json:"fileCount"`
+}
+
 // CreatePreview declares (or revives) a preview deployment for a mission
 // from a file manifest. jobId here is the bridge-side name for what the
-// platform calls missionId.
-func (c *Client) CreatePreview(jobID string, files []PreviewFile) (*DeclarePreviewResponse, error) {
+// platform calls missionId. meta may be nil.
+func (c *Client) CreatePreview(jobID string, files []PreviewFile, meta *DeclarePreviewMeta) (*DeclarePreviewResponse, error) {
 	body := struct {
-		Files []PreviewFile `json:"files"`
-	}{Files: files}
+		Files []PreviewFile      `json:"files"`
+		Meta  *DeclarePreviewMeta `json:"meta,omitempty"`
+	}{Files: files, Meta: meta}
 
 	data, status, err := c.requestWithStatus("POST", "/api/missions/internal/"+jobID+"/previews", body)
 	if err != nil {
@@ -439,10 +449,43 @@ func (c *Client) CreatePreview(jobID string, files []PreviewFile) (*DeclarePrevi
 	return &resp, nil
 }
 
+// CompletePreviewBody is the complete call's JSON body. Both fields are
+// optional (G19 soft-compat on the platform side): a bridge predating
+// add-deployment-previews omits them, and the API skips those side effects
+// silently. TaskID is the snapshot key ("merge" for the merge-final build);
+// Kind is the detection result, honored only absent a user override.
+type CompletePreviewBody struct {
+	TaskID string `json:"taskId,omitempty"`
+	Kind   string `json:"kind,omitempty"`
+}
+
+// empty reports whether the body would serialize to nothing — used to keep
+// the wire shape of a no-field complete identical to the old bridge's.
+func (b CompletePreviewBody) empty() bool {
+	return b.TaskID == "" && b.Kind == ""
+}
+
 // CompletePreview tells the platform every presigned upload for previewID
 // landed, flipping the preview to ready.
-func (c *Client) CompletePreview(jobID, previewID string) error {
-	data, status, err := c.requestWithStatus("POST", "/api/missions/internal/"+jobID+"/previews/"+previewID+"/complete", nil)
+func (c *Client) CompletePreview(jobID, previewID string, body CompletePreviewBody) error {
+	var payload interface{}
+	if !body.empty() {
+		payload = body
+	}
+	data, status, err := c.requestWithStatus("POST", "/api/missions/internal/"+jobID+"/previews/"+previewID+"/complete", payload)
+	if err != nil {
+		return parsePreviewError(status, data, err)
+	}
+	return nil
+}
+
+// ReportArtifactKind upserts the mission-level artifact kind
+// (POST /internal/:missionId/artifact-kind). Called after every build
+// detection, preview or not — a Next non-export build never produces a
+// preview row, and the runtime classification is the one thing PreviewCard
+// can still render a teaser from.
+func (c *Client) ReportArtifactKind(jobID, kind string) error {
+	data, status, err := c.requestWithStatus("POST", "/api/missions/internal/"+jobID+"/artifact-kind", map[string]string{"kind": kind})
 	if err != nil {
 		return parsePreviewError(status, data, err)
 	}

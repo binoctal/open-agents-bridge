@@ -11,27 +11,40 @@ import (
 // logic can be tested without a network call, following the same seam
 // approach as api/client_test.go's httptest servers but one layer up.
 type fakeUploader struct {
-	createResp    *api.DeclarePreviewResponse
-	createErr     error
-	completeErr   error
-	uploadErr     error
-	createCalls   int
-	uploadedURLs  []string
+	createResp  *api.DeclarePreviewResponse
+	createErr   error
+	completeErr error
+	uploadErr   error
+	kindErr     error
+
+	createCalls  int
+	uploadedURLs []string
 	uploadedBytes map[string][]byte
+
+	createMeta    *api.DeclarePreviewMeta
 	completedID   string
+	completedBody api.CompletePreviewBody
+	reportedKinds []string
 }
 
-func (f *fakeUploader) CreatePreview(jobID string, files []api.PreviewFile) (*api.DeclarePreviewResponse, error) {
+func (f *fakeUploader) CreatePreview(jobID string, files []api.PreviewFile, meta *api.DeclarePreviewMeta) (*api.DeclarePreviewResponse, error) {
 	f.createCalls++
+	f.createMeta = meta
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
 	return f.createResp, nil
 }
 
-func (f *fakeUploader) CompletePreview(jobID, previewID string) error {
+func (f *fakeUploader) CompletePreview(jobID, previewID string, body api.CompletePreviewBody) error {
 	f.completedID = previewID
+	f.completedBody = body
 	return f.completeErr
+}
+
+func (f *fakeUploader) ReportArtifactKind(jobID, kind string) error {
+	f.reportedKinds = append(f.reportedKinds, kind)
+	return f.kindErr
 }
 
 func (f *fakeUploader) UploadPreviewFile(url string, data []byte) error {
@@ -73,7 +86,9 @@ func TestUpload_HappyPath(t *testing.T) {
 		},
 	}
 
-	err := Upload(fake, "mission-1", testFiles(), testBlob)
+	body := api.CompletePreviewBody{TaskID: "task-1", Kind: KindStatic}
+	meta := &api.DeclarePreviewMeta{HTMLRewrites: 2, FileCount: 2}
+	err := Upload(fake, "mission-1", testFiles(), testBlob, body, meta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,6 +100,34 @@ func TestUpload_HappyPath(t *testing.T) {
 	}
 	if fake.completedID != "p1" {
 		t.Errorf("expected complete to be called with previewId p1, got %s", fake.completedID)
+	}
+	if fake.completedBody != body {
+		t.Errorf("complete body = %+v, want %+v", fake.completedBody, body)
+	}
+	if fake.createMeta == nil || *fake.createMeta != *meta {
+		t.Errorf("declare meta = %+v, want %+v", fake.createMeta, meta)
+	}
+}
+
+// The revive path completes with a zero body: no taskId (the snapshot is
+// already registered and the platform's soft-compat skips re-registration),
+// no kind (detection never ran on a re-upload).
+func TestUpload_ReviveCompletesWithEmptyBody(t *testing.T) {
+	fake := &fakeUploader{
+		createResp: &api.DeclarePreviewResponse{
+			PreviewID: "p1",
+			Uploads:   nil,
+		},
+	}
+
+	if err := Upload(fake, "mission-1", testFiles(), testBlob, api.CompletePreviewBody{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if fake.completedBody != (api.CompletePreviewBody{}) {
+		t.Errorf("revive complete body must be zero-valued, got %+v", fake.completedBody)
+	}
+	if fake.createMeta != nil {
+		t.Errorf("revive declare must carry no meta, got %+v", fake.createMeta)
 	}
 }
 
@@ -98,7 +141,7 @@ func TestUpload_SkipListHonored(t *testing.T) {
 		},
 	}
 
-	err := Upload(fake, "mission-1", testFiles(), testBlob)
+	err := Upload(fake, "mission-1", testFiles(), testBlob, api.CompletePreviewBody{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +162,7 @@ func TestUpload_FiltersMapFiles(t *testing.T) {
 	var sentFiles []api.PreviewFile
 	captureUploader := &capturingUploader{fakeUploader: fake, onCreate: func(f []api.PreviewFile) { sentFiles = f }}
 
-	if err := Upload(captureUploader, "mission-1", files, testBlob); err != nil {
+	if err := Upload(captureUploader, "mission-1", files, testBlob, api.CompletePreviewBody{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, f := range sentFiles {
@@ -134,18 +177,18 @@ type capturingUploader struct {
 	onCreate func([]api.PreviewFile)
 }
 
-func (c *capturingUploader) CreatePreview(jobID string, files []api.PreviewFile) (*api.DeclarePreviewResponse, error) {
+func (c *capturingUploader) CreatePreview(jobID string, files []api.PreviewFile, meta *api.DeclarePreviewMeta) (*api.DeclarePreviewResponse, error) {
 	if c.onCreate != nil {
 		c.onCreate(files)
 	}
-	return c.fakeUploader.CreatePreview(jobID, files)
+	return c.fakeUploader.CreatePreview(jobID, files, meta)
 }
 
 func TestUpload_MissingRootIndexRejected(t *testing.T) {
 	fake := &fakeUploader{createResp: &api.DeclarePreviewResponse{PreviewID: "p1"}}
 	files := []ManifestFile{{Path: "assets/app.js", SHA256: "bbb", Size: 4}}
 
-	err := Upload(fake, "mission-1", files, testBlob)
+	err := Upload(fake, "mission-1", files, testBlob, api.CompletePreviewBody{}, nil)
 	if err == nil {
 		t.Fatal("expected error when manifest has no root index.html")
 	}
@@ -157,7 +200,7 @@ func TestUpload_MissingRootIndexRejected(t *testing.T) {
 func TestUpload_CreateErrorStopsEarly(t *testing.T) {
 	fake := &fakeUploader{createErr: fmt.Errorf("PREVIEW_QUOTA_EXCEEDED")}
 
-	err := Upload(fake, "mission-1", testFiles(), testBlob)
+	err := Upload(fake, "mission-1", testFiles(), testBlob, api.CompletePreviewBody{}, nil)
 	if err == nil {
 		t.Fatal("expected error to propagate")
 	}
@@ -177,7 +220,7 @@ func TestUpload_PutFailureAbortsBeforeComplete(t *testing.T) {
 		uploadErr: fmt.Errorf("connection reset"),
 	}
 
-	err := Upload(fake, "mission-1", testFiles(), testBlob)
+	err := Upload(fake, "mission-1", testFiles(), testBlob, api.CompletePreviewBody{}, nil)
 	if err == nil {
 		t.Fatal("expected error when a PUT fails")
 	}
@@ -191,11 +234,14 @@ func TestRunAndUpload_NoBuildScriptSkipsSilently(t *testing.T) {
 	// No package.json at all.
 	fake := &fakeUploader{}
 	var logs []string
-	RunAndUpload(fake, nil, "mission-1", dir, func(f string, a ...interface{}) {
+	RunAndUpload(fake, nil, "mission-1", dir, "task-1", func(f string, a ...interface{}) {
 		logs = append(logs, fmt.Sprintf(f, a...))
 	})
 	if fake.createCalls != 0 {
 		t.Error("must not call the API when there is no build script")
+	}
+	if len(fake.reportedKinds) != 0 {
+		t.Error("must not report artifact kind without a build")
 	}
 	if len(logs) == 0 {
 		t.Error("expected a log line explaining the skip")
@@ -250,6 +296,12 @@ func TestRunRevive_UsesCachedArtifact(t *testing.T) {
 	}
 	if fake.completedID != "p1" {
 		t.Error("expected complete to be called on successful revive")
+	}
+	if fake.completedBody != (api.CompletePreviewBody{}) {
+		t.Errorf("revive complete must carry no taskId/kind, got %+v", fake.completedBody)
+	}
+	if len(fake.reportedKinds) != 0 {
+		t.Error("revive must not re-report artifact kind; it never rebuilt")
 	}
 	if string(fake.uploadedBytes["https://r2.example.com/put-index"]) != "<html></html>" {
 		t.Errorf("expected cached bytes to be re-uploaded, got %q", fake.uploadedBytes["https://r2.example.com/put-index"])

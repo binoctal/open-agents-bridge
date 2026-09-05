@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -130,13 +131,17 @@ func TestClient_CreatePreview(t *testing.T) {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		var body struct {
-			Files []PreviewFile `json:"files"`
+			Files []PreviewFile      `json:"files"`
+			Meta  *DeclarePreviewMeta `json:"meta"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
 		if len(body.Files) != 1 || body.Files[0].Path != "index.html" {
 			t.Fatalf("unexpected files in request: %+v", body.Files)
+		}
+		if body.Meta == nil || body.Meta.HTMLRewrites != 2 || body.Meta.FileCount != 1 {
+			t.Fatalf("unexpected meta in request: %+v", body.Meta)
 		}
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -154,7 +159,7 @@ func TestClient_CreatePreview(t *testing.T) {
 	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
 	c := NewClient(cfg)
 
-	resp, err := c.CreatePreview("mission-1", []PreviewFile{{Path: "index.html", SHA256: "abc", Size: 5}})
+	resp, err := c.CreatePreview("mission-1", []PreviewFile{{Path: "index.html", SHA256: "abc", Size: 5}}, &DeclarePreviewMeta{HTMLRewrites: 2, FileCount: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +183,7 @@ func TestClient_CreatePreview_QuotaError(t *testing.T) {
 	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
 	c := NewClient(cfg)
 
-	_, err := c.CreatePreview("mission-1", []PreviewFile{{Path: "index.html", SHA256: "abc", Size: 5}})
+	_, err := c.CreatePreview("mission-1", []PreviewFile{{Path: "index.html", SHA256: "abc", Size: 5}}, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -196,6 +201,13 @@ func TestClient_CompletePreview(t *testing.T) {
 		if r.URL.Path != "/api/missions/internal/mission-1/previews/p1/complete" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["taskId"] != "merge" || body["kind"] != "static" {
+			t.Fatalf("unexpected complete body: %+v", body)
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "previewId": "p1"})
 	}))
 	defer server.Close()
@@ -203,7 +215,58 @@ func TestClient_CompletePreview(t *testing.T) {
 	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
 	c := NewClient(cfg)
 
-	if err := c.CompletePreview("mission-1", "p1"); err != nil {
+	if err := c.CompletePreview("mission-1", "p1", CompletePreviewBody{TaskID: "merge", Kind: "static"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A zero-valued complete body must serialize to an EMPTY body — the wire
+// shape an old-bridge revive produces and the platform's G19 soft-compat
+// treats as "no taskId, skip snapshot registration".
+func TestClient_CompletePreview_EmptyBodySendsNoJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(data) != 0 {
+			t.Fatalf("expected empty request body, got %q", data)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	c := NewClient(cfg)
+
+	if err := c.CompletePreview("mission-1", "p1", CompletePreviewBody{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClient_ReportArtifactKind(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/api/missions/internal/mission-1/artifact-kind" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["kind"] != "runtime" {
+			t.Fatalf("unexpected kind in request: %+v", body)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	c := NewClient(cfg)
+
+	if err := c.ReportArtifactKind("mission-1", "runtime"); err != nil {
 		t.Fatal(err)
 	}
 }

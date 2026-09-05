@@ -15,8 +15,9 @@ import (
 // seam to stub the HTTP boundary, matching how api/client_test.go isolates
 // transport from logic.
 type Uploader interface {
-	CreatePreview(jobID string, files []api.PreviewFile) (*api.DeclarePreviewResponse, error)
-	CompletePreview(jobID, previewID string) error
+	CreatePreview(jobID string, files []api.PreviewFile, meta *api.DeclarePreviewMeta) (*api.DeclarePreviewResponse, error)
+	CompletePreview(jobID, previewID string, body api.CompletePreviewBody) error
+	ReportArtifactKind(jobID, kind string) error
 	UploadPreviewFile(url string, data []byte) error
 }
 
@@ -45,12 +46,13 @@ func toAPIFiles(files []ManifestFile) []api.PreviewFile {
 // manifest: declare -> PUT each presigned upload -> complete. blob must
 // return the raw bytes for a manifest path (read from the build output
 // directory on a fresh build, or from the on-disk artifact cache on a
-// revive).
+// revive). complete rides the snapshot key + detection kind; meta carries
+// rewrite telemetry on the declare. Both may be zero-valued (revive path).
 //
 // Every failure is returned as a plain error. Nothing here retries — the
 // caller (RunAndUpload / RunRevive) logs and stops, exactly like every other
 // preview-hosting failure mode in this package.
-func Upload(client Uploader, jobID string, files []ManifestFile, blob func(path string) ([]byte, error)) error {
+func Upload(client Uploader, jobID string, files []ManifestFile, blob func(path string) ([]byte, error), completeBody api.CompletePreviewBody, meta *api.DeclarePreviewMeta) error {
 	apiFiles := toAPIFiles(files)
 	if len(apiFiles) == 0 {
 		return fmt.Errorf("no files to upload after filtering")
@@ -59,7 +61,7 @@ func Upload(client Uploader, jobID string, files []ManifestFile, blob func(path 
 		return fmt.Errorf("manifest missing root index.html")
 	}
 
-	decl, err := client.CreatePreview(jobID, apiFiles)
+	decl, err := client.CreatePreview(jobID, apiFiles, meta)
 	if err != nil {
 		return fmt.Errorf("declare preview: %w", err)
 	}
@@ -74,7 +76,7 @@ func Upload(client Uploader, jobID string, files []ManifestFile, blob func(path 
 		}
 	}
 
-	if err := client.CompletePreview(jobID, decl.PreviewID); err != nil {
+	if err := client.CompletePreview(jobID, decl.PreviewID, completeBody); err != nil {
 		return fmt.Errorf("complete preview: %w", err)
 	}
 
@@ -83,13 +85,17 @@ func Upload(client Uploader, jobID string, files []ManifestFile, blob func(path 
 }
 
 // RunAndUpload builds repoRoot as a static site and, on success, uploads it
-// as a preview for jobID (task 4.1-4.3 wired together). Every step's
-// failure is logged via logf and causes an immediate, silent return — this
-// is the function bridge.go calls from a goroutine right after a merge
-// succeeds, and it must never propagate a failure back into the mission's
-// control flow (there is nothing to propagate it to: the merge-succeeded
-// message has already been sent).
-func RunAndUpload(client Uploader, cache *Cache, jobID, repoRoot string, logf Logf) {
+// as a preview for jobID (task 4.1-4.3 wired together). taskID is the
+// snapshot key for the complete call: the owning task's id from the
+// task-completed path, the "merge" sentinel from the merge-final paths, and
+// "" from nowhere — RunRevive deliberately completes without one.
+//
+// Every step's failure is logged via logf and causes an immediate, silent
+// return — this is the function bridge.go calls from a goroutine right after
+// a merge succeeds or a task completes, and it must never propagate a
+// failure back into the mission's control flow (there is nothing to
+// propagate it to: the result message has already been sent).
+func RunAndUpload(client Uploader, cache *Cache, jobID, repoRoot, taskID string, logf Logf) {
 	if logf == nil {
 		logf = noopLogf
 	}
@@ -110,10 +116,26 @@ func RunAndUpload(client Uploader, cache *Cache, jobID, repoRoot string, logf Lo
 		return
 	}
 
+	// D3: report the mission-level artifact kind whether or not a preview
+	// row follows — the Next non-export path stops right after this.
+	kind := DetectAndReport(client, jobID, repoRoot, logf)
+
 	outputDir, ok := ResolveOutputDir(repoRoot)
 	if !ok {
 		logf("[%s] preview: no build output with index.html for mission %s, skipping", logger.ModPreview, jobID)
 		return
+	}
+
+	// D4: rewrite root-absolute references to relative BEFORE the manifest
+	// so the hashed bytes are the served bytes. Failure here means the
+	// output tree is unreadable — BuildManifest would fail the same way.
+	rewrites, err := RewriteHTMLAbsolutePaths(outputDir)
+	if err != nil {
+		logf("[%s] preview: HTML path rewrite failed for mission %s: %v", logger.ModPreview, jobID, err)
+		return
+	}
+	if rewrites > 0 {
+		logf("[%s] preview: rewrote %d absolute reference(s) to relative for mission %s", logger.ModPreview, rewrites, jobID)
 	}
 
 	files, err := BuildManifest(outputDir)
@@ -138,7 +160,10 @@ func RunAndUpload(client Uploader, cache *Cache, jobID, repoRoot string, logf Lo
 		return os.ReadFile(filepath.Join(outputDir, filepath.FromSlash(path)))
 	}
 
-	if err := Upload(client, jobID, files, blob); err != nil {
+	if err := Upload(client, jobID, files, blob, api.CompletePreviewBody{TaskID: taskID, Kind: kind}, &api.DeclarePreviewMeta{
+		HTMLRewrites: rewrites,
+		FileCount:    len(files),
+	}); err != nil {
 		logf("[%s] preview: upload failed for mission %s: %v", logger.ModPreview, jobID, err)
 	}
 }
@@ -148,6 +173,10 @@ func RunAndUpload(client Uploader, cache *Cache, jobID, repoRoot string, logf Lo
 // nothing is cached (never built on this device, or the cache was cleared),
 // it logs and skips: the user gets no preview until the mission runs (and
 // merges) again.
+//
+// The complete call carries no taskId/kind (design): the content is
+// unchanged, the snapshot is already registered, and the platform's
+// soft-compat rule skips re-registration on an empty key.
 func RunRevive(client Uploader, cache *Cache, jobID string, logf Logf) {
 	if logf == nil {
 		logf = noopLogf
@@ -172,7 +201,7 @@ func RunRevive(client Uploader, cache *Cache, jobID string, logf Logf) {
 		return nil, fmt.Errorf("no cached file for path %s", path)
 	}
 
-	if err := Upload(client, jobID, files, blob); err != nil {
+	if err := Upload(client, jobID, files, blob, api.CompletePreviewBody{}, nil); err != nil {
 		logf("[%s] preview: revive upload failed for mission %s: %v", logger.ModPreview, jobID, err)
 	}
 }

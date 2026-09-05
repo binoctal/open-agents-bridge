@@ -12,12 +12,12 @@ func boolPtr(v bool) *bool { return &v }
 
 // triggeredBridge builds a minimal Bridge whose preview launches go through
 // a recording hook instead of the real build+upload. launched receives one
-// {jobID, repoRoot} per launch.
-func triggeredBridge(cfg *config.Config) (b *Bridge, launched chan [2]string) {
-	launched = make(chan [2]string, 8)
+// {jobID, repoRoot, taskID} per launch.
+func triggeredBridge(cfg *config.Config) (b *Bridge, launched chan [3]string) {
+	launched = make(chan [3]string, 8)
 	b = &Bridge{config: cfg}
-	b.previewBuildRun = func(_ preview.Uploader, _ *preview.Cache, jobID, repoRoot string, _ preview.Logf) {
-		launched <- [2]string{jobID, repoRoot}
+	b.previewBuildRun = func(_ preview.Uploader, _ *preview.Cache, jobID, repoRoot, taskID string, _ preview.Logf) {
+		launched <- [3]string{jobID, repoRoot, taskID}
 	}
 	return b, launched
 }
@@ -34,7 +34,9 @@ func worktreeMeta() *taskMeta {
 
 // The trigger matrix (preview-hosting-ux-parity task 3.4): the toggle's
 // three states crossed with worktree/non-worktree and exit code. A launch is
-// expected ONLY for effective-ON + worktree + exitCode 0.
+// expected ONLY for effective-ON + worktree + exitCode 0. The launch must
+// carry the task's own TaskID as the snapshot key (add-deployment-previews
+// task 2.1).
 func TestMaybeBuildPreviewFromWorktreeTriggerMatrix(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -68,6 +70,9 @@ func TestMaybeBuildPreviewFromWorktreeTriggerMatrix(t *testing.T) {
 				if got[0] != tc.meta.JobID || got[1] != tc.meta.WorkDir {
 					t.Fatalf("launched with %v, want {%s %s}", got, tc.meta.JobID, tc.meta.WorkDir)
 				}
+				if got[2] != tc.meta.TaskID {
+					t.Fatalf("launch taskID = %q, want the owning task's %q", got[2], tc.meta.TaskID)
+				}
 			case <-time.After(2 * time.Second):
 				t.Fatal("expected a launch, none arrived")
 			}
@@ -84,8 +89,8 @@ func TestPreviewInFlightMutex(t *testing.T) {
 	// Block the first build until we release it.
 	release := make(chan struct{})
 	done := make(chan struct{})
-	b.previewBuildRun = func(_ preview.Uploader, _ *preview.Cache, jobID, _ string, _ preview.Logf) {
-		launched <- [2]string{jobID, ""}
+	b.previewBuildRun = func(_ preview.Uploader, _ *preview.Cache, jobID, _, _ string, _ preview.Logf) {
+		launched <- [3]string{jobID, "", ""}
 		if jobID == "mission-1" {
 			<-release
 			close(done)
@@ -136,7 +141,7 @@ func TestPreviewInFlightMutex(t *testing.T) {
 func TestMaybeBuildPreviewFromWorktreeDoesNotBlock(t *testing.T) {
 	b, _ := triggeredBridge(&config.Config{})
 	block := make(chan struct{})
-	b.previewBuildRun = func(_ preview.Uploader, _ *preview.Cache, _, _ string, _ preview.Logf) {
+	b.previewBuildRun = func(_ preview.Uploader, _ *preview.Cache, _, _, _ string, _ preview.Logf) {
 		<-block
 	}
 
@@ -147,4 +152,13 @@ func TestMaybeBuildPreviewFromWorktreeDoesNotBlock(t *testing.T) {
 		t.Fatalf("trigger blocked for %v on a running build; must be fire-and-forget", elapsed)
 	}
 	close(block)
+}
+
+// The worktree launch path must pass the owning task's TaskID, and the
+// sentinel contract of the merge path is preview.TaskIDMerge == "merge"
+// (asserted here so a rename cannot silently desync bridge from platform).
+func TestPreviewTaskIDContract(t *testing.T) {
+	if preview.TaskIDMerge != "merge" {
+		t.Fatalf("TaskIDMerge sentinel = %q, want \"merge\" (platform snapshots key on it)", preview.TaskIDMerge)
+	}
 }
