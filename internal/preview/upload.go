@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/binoctal/open-agents-bridge/internal/api"
 	"github.com/binoctal/open-agents-bridge/internal/logger"
@@ -26,6 +27,62 @@ type Uploader interface {
 type Logf func(format string, args ...interface{})
 
 func noopLogf(string, ...interface{}) {}
+
+// uploadAll PUTs every presigned upload with bounded parallelism. A Next
+// standalone pack carries ~1.7k files and a sequential loop could not finish
+// inside the presigned-URL TTL (observed live: ExpiredRequest 403 partway
+// through). blob closures only read from disk, so they are safe to call from
+// multiple goroutines. First error wins; the rest of the batch is abandoned
+// exactly like the old sequential failure mode.
+func uploadAll(client Uploader, uploads []api.PreviewUpload, blob func(path string) ([]byte, error)) error {
+	const workers = 8
+	jobs := make(chan api.PreviewUpload)
+	errs := make(chan error, workers)
+	done := make(chan struct{})
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for u := range jobs {
+				data, err := blob(u.Path)
+				if err != nil {
+					errs <- fmt.Errorf("read %s for upload: %w", u.Path, err)
+					return
+				}
+				if err := client.UploadPreviewFile(u.URL, data); err != nil {
+					errs <- fmt.Errorf("upload %s: %w", u.Path, err)
+					return
+				}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, u := range uploads {
+			select {
+			case jobs <- u:
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	go func() {
+		wg.Wait()
+		close(errs)
+	}()
+
+	var firstErr error
+	for err := range errs {
+		if firstErr == nil {
+			firstErr = err
+			close(done) // stop feeding; drain until workers exit
+		}
+	}
+	return firstErr
+}
 
 // toAPIFiles converts the pure-logic ManifestFile into the wire type,
 // filtering out anything ending in .map as a second line of defense —
@@ -69,14 +126,8 @@ func Upload(client Uploader, jobID string, files []ManifestFile, blob func(path 
 		return fmt.Errorf("declare preview: %w", err)
 	}
 
-	for _, u := range decl.Uploads {
-		data, err := blob(u.Path)
-		if err != nil {
-			return fmt.Errorf("read %s for upload: %w", u.Path, err)
-		}
-		if err := client.UploadPreviewFile(u.URL, data); err != nil {
-			return fmt.Errorf("upload %s: %w", u.Path, err)
-		}
+	if err := uploadAll(client, decl.Uploads, blob); err != nil {
+		return err
 	}
 
 	if err := client.CompletePreview(jobID, decl.PreviewID, completeBody); err != nil {
