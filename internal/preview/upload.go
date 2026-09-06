@@ -57,8 +57,11 @@ func Upload(client Uploader, jobID string, files []ManifestFile, blob func(path 
 	if len(apiFiles) == 0 {
 		return fmt.Errorf("no files to upload after filtering")
 	}
-	if !HasRootIndexHTML(files) {
-		return fmt.Errorf("manifest missing root index.html")
+	// Root anchor: a static site is anchored by index.html, a packed runtime
+	// tree (no index.html exists there) by runtime.json. Either satisfies the
+	// platform's declare validation.
+	if !HasRootIndexHTML(files) && !HasRuntimeJSON(files) {
+		return fmt.Errorf("manifest missing root index.html or runtime.json")
 	}
 
 	decl, err := client.CreatePreview(jobID, apiFiles, meta)
@@ -119,6 +122,41 @@ func RunAndUpload(client Uploader, cache *Cache, jobID, repoRoot, taskID string,
 	// D3: report the mission-level artifact kind whether or not a preview
 	// row follows — the Next non-export path stops right after this.
 	kind := DetectAndReport(client, jobID, repoRoot, logf)
+
+	// Runtime branch (task 6.1): pack the standalone tree instead of looking
+	// for a static output dir, then ride the exact same upload pipeline.
+	if kind == KindRuntime {
+		packedDir, err := PackNextStandalone(repoRoot)
+		if err != nil {
+			logf("[%s] preview: runtime pack failed for mission %s: %v", logger.ModPreview, jobID, err)
+			return
+		}
+		rtFiles, err := BuildManifest(packedDir)
+		if err != nil {
+			logf("[%s] preview: runtime manifest build failed for mission %s: %v", logger.ModPreview, jobID, err)
+			return
+		}
+		if !HasRuntimeJSON(rtFiles) {
+			logf("[%s] preview: packed runtime tree for mission %s has no runtime.json, skipping", logger.ModPreview, jobID)
+			return
+		}
+
+		if cache != nil {
+			if err := cache.Store(jobID, packedDir, rtFiles); err != nil {
+				logf("[%s] preview: artifact cache store failed for mission %s: %v", logger.ModPreview, jobID, err)
+			}
+		}
+
+		rtBlob := func(path string) ([]byte, error) {
+			return os.ReadFile(filepath.Join(packedDir, filepath.FromSlash(path)))
+		}
+		if err := Upload(client, jobID, rtFiles, rtBlob, api.CompletePreviewBody{TaskID: taskID, Kind: KindRuntime}, &api.DeclarePreviewMeta{
+			FileCount: len(rtFiles),
+		}); err != nil {
+			logf("[%s] preview: runtime upload failed for mission %s: %v", logger.ModPreview, jobID, err)
+		}
+		return
+	}
 
 	outputDir, ok := ResolveOutputDir(repoRoot)
 	if !ok {

@@ -97,3 +97,16 @@ func HasRootIndexHTML(files []ManifestFile) bool {
 	}
 	return false
 }
+
+// HasRuntimeJSON reports whether the manifest includes a root-level
+// runtime.json — the runtime tree's anchor in the shared declare pipeline
+// (a packed Next standalone tree has no index.html; the platform accepts
+// either anchor, add-runtime-deploy-v0 D3).
+func HasRuntimeJSON(files []ManifestFile) bool {
+	for _, f := range files {
+		if f.Path == "runtime.json" {
+			return true
+		}
+	}
+	return false
+}
