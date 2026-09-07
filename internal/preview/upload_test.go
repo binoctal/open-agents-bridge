@@ -2,6 +2,7 @@ package preview
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/binoctal/open-agents-bridge/internal/api"
@@ -17,9 +18,13 @@ type fakeUploader struct {
 	uploadErr   error
 	kindErr     error
 
-	createCalls  int
-	uploadedURLs []string
+	createCalls   int
+	uploadedURLs  []string
 	uploadedBytes map[string][]byte
+	// uploadMu guards the two uploaded fields: uploadAll calls
+	// UploadPreviewFile from 8 workers, and the bare appends here raced
+	// (random panics / dropped entries on main).
+	uploadMu sync.Mutex
 
 	createMeta    *api.DeclarePreviewMeta
 	completedID   string
@@ -48,6 +53,8 @@ func (f *fakeUploader) ReportArtifactKind(jobID, kind string) error {
 }
 
 func (f *fakeUploader) UploadPreviewFile(url string, data []byte) error {
+	f.uploadMu.Lock()
+	defer f.uploadMu.Unlock()
 	f.uploadedURLs = append(f.uploadedURLs, url)
 	if f.uploadedBytes == nil {
 		f.uploadedBytes = map[string][]byte{}

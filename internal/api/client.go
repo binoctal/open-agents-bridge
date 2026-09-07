@@ -433,7 +433,7 @@ type DeclarePreviewMeta struct {
 // platform calls missionId. meta may be nil.
 func (c *Client) CreatePreview(jobID string, files []PreviewFile, meta *DeclarePreviewMeta) (*DeclarePreviewResponse, error) {
 	body := struct {
-		Files []PreviewFile      `json:"files"`
+		Files []PreviewFile       `json:"files"`
 		Meta  *DeclarePreviewMeta `json:"meta,omitempty"`
 	}{Files: files, Meta: meta}
 
@@ -535,6 +535,83 @@ func (c *Client) UploadPreviewFile(url string, data []byte) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("preview upload PUT failed %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// Hosted deployment source upload (add-coolify-hosting, tasks 4.1-4.3).
+//
+// The deploy tier's artifact bridge: the working source tree (not a build
+// output) rides the same two-phase protocol as previews — declare the
+// manifest, PUT each presigned object, complete. The only trigger is a
+// `pending` hosted_deployments row the user created with an explicit deploy
+// click; nothing here ever runs on the task-completed or merge paths, so
+// zero source leaves the device unless the user asked for it.
+
+// HostedDeployWork is one pending source pack the platform asked this
+// device to produce (GET /internal/hosted-deployments/pending).
+type HostedDeployWork struct {
+	MissionID    string `json:"missionId"`
+	DeploymentID string `json:"deploymentId"`
+}
+
+// GetPendingHostedDeploys polls for user-requested source packs. Rows only
+// exist after an explicit deploy click by the mission owner, so the common
+// response is an empty list.
+func (c *Client) GetPendingHostedDeploys() ([]HostedDeployWork, error) {
+	data, err := c.request("GET", "/api/missions/internal/hosted-deployments/pending", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Deploys []HostedDeployWork `json:"deploys"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Deploys, nil
+}
+
+// DeclareSourceResponse mirrors the platform's declareSource result: presigned
+// PUTs only for objects not already in the bucket (skip-list economics — a
+// re-pack after a crash uploads only what is missing).
+type DeclareSourceResponse struct {
+	DeploymentID string          `json:"deploymentId"`
+	Uploads      []PreviewUpload `json:"uploads"`
+}
+
+// DeclareHostedSource declares a deployment's source manifest and returns the
+// presigned PUT targets. The platform rejects sensitive paths loudly
+// (SOURCE_SENSITIVE_FILE) — the bridge strips them at pack time, so a
+// rejection here means the local packer and the platform disagree and is
+// worth surfacing verbatim.
+func (c *Client) DeclareHostedSource(missionID, deploymentID string, files []PreviewFile) (*DeclareSourceResponse, error) {
+	body := struct {
+		Files []PreviewFile `json:"files"`
+	}{Files: files}
+
+	data, status, err := c.requestWithStatus("POST",
+		"/api/missions/internal/"+missionID+"/hosted-deployments/"+deploymentID+"/declare-source", body)
+	if err != nil {
+		return nil, parsePreviewError(status, data, err)
+	}
+
+	var resp DeclareSourceResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// CompleteHostedSource tells the platform every declared object landed. The
+// row stays `pending` on the platform until the hosting-agent seam picks it
+// up, and the poll keeps offering it — completing twice is safe (the LIST
+// verification is idempotent).
+func (c *Client) CompleteHostedSource(missionID, deploymentID string) error {
+	data, status, err := c.requestWithStatus("POST",
+		"/api/missions/internal/"+missionID+"/hosted-deployments/"+deploymentID+"/complete-source", nil)
+	if err != nil {
+		return parsePreviewError(status, data, err)
 	}
 	return nil
 }

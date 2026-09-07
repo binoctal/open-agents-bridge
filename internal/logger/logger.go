@@ -54,6 +54,7 @@ const (
 	ModPTY        = "pty"
 	ModAdapter    = "adapter"
 	ModPreview    = "preview"
+	ModDeploy     = "deploy"
 )
 
 // Global logger instance

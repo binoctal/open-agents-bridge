@@ -22,6 +22,7 @@ import (
 	"github.com/binoctal/open-agents-bridge/internal/command"
 	"github.com/binoctal/open-agents-bridge/internal/config"
 	"github.com/binoctal/open-agents-bridge/internal/crypto"
+	"github.com/binoctal/open-agents-bridge/internal/deploysource"
 	"github.com/binoctal/open-agents-bridge/internal/logger"
 	"github.com/binoctal/open-agents-bridge/internal/loopdetect"
 	"github.com/binoctal/open-agents-bridge/internal/markdown"
@@ -216,6 +217,13 @@ type Bridge struct {
 	// path (nil = preview.RunAndUpload). Tests substitute it to observe
 	// launches without an HTTP boundary; set before serving, never after.
 	previewBuildRun func(client preview.Uploader, cache *preview.Cache, jobID, repoRoot, taskID string, logf preview.Logf)
+
+	// add-coolify-hosting: per-deployment in-flight guard for source packs.
+	// The poll is 1-minute and a large tree can take longer to hash and PUT;
+	// a second concurrent pack of the same deployment would race the first
+	// for the same presigned objects. Same shape as previewInFlight.
+	deploySourceInFlightMu sync.Mutex
+	deploySourceInFlight   map[string]bool
 }
 
 // taskMeta stores metadata for workflow tasks
@@ -477,6 +485,13 @@ func (b *Bridge) Start() error {
 	// own, gated on the same config toggle as the build step.
 	b.logInfo("[%s] Launching previewRevivePollLoop goroutine...", logger.ModBridge)
 	go b.previewRevivePollLoop()
+
+	// add-coolify-hosting (task 4.2): poll for user-requested deploy source
+	// packs. Unconditional on purpose — the poll itself uploads nothing; rows
+	// exist only after an explicit deploy click, so a device with no deploy
+	// activity costs one empty GET per tick.
+	b.logInfo("[%s] Launching deploySourcePollLoop goroutine...", logger.ModBridge)
+	go b.deploySourcePollLoop()
 
 	b.logInfo("[%s] All goroutines started, entering main loop", logger.ModBridge)
 
@@ -3458,6 +3473,73 @@ func (b *Bridge) pollPreviewRevives() {
 	for _, r := range revives {
 		b.logInfo("[%s] preview: revive requested for mission %s", logger.ModPreview, r.MissionID)
 		go preview.RunRevive(b.apiClient, b.previewCache, r.MissionID, b.logInfo)
+	}
+}
+
+// deploySourcePollInterval: deploy clicks wait on this, so it is a full
+// minute faster than the revive cadence and still only one Workers GET per
+// device per tick (rows are rare — whitelist users only).
+const deploySourcePollInterval = time.Minute
+
+// deploySourcePollLoop periodically asks the platform for pending deploy
+// source packs (add-coolify-hosting task 4.2).
+func (b *Bridge) deploySourcePollLoop() {
+	ticker := time.NewTicker(deploySourcePollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-b.done:
+			return
+		case <-ticker.C:
+			b.pollDeploySources()
+		}
+	}
+}
+
+// claimDeploySource takes the deployment's in-flight slot; false means a pack
+// is already running for it.
+func (b *Bridge) claimDeploySource(deploymentId string) bool {
+	b.deploySourceInFlightMu.Lock()
+	defer b.deploySourceInFlightMu.Unlock()
+	if b.deploySourceInFlight == nil {
+		b.deploySourceInFlight = make(map[string]bool)
+	}
+	if b.deploySourceInFlight[deploymentId] {
+		return false
+	}
+	b.deploySourceInFlight[deploymentId] = true
+	return true
+}
+
+// deploySourceDone releases the deployment's in-flight slot.
+func (b *Bridge) deploySourceDone(deploymentId string) {
+	b.deploySourceInFlightMu.Lock()
+	defer b.deploySourceInFlightMu.Unlock()
+	delete(b.deploySourceInFlight, deploymentId)
+}
+
+// pollDeploySources fetches and dispatches one batch of pending source packs.
+// Every failure (network, per-item pack/upload) is logged and skipped; the
+// row stays pending server-side, so the next tick retries it.
+func (b *Bridge) pollDeploySources() {
+	deploys, err := b.apiClient.GetPendingHostedDeploys()
+	if err != nil {
+		b.logDebug("[%s] deploy: pending poll failed: %v", logger.ModDeploy, err)
+		return
+	}
+
+	for _, d := range deploys {
+		if !b.claimDeploySource(d.DeploymentID) {
+			continue
+		}
+		b.logInfo("[%s] deploy: source pack requested for mission %s (deployment %s)",
+			logger.ModDeploy, d.MissionID, d.DeploymentID)
+		go func(work api.HostedDeployWork) {
+			defer b.deploySourceDone(work.DeploymentID)
+			deploysource.RunSourceUpload(b.apiClient, work.MissionID, work.DeploymentID,
+				b.worktreeManager.ProjectDir(), b.logInfo)
+		}(d)
 	}
 }
 

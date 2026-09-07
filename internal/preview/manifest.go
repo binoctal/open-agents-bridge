@@ -51,7 +51,7 @@ func BuildManifest(outputDir string) ([]ManifestFile, error) {
 			return nil
 		}
 
-		sum, sumErr := sha256File(path)
+		sum, sumErr := SHA256File(path)
 		if sumErr != nil {
 			return sumErr
 		}
@@ -73,7 +73,9 @@ func BuildManifest(outputDir string) ([]ManifestFile, error) {
 	return files, nil
 }
 
-func sha256File(path string) (string, error) {
+// SHA256File hashes one file's contents. Exported for deploysource, which
+// builds the same sha256 manifest contract over source trees.
+func SHA256File(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
