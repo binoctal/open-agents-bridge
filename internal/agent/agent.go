@@ -143,7 +143,15 @@ func (a *Agent) handle(ctx context.Context, item api.WorkItem) error {
 }
 
 func (a *Agent) handleMaterialize(ctx context.Context, item api.WorkItem) error {
-	commit, err := a.Store.Materialize(ctx, item.DeploymentID, item.SourcePrefix, item.Manifest)
+	// The manifest rides R2, not the work item (D1 statement cap): fetch it
+	// first -- a manifest the agent cannot read is a materialize failure,
+	// same as an unreadable object later in the loop.
+	manifest, err := a.Client.FetchManifest(ctx, item.ManifestURL)
+	if err != nil {
+		a.logf("deploy %s: manifest fetch failed: %v", item.DeploymentID, err)
+		return a.report(ctx, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
+	}
+	commit, err := a.Store.Materialize(ctx, item.DeploymentID, item.SourcePrefix, manifest)
 	if err != nil {
 		a.logf("deploy %s: materialize failed: %v", item.DeploymentID, err)
 		return a.report(ctx, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
@@ -184,6 +192,15 @@ func (a *Agent) handleRemoveRoute(ctx context.Context, item api.WorkItem) error 
 }
 
 func (a *Agent) handleRelease(ctx context.Context, item api.WorkItem) error {
+	// Full local teardown: route first (a released repo must stop answering),
+	// then the git port, then the repo itself. Route errors are logged but do
+	// not block the rest -- a route that was never registered (delete before
+	// ready) is the normal case, not an error.
+	if a.Ingress != nil {
+		if err := a.Ingress.Remove(ctx, item.DeploymentID); err != nil {
+			a.logf("deploy %s: route remove on release failed: %v", item.DeploymentID, err)
+		}
+	}
 	if err := a.GitHTTP.Release(item.DeploymentID); err != nil {
 		a.logf("deploy %s: port release failed: %v", item.DeploymentID, err)
 	}
@@ -191,7 +208,7 @@ func (a *Agent) handleRelease(ctx context.Context, item api.WorkItem) error {
 		a.logf("deploy %s: repo removal failed: %v", item.DeploymentID, err)
 		return a.report(ctx, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
 	}
-	a.logf("deploy %s: released (repo + port recycled)", item.DeploymentID)
+	a.logf("deploy %s: released (route + repo + port recycled)", item.DeploymentID)
 	return a.report(ctx, item.DeploymentID, api.EventReleased, 0, "")
 }
 

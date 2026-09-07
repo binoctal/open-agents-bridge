@@ -71,8 +71,11 @@ type WorkItem struct {
 	// AppPort is the app's local port for register_route.
 	AppPort int `json:"appPort,omitempty"`
 
-	// Manifest and SourcePrefix are set for materialize.
-	Manifest     []File `json:"manifest,omitempty"`
+	// ManifestURL and SourcePrefix are set for materialize. The manifest is
+	// NOT inlined: D1's 100KB statement cap cannot hold a real tree, so the
+	// API stores it as deploys/{id}/manifest.json and hands out a presigned
+	// GET (15min) -- the agent fetches it before touching the store.
+	ManifestURL  string `json:"manifestUrl,omitempty"`
 	SourcePrefix string `json:"sourcePrefix,omitempty"`
 }
 
@@ -113,6 +116,37 @@ func (c *Client) GetWork(ctx context.Context) ([]WorkItem, error) {
 		return nil, err
 	}
 	return out.Items, nil
+}
+
+// FetchManifest downloads a work item's presigned manifest.json. The URL is
+// self-authenticating (sigv4), so no internal secret rides this request.
+func (c *Client) FetchManifest(ctx context.Context, url string) ([]File, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch manifest: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("fetch manifest: %d", resp.StatusCode)
+	}
+	var m struct {
+		Files []File `json:"files"`
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("decode manifest: %w", err)
+	}
+	if len(m.Files) == 0 {
+		return nil, fmt.Errorf("manifest has no files")
+	}
+	return m.Files, nil
 }
 
 // PresignSource exchanges manifest object hashes for presigned GETs. Keys are
