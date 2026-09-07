@@ -91,11 +91,15 @@ type PresignResponse struct {
 }
 
 // Watermark is the periodic node capacity report (design D6: the reject-new
-// decision lives in the API, which needs the numbers).
+// decision lives in the API, which needs the numbers). BootID is the agent's
+// process-start identity (design D8): the API diffs it against the stored
+// value and, on change, treats the node as rebuilt -- every live deployment
+// is re-offered from R2 with no user action. Empty on agents that predate it.
 type Watermark struct {
 	MemoryAvailableBytes uint64 `json:"memoryAvailableBytes"`
 	MemoryTotalBytes     uint64 `json:"memoryTotalBytes"`
 	ContainersRunning    int    `json:"containersRunning"`
+	BootID               string `json:"bootId,omitempty"`
 }
 
 // Report events (terminal states of each work action).

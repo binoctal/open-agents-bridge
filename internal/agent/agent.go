@@ -10,6 +10,8 @@ package agent
 import (
 	"bufio"
 	"context"
+	crand "crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -43,6 +45,12 @@ type Agent struct {
 	WorkPollInterval  time.Duration
 	WatermarkInterval time.Duration
 
+	// BootID identifies this process lifetime: the API diffs it against the
+	// stored watermark value and, on change, resets every live deployment back
+	// to R2 re-materialization (design D8 -- the node is disposable). Set by
+	// main (or NewBootID in Run when nil); constant for the process lifetime.
+	BootID string
+
 	Logf Logf
 
 	// inFlight guards against overlapping materializes of one deployment
@@ -55,6 +63,9 @@ type Agent struct {
 func (a *Agent) Run(ctx context.Context) error {
 	if a.inFlight == nil {
 		a.inFlight = make(map[string]bool)
+	}
+	if a.BootID == "" {
+		a.BootID = NewBootID()
 	}
 	work := time.NewTicker(a.workInterval())
 	defer work.Stop()
@@ -227,6 +238,7 @@ func (a *Agent) report(ctx context.Context, deploymentID, event string, repoPort
 
 func (a *Agent) reportWatermark(ctx context.Context) error {
 	w := CollectWatermark(ctx)
+	w.BootID = a.BootID
 	if err := a.Client.ReportWatermark(ctx, w); err != nil {
 		if api.Unauthorized(err) {
 			return err
@@ -234,6 +246,20 @@ func (a *Agent) reportWatermark(ctx context.Context) error {
 		a.logf("watermark report failed: %v", err)
 	}
 	return nil
+}
+
+// NewBootID mints a fresh process-lifetime identity (design D8). It only ever
+// needs to be unique per restart, not secret: the API compares it for
+// inequality, never trusts it for authentication.
+func NewBootID() string {
+	var b [16]byte
+	if _, err := crand.Read(b[:]); err != nil {
+		// crypto/rand failing is unrecoverable on a healthy node; a
+		// time-derived id still changes across restarts, which is the
+		// property that matters.
+		return fmt.Sprintf("t%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 func (a *Agent) claim(deploymentID string) bool {
