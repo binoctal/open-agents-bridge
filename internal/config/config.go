@@ -40,7 +40,13 @@ type Config struct {
 	// (design D7: deploy.openagents.top).
 	DomainSuffix string
 
-	// GitPortMin/Max bound the per-deployment loopback git http port range.
+	// GitBindHost is what the per-deployment git http listeners bind. Default
+	// is the docker0 gateway: Coolify's git fetch runs inside the
+	// coolify-helper container, which cannot reach the host's loopback
+	// (S3 spike). Override with 127.0.0.1 for local dev/tests.
+	GitBindHost string
+
+	// GitPortMin/Max bound the per-deployment git http port range.
 	GitPortMin int
 	GitPortMax int
 
@@ -63,6 +69,7 @@ func FromEnv() (*Config, error) {
 		CacheDir:             envOr("CACHE_DIR", "/var/lib/hosting-agent"),
 		CaddyAdminAddr:       envOr("CADDY_ADMIN_ADDR", "127.0.0.1:2019"),
 		DomainSuffix:         envOr("DEPLOY_DOMAIN_SUFFIX", "deploy.openagents.top"),
+		GitBindHost:          envOr("GIT_HTTP_BIND", "172.17.0.1"),
 		GitPortMin:           envInt("GIT_HTTP_PORT_MIN", 24100),
 		GitPortMax:           envInt("GIT_HTTP_PORT_MAX", 24199),
 		WorkPollIntervalSec:  envInt("WORK_POLL_INTERVAL_SEC", 10),

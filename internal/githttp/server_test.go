@@ -18,7 +18,7 @@ func freePortRange(t *testing.T) (int, int) {
 
 func TestServeIdempotentSamePort(t *testing.T) {
 	min, max := freePortRange(t)
-	m := New(t.TempDir(), min, max)
+	m := New(t.TempDir(), "127.0.0.1", min, max)
 
 	p1, err := m.Serve("dep1")
 	if err != nil {
@@ -38,7 +38,7 @@ func TestServeIdempotentSamePort(t *testing.T) {
 
 func TestPortRecycledAfterRelease(t *testing.T) {
 	min, max := freePortRange(t)
-	m := New(t.TempDir(), min, max)
+	m := New(t.TempDir(), "127.0.0.1", min, max)
 
 	pa, err := m.Serve("a")
 	if err != nil {
@@ -63,7 +63,7 @@ func TestPortRecycledAfterRelease(t *testing.T) {
 
 func TestReleaseAbsentIsSuccess(t *testing.T) {
 	min, max := freePortRange(t)
-	m := New(t.TempDir(), min, max)
+	m := New(t.TempDir(), "127.0.0.1", min, max)
 	if err := m.Release("never-served"); err != nil {
 		t.Fatalf("releasing an unknown id must succeed, got %v", err)
 	}
@@ -71,7 +71,7 @@ func TestReleaseAbsentIsSuccess(t *testing.T) {
 
 func TestServeRejectsInvalidID(t *testing.T) {
 	min, max := freePortRange(t)
-	m := New(t.TempDir(), min, max)
+	m := New(t.TempDir(), "127.0.0.1", min, max)
 	for _, id := range []string{"", "a/b", ".."} {
 		if _, err := m.Serve(id); err == nil {
 			t.Fatalf("id %q must be rejected", id)
@@ -106,7 +106,7 @@ func TestCloneThroughCGI(t *testing.T) {
 	}
 	root := t.TempDir()
 	min, max := freePortRange(t)
-	m := New(root, min, max)
+	m := New(root, "127.0.0.1", min, max)
 
 	// Build a one-commit bare repo by hand (store-level wiring is covered by
 	// store's own tests).

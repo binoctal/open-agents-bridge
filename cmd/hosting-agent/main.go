@@ -42,7 +42,7 @@ func run() error {
 
 	client := api.New(cfg.APIBaseURL, cfg.AgentID, cfg.InternalSecret)
 	st := store.New(cfg.CacheDir, client)
-	git := githttp.New(cfg.CacheDir+"/repos", cfg.GitPortMin, cfg.GitPortMax)
+	git := githttp.New(cfg.CacheDir+"/repos", cfg.GitBindHost, cfg.GitPortMin, cfg.GitPortMax)
 
 	a := &agent.Agent{
 		Client:            client,

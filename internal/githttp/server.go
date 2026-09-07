@@ -1,8 +1,14 @@
 // Package githttp serves bare repos over git's own http-backend CGI, one
-// loopback listener per deployment (design D1 / task 2.3).
+// listener per deployment (design D1 / task 2.3).
 //
-// Listeners bind 127.0.0.1 only -- the pull path must not exist off-host
-// (spec: 回环外不可达). Ports come from a configured range and are recycled on
+// Listeners bind the docker0 gateway (default 172.17.0.1), NOT loopback:
+// Coolify's git fetch runs inside the coolify-helper container, which can
+// neither resolve host.docker.internal nor reach the host's 127.0.0.1 -- the
+// gateway IP is the only address shared between the helper's network and the
+// host (S3 spike). Off-host the ports are unroutable and the node firewall
+// admits only the Coolify container subnet to the git port range
+// (spec: 回环外不可达, enforced at the firewall layer instead).
+// Ports come from a configured range and are recycled on
 // release: the allocator always scans from the range start, so a freed port
 // is the first one handed out again.
 package githttp
@@ -11,6 +17,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -26,6 +33,9 @@ import (
 // Manager owns the per-deployment listeners.
 type Manager struct {
 	RepoRoot string
+	// BindHost is the address every listener binds (see the package comment:
+	// the docker0 gateway in production, 127.0.0.1 in tests/local dev).
+	BindHost string
 	PortMin  int
 	PortMax  int
 
@@ -39,17 +49,19 @@ type served struct {
 	ln   net.Listener
 }
 
-// New builds a manager serving {RepoRoot}/{id}.git over the port range.
-func New(repoRoot string, portMin, portMax int) *Manager {
+// New builds a manager serving {RepoRoot}/{id}.git from bindHost over the
+// port range.
+func New(repoRoot, bindHost string, portMin, portMax int) *Manager {
 	return &Manager{
 		RepoRoot: repoRoot,
+		BindHost: bindHost,
 		PortMin:  portMin,
 		PortMax:  portMax,
 		serving:  make(map[string]*served),
 	}
 }
 
-// Serve starts (or returns the already-running) loopback listener for a
+// Serve starts (or returns the already-running) listener for a
 // deployment's repo. Idempotent: serving an id twice returns the same port.
 func (m *Manager) Serve(deploymentID string) (int, error) {
 	m.mu.Lock()
@@ -83,9 +95,17 @@ func (m *Manager) Release(deploymentID string) error {
 	defer cancel()
 	// Close the raw listener too: if Shutdown races the serve goroutine's
 	// first registration (Serve not started yet), Shutdown closes nothing and
-	// the port would stay bound until the goroutine wakes up.
+	// the port would stay bound until the goroutine wakes up. When Shutdown
+	// loses that race the other way (listener already registered, then we
+	// closed it), its poll reports the very close we caused -- that benign
+	// error is success here, not a failure.
 	_ = s.ln.Close()
-	return s.srv.Shutdown(ctx)
+	if err := s.srv.Shutdown(ctx); err != nil &&
+		!errors.Is(err, http.ErrServerClosed) &&
+		!strings.Contains(err.Error(), "use of closed network connection") {
+		return err
+	}
+	return nil
 }
 
 // Port reports the port a deployment is served on, if any.
@@ -105,7 +125,7 @@ const closeTimeout = 5 * time.Second
 // binds -- which is what makes released ports recycle immediately.
 func (m *Manager) listenFree() (net.Listener, int, error) {
 	for port := m.PortMin; port <= m.PortMax; port++ {
-		ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+		ln, err := net.Listen("tcp", net.JoinHostPort(m.BindHost, strconv.Itoa(port)))
 		if err == nil {
 			return ln, port, nil
 		}
