@@ -89,6 +89,44 @@ func TestPackSourceTree_ExcludesDirsAndStripsSensitive(t *testing.T) {
 	}
 }
 
+// S6 regression (2026-09-08 prod smoke): a leftover mission task worktree made
+// the pack declare .open-agents-bridge-worktrees/task-x/t0/.git -- a linked
+// worktree's .git is a POINTER FILE, not a directory, so the directory skip
+// never fired and the platform rejected the whole declare (SOURCE_EXCLUDED_PATH).
+func TestPackSourceTree_SkipsBridgeWorktreesAndDotGitPointerFile(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"index.html": "hello",
+		// The linked-worktree shape: .git as a FILE (gitdir pointer).
+		".open-agents-bridge-worktrees/task-job_x-t0/.git":     "gitdir: /repo/.git/worktrees/t0",
+		".open-agents-bridge-worktrees/task-job_x-t0/app.ts":   "leftover",
+		".open-agents-bridge-worktrees/task-job_x-t0/.env":     "SECRET",
+		// A bare .git file at the repo root too (submodule-style pointer).
+		".git": "gitdir: elsewhere",
+	})
+
+	res, err := PackSourceTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := paths(res)
+	if !got["index.html"] {
+		t.Errorf("real source file missing from manifest: %v", got)
+	}
+	for _, excluded := range []string{
+		".git",
+		".open-agents-bridge-worktrees/task-job_x-t0/.git",
+		".open-agents-bridge-worktrees/task-job_x-t0/app.ts",
+	} {
+		if got[excluded] {
+			t.Errorf("worktree residue packed: %s", excluded)
+		}
+	}
+	if len(res.Files) != 1 {
+		t.Errorf("expected only index.html, got %v", got)
+	}
+}
+
 func TestPackSourceTree_DeterministicOrder(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"b.txt":   "1",

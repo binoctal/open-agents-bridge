@@ -41,11 +41,15 @@ func noopLogf(string, ...interface{}) {}
 // ExcludedDirs are directory names never packed, at any depth. Mirrors the
 // platform's SOURCE_EXCLUDED_DIRS (apps/api/src/services/hosted-deployments.ts):
 // .git because the platform materializes its own single-commit repo from the
-// tree, the rest because they are build outputs or dependency caches the
-// build on the hosting node regenerates anyway.
+// tree, .open-agents-bridge-worktrees because mission task worktrees under it
+// are merge intermediates (their leftover state after a failed merge must not
+// ride along — the platform rejects any path hitting the name), the rest
+// because they are build outputs or dependency caches the build on the hosting
+// node regenerates anyway.
 var ExcludedDirs = map[string]bool{
 	".git": true, "node_modules": true, "dist": true, "build": true,
 	"out": true, ".next": true, ".cache": true, ".turbo": true, "coverage": true,
+	".open-agents-bridge-worktrees": true,
 }
 
 // SensitivePatterns match file basenames stripped from the pack (not uploaded
@@ -113,6 +117,14 @@ func PackSourceTree(root string) (*PackResult, error) {
 			if relSlash != "." && ExcludedDirs[info.Name()] {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+
+		// A linked git worktree's .git is a POINTER FILE (gitdir: ...), not a
+		// directory, so the directory skip above never sees it — and the
+		// platform rejects any manifest path ending in a .git segment. Same
+		// for the file branch of BuildStaticTreeManifest.
+		if info.Name() == ".git" {
 			return nil
 		}
 

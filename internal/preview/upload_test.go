@@ -268,6 +268,11 @@ func TestRunAndUpload_NoBuildScriptStaticTreeUploads(t *testing.T) {
 	writeFile(t, dir, ".env", "SECRET=1")
 	writeFile(t, dir, filepath.Join("node_modules", "leftpad", "index.js"), "junk")
 	writeFile(t, dir, filepath.Join("assets", "app.css"), "a{}")
+	// S6 residue: a leftover mission task worktree, whose .git is a POINTER
+	// FILE (not a directory) -- both the directory and the pointer must stay out.
+	writeFile(t, dir, ".git", "gitdir: elsewhere")
+	writeFile(t, dir, filepath.Join(".open-agents-bridge-worktrees", "task-x-t0", ".git"), "gitdir: /repo/.git/worktrees/t0")
+	writeFile(t, dir, filepath.Join(".open-agents-bridge-worktrees", "task-x-t0", "app.ts"), "leftover")
 
 	fake := &capturingUploader{
 		fakeUploader: &fakeUploader{createResp: &api.DeclarePreviewResponse{PreviewID: "p1"}},
@@ -290,7 +295,7 @@ func TestRunAndUpload_NoBuildScriptStaticTreeUploads(t *testing.T) {
 		t.Errorf("complete kind = %q, want static", fake.completedBody.Kind)
 	}
 	for _, p := range paths {
-		if p == ".env" || strings.HasPrefix(p, "node_modules/") {
+		if p == ".env" || p == ".git" || strings.HasPrefix(p, "node_modules/") || strings.HasPrefix(p, ".open-agents-bridge-worktrees/") {
 			t.Errorf("manifest must strip unservable/sensitive files, found %s", p)
 		}
 	}

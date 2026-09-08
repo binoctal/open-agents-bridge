@@ -81,6 +81,7 @@ func BuildManifest(outputDir string) ([]ManifestFile, error) {
 var StaticTreeExcludedDirs = map[string]bool{
 	".git": true, "node_modules": true, "dist": true, "build": true,
 	"out": true, ".next": true, ".cache": true, ".turbo": true, "coverage": true,
+	".open-agents-bridge-worktrees": true,
 }
 
 // StaticTreeSensitivePatterns match basenames never uploaded in a fallback
@@ -121,6 +122,10 @@ func BuildStaticTreeManifest(root string) ([]ManifestFile, error) {
 			if excluded[info.Name()] {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		// Linked-worktree .git pointer file — see deploysource.PackSourceTree.
+		if info.Name() == ".git" {
 			return nil
 		}
 		if sensitive(info.Name()) {
