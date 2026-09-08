@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -69,6 +70,82 @@ func BuildManifest(outputDir string) ([]ManifestFile, error) {
 
 	// Deterministic order: makes the manifest reproducible for tests and
 	// stable for logging, though the platform doesn't require it.
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return files, nil
+}
+
+// StaticTreeExcludedDirs are directories never included when a whole source
+// tree (not a build output) is uploaded as a static site — the S5 no-build
+// fallback in RunAndUpload. Must stay in sync with
+// deploysource.ExcludedDirs (guarded by TestStaticTreeExclusionsMirrorDeploysource).
+var StaticTreeExcludedDirs = map[string]bool{
+	".git": true, "node_modules": true, "dist": true, "build": true,
+	"out": true, ".next": true, ".cache": true, ".turbo": true, "coverage": true,
+}
+
+// StaticTreeSensitivePatterns match basenames never uploaded in a fallback
+// static manifest. Must stay in sync with deploysource.SensitivePatterns
+// (same guard test).
+var StaticTreeSensitivePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^\.env(\..+)?$`),
+	regexp.MustCompile(`\.(pem|key|p12|pfx)$`),
+	regexp.MustCompile(`^id_rsa`),
+	regexp.MustCompile(`^id_ed25519`),
+	regexp.MustCompile(`^id_ecdsa`),
+	regexp.MustCompile(`^service-account.+\.json$`),
+	regexp.MustCompile(`^credentials.*\.json$`),
+}
+
+// BuildStaticTreeManifest is BuildManifest over a raw source tree: the S5
+// no-build fallback serves repoRoot itself, so the same directories and
+// sensitive files the deploy source packer strips must not enter a preview
+// manifest either — BuildManifest alone was designed for dist outputs and
+// would happily upload .git and .env.
+func BuildStaticTreeManifest(root string) ([]ManifestFile, error) {
+	excluded := StaticTreeExcludedDirs
+	sensitive := func(base string) bool {
+		for _, re := range StaticTreeSensitivePatterns {
+			if re.MatchString(base) {
+				return true
+			}
+		}
+		return false
+	}
+
+	var files []ManifestFile
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if excluded[info.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if sensitive(info.Name()) {
+			return nil
+		}
+
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		relSlash := filepath.ToSlash(rel)
+		if strings.HasSuffix(relSlash, ".map") {
+			return nil
+		}
+
+		sum, sumErr := SHA256File(path)
+		if sumErr != nil {
+			return sumErr
+		}
+		files = append(files, ManifestFile{Path: relSlash, SHA256: sum, Size: info.Size()})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	return files, nil
 }

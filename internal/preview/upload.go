@@ -159,8 +159,20 @@ func RunAndUpload(client Uploader, cache *Cache, jobID, repoRoot, taskID string,
 		logf("[%s] preview: could not read package.json for mission %s: %v", logger.ModPreview, jobID, err)
 		return
 	}
+
+	// S5 static fallback (fix-seed-audit-blockers): no build script but the
+	// tree classifies as a plain static site (root index.html, no framework
+	// config) -> upload the tree as-is instead of skipping. The preview panel
+	// used to render nothing for exactly these hand-written sites.
 	if !hasBuild {
-		logf("[%s] preview: no build script for mission %s, skipping", logger.ModPreview, jobID)
+		if DetectArtifactKind(repoRoot) != KindStatic {
+			logf("[%s] preview: no build script for mission %s, skipping", logger.ModPreview, jobID)
+			return
+		}
+		logf("[%s] preview: no build script but static tree for mission %s, uploading without build", logger.ModPreview, jobID)
+		if kind := DetectAndReport(client, jobID, repoRoot, logf); kind == KindStatic {
+			uploadStaticTree(client, cache, jobID, repoRoot, taskID, kind, logf, BuildStaticTreeManifest)
+		}
 		return
 	}
 
@@ -214,7 +226,17 @@ func RunAndUpload(client Uploader, cache *Cache, jobID, repoRoot, taskID string,
 		logf("[%s] preview: no build output with index.html for mission %s, skipping", logger.ModPreview, jobID)
 		return
 	}
+	uploadStaticTree(client, cache, jobID, outputDir, taskID, kind, logf, BuildManifest)
+}
 
+// uploadStaticTree is the shared static tail of RunAndUpload: rewrite, manifest,
+// cache, upload. Serves both the built-output path and the S5 no-build
+// fallback; the fallback passes repoRoot itself plus BuildStaticTreeManifest,
+// which strips the directories and sensitive files a raw source tree carries.
+func uploadStaticTree(client Uploader, cache *Cache, jobID, outputDir, taskID, kind string, logf Logf, buildManifest func(string) ([]ManifestFile, error)) {
+	if logf == nil {
+		logf = noopLogf
+	}
 	// D4: rewrite root-absolute references to relative BEFORE the manifest
 	// so the hashed bytes are the served bytes. Failure here means the
 	// output tree is unreadable — BuildManifest would fail the same way.
@@ -227,7 +249,7 @@ func RunAndUpload(client Uploader, cache *Cache, jobID, repoRoot, taskID string,
 		logf("[%s] preview: rewrote %d absolute reference(s) to relative for mission %s", logger.ModPreview, rewrites, jobID)
 	}
 
-	files, err := BuildManifest(outputDir)
+	files, err := buildManifest(outputDir)
 	if err != nil {
 		logf("[%s] preview: manifest build failed for mission %s: %v", logger.ModPreview, jobID, err)
 		return

@@ -2,6 +2,8 @@ package preview
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -252,6 +254,69 @@ func TestRunAndUpload_NoBuildScriptSkipsSilently(t *testing.T) {
 	}
 	if len(logs) == 0 {
 		t.Error("expected a log line explaining the skip")
+	}
+}
+
+// S5 static fallback: no build script, but a hand-written static tree (root
+// index.html, no framework config) uploads as-is — with .git/node_modules
+// and sensitive files stripped by BuildStaticTreeManifest.
+func TestRunAndUpload_NoBuildScriptStaticTreeUploads(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "index.html", `<html><link rel="stylesheet" href="/style.css"></html>`)
+	writeFile(t, dir, "style.css", "body{}")
+	writeFile(t, dir, "package.json", `{"name":"hand-written","dependencies":{}}`)
+	writeFile(t, dir, ".env", "SECRET=1")
+	writeFile(t, dir, filepath.Join("node_modules", "leftpad", "index.js"), "junk")
+	writeFile(t, dir, filepath.Join("assets", "app.css"), "a{}")
+
+	fake := &capturingUploader{
+		fakeUploader: &fakeUploader{createResp: &api.DeclarePreviewResponse{PreviewID: "p1"}},
+	}
+	var paths []string
+	fake.onCreate = func(files []api.PreviewFile) {
+		for _, f := range files {
+			paths = append(paths, f.Path)
+		}
+	}
+	RunAndUpload(fake, nil, "mission-1", dir, "task-1", nil)
+
+	if fake.createCalls != 1 {
+		t.Fatalf("expected exactly one declare, got %d", fake.createCalls)
+	}
+	if len(fake.reportedKinds) != 1 || fake.reportedKinds[0] != KindStatic {
+		t.Errorf("expected kind static reported once, got %v", fake.reportedKinds)
+	}
+	if fake.completedBody.Kind != KindStatic {
+		t.Errorf("complete kind = %q, want static", fake.completedBody.Kind)
+	}
+	for _, p := range paths {
+		if p == ".env" || strings.HasPrefix(p, "node_modules/") {
+			t.Errorf("manifest must strip unservable/sensitive files, found %s", p)
+		}
+	}
+	found := false
+	for _, p := range paths {
+		if p == "index.html" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("manifest must include the root index.html, got %v", paths)
+	}
+}
+
+// The fallback only fires for a tree that classifies static: a framework
+// repo without a build script must not ride the no-build upload.
+func TestRunAndUpload_NoBuildScriptFrameworkTreeStillSkips(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "index.html", "<html></html>")
+	writeFile(t, dir, "package.json", `{"name":"ssr","scripts":{"dev":"next"}}`)
+	writeFile(t, dir, "next.config.js", "export default {}")
+
+	fake := &fakeUploader{}
+	RunAndUpload(fake, nil, "mission-1", dir, "task-1", nil)
+	if fake.createCalls != 0 {
+		t.Error("a runtime-classified tree without a build script must not upload")
 	}
 }
 
