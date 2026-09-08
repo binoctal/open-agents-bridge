@@ -13,8 +13,10 @@ import (
 	crand "crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,10 +60,20 @@ type Agent struct {
 
 	Logf Logf
 
+	// probeDial is the TCP dial seam for the ready-alive probe (S4); tests
+	// inject a fake. nil falls back to a real localhost dial.
+	probeDial func(ctx context.Context, port int) error
+
 	// inFlight guards against overlapping materializes of one deployment
 	// (a slow tree while the next poll re-offers the same work item).
 	inFlightMu sync.Mutex
 	inFlight   map[string]bool
+
+	// probeFails counts consecutive probe failures per deployment (S4). A
+	// single refused dial is noise (container restart, transient dip); three
+	// in a row (~30s at the default poll) is a dead app and is reported once
+	// per streak. Guarded by inFlightMu.
+	probeFails map[string]int
 }
 
 // Run drives both loops until ctx is done.
@@ -165,6 +177,8 @@ func (a *Agent) handle(ctx context.Context, item api.WorkItem) error {
 		return a.handleRemoveRoute(ctx, item)
 	case api.ActionRelease:
 		return a.handleRelease(ctx, item)
+	case api.ActionProbe:
+		return a.handleProbe(ctx, item)
 	default:
 		a.logf("deploy %s: unknown action %q", item.DeploymentID, item.Action)
 		return nil
@@ -239,6 +253,51 @@ func (a *Agent) handleRelease(ctx context.Context, item api.WorkItem) error {
 	}
 	a.logf("deploy %s: released (route + repo + port recycled)", item.DeploymentID)
 	return a.report(ctx, item.DeploymentID, api.EventReleased, 0, "")
+}
+
+// handleProbe is the ready-alive check (S4): dial the app's published host
+// port on localhost. Success clears the streak; three consecutive failures
+// report runtime_fail once (the API's transition table takes ready -> failed,
+// and the streak entry is dropped so a retry/restart that fails again starts
+// a fresh streak instead of double-reporting).
+func (a *Agent) handleProbe(ctx context.Context, item api.WorkItem) error {
+	if a.probeDial == nil {
+		a.probeDial = defaultProbeDial
+	}
+	err := a.probeDial(ctx, item.AppPort)
+	a.inFlightMu.Lock()
+	if a.probeFails == nil {
+		a.probeFails = make(map[string]int)
+	}
+	if err == nil {
+		delete(a.probeFails, item.DeploymentID)
+		a.inFlightMu.Unlock()
+		return nil
+	}
+	a.probeFails[item.DeploymentID]++
+	streak := a.probeFails[item.DeploymentID]
+	if streak < 3 {
+		a.inFlightMu.Unlock()
+		a.logf("deploy %s: probe port %d failed (%d/3): %v", item.DeploymentID, item.AppPort, streak, err)
+		return nil
+	}
+	delete(a.probeFails, item.DeploymentID)
+	a.inFlightMu.Unlock()
+	a.logf("deploy %s: port %d dead after %d consecutive probes, reporting runtime_fail",
+		item.DeploymentID, item.AppPort, streak)
+	return a.report(ctx, item.DeploymentID, api.EventRuntimeFail, 0, fmt.Sprintf("tcp dial 127.0.0.1:%d failed %d consecutive probes: %v", item.AppPort, streak, err))
+}
+
+// defaultProbeDial opens a short-lived TCP connection to the app port. Any
+// accepted connection proves a listener is alive; the connection is closed
+// immediately -- the probe never speaks the app's protocol.
+func defaultProbeDial(ctx context.Context, port int) error {
+	d := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := d.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
 
 // report posts one event; a 401 is fatal (returned so Run/main exit), anything
@@ -323,17 +382,41 @@ func (a *Agent) logf(format string, args ...any) {
 
 // CollectWatermark reads node capacity: MemAvailable/MemTotal from
 // /proc/meminfo and the running-container count from docker (best-effort --
-// a docker hiccup reports 0 containers, never blocks the loop).
+// a docker hiccup reports 0 containers, never blocks the loop). PortsInUse
+// (S3) parses the published host ports out of `docker ps --format {{.Ports}}`
+// -- lines like "0.0.0.0:30001->3000/tcp" -- so the API's allocation scan
+// sees occupants its own table knows nothing about. Best-effort like the
+// container count: a docker hiccup yields no ports, never blocks the loop.
 func CollectWatermark(ctx context.Context) api.Watermark {
 	w := api.Watermark{
 		MemoryAvailableBytes: meminfo("MemAvailable"),
 		MemoryTotalBytes:     meminfo("MemTotal"),
 	}
-	if out, err := exec.CommandContext(ctx, "docker", "ps", "--filter", "status=running", "-q").Output(); err == nil {
-		w.ContainersRunning = len(strings.Fields(string(out)))
+	if out, err := exec.CommandContext(ctx, "docker", "ps", "--filter", "status=running", "--format", "{{.ID}} {{.Ports}}").Output(); err == nil {
+		w.ContainersRunning = 0
+		seen := map[int]bool{}
+		for _, line := range strings.Split(string(out), "\n") {
+			// The .ID half keeps one non-empty line per container, including
+			// those that publish no ports (whose .Ports half is blank).
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			w.ContainersRunning++
+			for _, m := range hostPortRe.FindAllStringSubmatch(line, -1) {
+				if p, err := strconv.Atoi(m[1]); err == nil && p > 0 && p < 65536 && !seen[p] {
+					seen[p] = true
+					w.PortsInUse = append(w.PortsInUse, p)
+				}
+			}
+		}
 	}
 	return w
 }
+
+// hostPortRe matches the host side of a docker ps port publication, e.g.
+// "0.0.0.0:30001->3000/tcp" or "[::]:30001->3000/tcp". Duplicated ports
+// across containers are collapsed by the caller's seen map.
+var hostPortRe = regexp.MustCompile(`(?:\d+\.\d+\.\d+\.\d+|\[::\]):(\d+)->`)
 
 // CollectUsageSamples reads per-container memory for Coolify-managed
 // containers (add-hosting-quota-guardrails design D1): docker ps filtered on

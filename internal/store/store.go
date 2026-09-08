@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -123,6 +124,17 @@ func (s *Store) Materialize(ctx context.Context, deploymentID, sourcePrefix stri
 		}
 	}
 
+	// 2b. Static-site fallback (fix-seed-audit-blockers S4). A tree with
+	// index.html but no start/build command is a static site; nixpacks picks
+	// its node provider off the mere PRESENCE of package.json, builds no CMD,
+	// and the container crash-loops while the row reads ready (2026-09-08
+	// live incident). Moving the manifest aside makes nixpacks fall through
+	// to its static provider: nginx serving the tree on $PORT, zero injected
+	// code to maintain. Pure function of the manifest -> idempotent commit.
+	if err := applyStaticFallback(work, manifest); err != nil {
+		return "", fmt.Errorf("materialize %s: static fallback: %w", deploymentID, err)
+	}
+
 	// 3. Single-commit repo, then bare-copy and atomic swap.
 	if err := runGit(ctx, work, "init", "--quiet", "--initial-branch=main"); err != nil {
 		return "", fmt.Errorf("materialize %s: git init: %w", deploymentID, err)
@@ -164,6 +176,57 @@ func (s *Store) Materialize(ctx context.Context, deploymentID, sourcePrefix stri
 		return "", fmt.Errorf("materialize %s: swap repo in: %w", deploymentID, err)
 	}
 	return commit, nil
+}
+
+// staticFallbackName is what package.json is moved to when the static
+// fallback fires: the file stays in the tree (auditable, and a developer can
+// see why nixpacks stopped seeing it) but no longer steers the provider.
+const staticFallbackName = "package.json.static-fallback"
+
+// applyStaticFallback moves package.json aside when the tree is a static
+// site nixpacks would mis-detect. Firing conditions, all required:
+//   - package.json exists at the root but declares no start AND no build
+//     script (a build script means a real toolchain -- not our call)
+//   - index.html exists at the root (the thing the static provider serves)
+//   - no Procfile / nixpacks.toml / railway.json|toml (an explicit start
+//     declaration anywhere wins over the heuristic)
+//
+// A missing package.json with index.html already lands on the static
+// provider natively, so there is nothing to do for it here.
+func applyStaticFallback(work string, manifest []api.File) error {
+	has := func(p string) bool {
+		for _, f := range manifest {
+			if f.Path == p {
+				return true
+			}
+		}
+		return false
+	}
+	for _, p := range []string{"Procfile", "nixpacks.toml", "railway.json", "railway.toml"} {
+		if has(p) {
+			return nil
+		}
+	}
+	if !has("index.html") || !has("package.json") {
+		return nil
+	}
+	raw, err := os.ReadFile(filepath.Join(work, "package.json"))
+	if err != nil {
+		return err
+	}
+	var pkg struct {
+		Scripts struct {
+			Start string `json:"start"`
+			Build string `json:"build"`
+		} `json:"scripts"`
+	}
+	// A malformed package.json moves aside too: nixpacks' provider detection
+	// is presence-based, so even unparseable it steers node and no-CMD.
+	_ = json.Unmarshal(raw, &pkg)
+	if strings.TrimSpace(pkg.Scripts.Start) != "" || strings.TrimSpace(pkg.Scripts.Build) != "" {
+		return nil
+	}
+	return os.Rename(filepath.Join(work, "package.json"), filepath.Join(work, staticFallbackName))
 }
 
 // hasObject reports whether a verified copy of sha exists in the store.

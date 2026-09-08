@@ -53,12 +53,16 @@ type File struct {
 }
 
 // Work actions. materialize carries the manifest; register_route carries the
-// app port Coolify exposed; release tears the deployment's local footprint.
+// app port Coolify exposed; release tears the deployment's local footprint;
+// probe is the ready-alive TCP dial (fix-seed-audit-blockers S4: a
+// crash-looped container looks ready from the API side, so the API asks and
+// the agent observes).
 const (
 	ActionMaterialize   = "materialize"
 	ActionRegisterRoute = "register_route"
 	ActionRemoveRoute   = "remove_route"
 	ActionRelease       = "release"
+	ActionProbe         = "probe"
 )
 
 // WorkItem is one unit of work the API wants this agent to perform.
@@ -96,11 +100,18 @@ type PresignResponse struct {
 // process-start identity (design D8): the API diffs it against the stored
 // value and, on change, treats the node as rebuilt -- every live deployment
 // is re-offered from R2 with no user action. Empty on agents that predate it.
+// PortsInUse (fix-seed-audit-blockers S3) lists host ports actually bound by
+// running containers: the API unions it into its app-port allocation scan so
+// a container outside its own table can no longer win a port race. Nil on
+// agents that predate it -- unknown, deliberately NOT "no ports taken".
+// Keep in lockstep with apps/api/src/services/hosting-orchestrator.ts
+// (AgentWatermark) and the /watermark route validation.
 type Watermark struct {
 	MemoryAvailableBytes uint64 `json:"memoryAvailableBytes"`
 	MemoryTotalBytes     uint64 `json:"memoryTotalBytes"`
 	ContainersRunning    int    `json:"containersRunning"`
 	BootID               string `json:"bootId,omitempty"`
+	PortsInUse           []int  `json:"portsInUse,omitempty"`
 }
 
 // Report events (terminal states of each work action).
@@ -110,6 +121,7 @@ const (
 	EventRouteRegistered   = "route_registered"
 	EventRouteRemoved      = "route_removed"
 	EventReleased          = "released"
+	EventRuntimeFail       = "runtime_fail"
 )
 
 // GetWork fetches the current work list.
