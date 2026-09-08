@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/binoctal/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/utf8safe"
 	"github.com/creack/pty"
 )
 
@@ -91,10 +92,14 @@ func (a *BaseAdapter) StartWithSize(workDir string, args []string, cols, rows in
 func (a *BaseAdapter) readOutput(r io.Reader, outputType string) {
 	logger.Debug("[%s] Starting to read %s (raw mode)", logger.ModAdapter, outputType)
 	buf := make([]byte, 4096)
+	// utf8safe holds back a rune split across read chunks so the web terminal
+	// never renders U+FFFD (fix-seed-audit-blockers S5); residue dies with
+	// this goroutine when the session ends.
+	var dec utf8safe.Decoder
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
-			content := string(buf[:n])
+			content := dec.Push(buf[:n])
 			// Log truncated for readability (raw output may contain control chars)
 			if len(content) > 100 {
 				logger.Debug("[%s] %s: %d bytes", logger.ModAdapter, outputType, n)

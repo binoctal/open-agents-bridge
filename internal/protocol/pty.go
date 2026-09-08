@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/binoctal/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/utf8safe"
 	"github.com/creack/pty"
 )
 
@@ -199,6 +200,10 @@ func (a *PTYAdapter) Resize(cols, rows int) error {
 // readOutput reads raw output from PTY
 func (a *PTYAdapter) readOutput() {
 	buf := make([]byte, 4096)
+	// utf8safe holds back a rune split across read chunks so the terminal
+	// never renders U+FFFD (fix-seed-audit-blockers S5); the residue dies
+	// with this goroutine when the session disconnects.
+	var dec utf8safe.Decoder
 	for {
 		if !a.connected.Load() {
 			break
@@ -206,7 +211,7 @@ func (a *PTYAdapter) readOutput() {
 
 		n, err := a.ptmx.Read(buf)
 		if n > 0 {
-			content := string(buf[:n])
+			content := dec.Push(buf[:n])
 			logger.Debug("[%s] Output: %d bytes", logger.ModPTY, n)
 
 			if a.callback != nil {
