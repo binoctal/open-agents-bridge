@@ -45,6 +45,11 @@ type Agent struct {
 	WorkPollInterval  time.Duration
 	WatermarkInterval time.Duration
 
+	// UsageInterval is the per-container memory sampling cadence
+	// (add-hosting-quota-guardrails design D2; RAM·h accuracy needs minutes,
+	// not seconds). Zero falls back to usageInterval()'s default.
+	UsageInterval time.Duration
+
 	// BootID identifies this process lifetime: the API diffs it against the
 	// stored watermark value and, on change, resets every live deployment back
 	// to R2 re-materialization (design D8 -- the node is disposable). Set by
@@ -71,6 +76,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	defer work.Stop()
 	wm := time.NewTicker(a.watermarkInterval())
 	defer wm.Stop()
+	usage := time.NewTicker(a.usageInterval())
+	defer usage.Stop()
 
 	// First tick immediate: don't sit idle for a full interval at boot.
 	if err := a.pollWork(ctx); err != nil {
@@ -92,6 +99,10 @@ func (a *Agent) Run(ctx context.Context) error {
 			if err := a.reportWatermark(ctx); err != nil {
 				return err
 			}
+		case <-usage.C:
+			if err := a.reportUsage(ctx); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -108,6 +119,13 @@ func (a *Agent) watermarkInterval() time.Duration {
 		return a.WatermarkInterval
 	}
 	return time.Minute
+}
+
+func (a *Agent) usageInterval() time.Duration {
+	if a.UsageInterval > 0 {
+		return a.UsageInterval
+	}
+	return 5 * time.Minute
 }
 
 // pollWork fetches one batch and handles each item sequentially -- a single
@@ -248,6 +266,25 @@ func (a *Agent) reportWatermark(ctx context.Context) error {
 	return nil
 }
 
+// reportUsage samples per-container memory and posts the batch. Skipped when
+// no Coolify app containers are running (zero usage, and the watermark loop
+// already carries liveness); a non-401 failure is logged, not fatal -- the
+// next tick's batch covers the gap and the API's rollup treats a sample-less
+// ready hour conservatively by design.
+func (a *Agent) reportUsage(ctx context.Context) error {
+	samples := CollectUsageSamples(ctx, time.Now().UTC())
+	if len(samples) == 0 {
+		return nil
+	}
+	if err := a.Client.ReportUsage(ctx, samples); err != nil {
+		if api.Unauthorized(err) {
+			return err
+		}
+		a.logf("usage report failed: %v", err)
+	}
+	return nil
+}
+
 // NewBootID mints a fresh process-lifetime identity (design D8). It only ever
 // needs to be unique per restart, not secret: the API compares it for
 // inequality, never trusts it for authentication.
@@ -296,6 +333,82 @@ func CollectWatermark(ctx context.Context) api.Watermark {
 		w.ContainersRunning = len(strings.Fields(string(out)))
 	}
 	return w
+}
+
+// CollectUsageSamples reads per-container memory for Coolify-managed
+// containers (add-hosting-quota-guardrails design D1): docker ps filtered on
+// the coolify.name label (the application uuid the API stores), joined
+// against one docker stats --no-stream sweep. Best-effort like
+// CollectWatermark: a docker hiccup yields no samples, never blocks the loop.
+// Coolify's own housekeeping containers may carry the label too -- the API
+// drops those as orphans by design.
+func CollectUsageSamples(ctx context.Context, now time.Time) []api.UsageSample {
+	const appLabel = "coolify.name"
+	psOut, err := exec.CommandContext(ctx, "docker", "ps", "--filter", "label="+appLabel,
+		"--format", "{{.ID}}\t{{.Label \""+appLabel+"\"}}").Output()
+	if err != nil {
+		return nil
+	}
+	statsOut, err := exec.CommandContext(ctx, "docker", "stats", "--no-stream",
+		"--format", "{{.ID}}\t{{.MemUsage}}").Output()
+	if err != nil {
+		return nil
+	}
+	memByID := make(map[string]uint64)
+	for _, line := range strings.Split(string(statsOut), "\n") {
+		fields := strings.SplitN(line, "\t", 2)
+		if len(fields) != 2 {
+			continue
+		}
+		// MemUsage renders as "used / limit"; the used half is the reading.
+		used := strings.SplitN(fields[1], "/", 2)[0]
+		if b, ok := parseDockerSize(used); ok {
+			memByID[fields[0]] = b
+		}
+	}
+	ts := now.Format(time.RFC3339Nano)
+	var samples []api.UsageSample
+	for _, line := range strings.Split(string(psOut), "\n") {
+		fields := strings.SplitN(line, "\t", 2)
+		if len(fields) != 2 || fields[1] == "" {
+			continue
+		}
+		if mem, ok := memByID[fields[0]]; ok && mem > 0 {
+			samples = append(samples, api.UsageSample{
+				CoolifyAppID: fields[1],
+				MemoryBytes:  mem,
+				TS:           ts,
+			})
+		}
+	}
+	return samples
+}
+
+// parseDockerSize converts docker's human sizes ("77.3MiB", "1.5GiB", "512B")
+// to bytes.
+func parseDockerSize(s string) (uint64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	mult := uint64(1)
+	switch {
+	case strings.HasSuffix(s, "GiB"):
+		mult, s = 1024*1024*1024, s[:len(s)-3]
+	case strings.HasSuffix(s, "MiB"):
+		mult, s = 1024*1024, s[:len(s)-3]
+	case strings.HasSuffix(s, "KiB"):
+		mult, s = 1024, s[:len(s)-3]
+	case strings.HasSuffix(s, "B"):
+		s = s[:len(s)-1]
+	default:
+		return 0, false
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || v < 0 {
+		return 0, false
+	}
+	return uint64(v * float64(mult)), true
 }
 
 func meminfo(key string) uint64 {

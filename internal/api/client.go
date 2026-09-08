@@ -7,6 +7,7 @@
 //	POST /internal/hosting-agent/presign-source  {deploymentId, shas} -> PresignResponse
 //	POST /internal/hosting-agent/report          {deploymentId, event, repoPort, detail}
 //	POST /internal/hosting-agent/watermark       Watermark
+//	POST /internal/hosting-agent/usage          {agentId, samples: [UsageSample]}
 //
 // Every request carries X-Internal-Secret. The agent polls for work because
 // the API worker cannot reach the ECS node directly (same reason node-runner
@@ -189,6 +190,26 @@ func (c *Client) ReportWatermark(ctx context.Context, w Watermark) error {
 		"watermark": w,
 	}
 	return c.postJSON(ctx, "/internal/hosting-agent/watermark", payload, nil)
+}
+
+// UsageSample is one per-container memory reading (add-hosting-quota-guardrails
+// design D1/D2). CoolifyAppID is the Coolify application uuid, read from the
+// container's coolify.name label -- NOT the numeric coolify.applicationId
+// label, which is Coolify's internal id and matches nothing the API stores.
+type UsageSample struct {
+	CoolifyAppID string `json:"coolifyAppId"`
+	MemoryBytes  uint64 `json:"memoryBytes"`
+	TS           string `json:"ts"`
+}
+
+// ReportUsage posts a batch of per-container samples. The API resolves tenant
+// ownership; samples for apps it does not know are dropped server-side.
+func (c *Client) ReportUsage(ctx context.Context, samples []UsageSample) error {
+	payload := map[string]any{
+		"agentId": c.AgentID,
+		"samples": samples,
+	}
+	return c.postJSON(ctx, "/internal/hosting-agent/usage", payload, nil)
 }
 
 func (c *Client) getJSON(ctx context.Context, path string, out any) error {
