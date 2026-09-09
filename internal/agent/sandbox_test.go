@@ -3,11 +3,23 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/binoctal/open-agents/hosting-agent/internal/api"
 )
+
+// Tests must never touch the real /etc/hosting-agent path: stub the ensure
+// seam package-wide; focused tests below override it deliberately.
+func TestMain(m *testing.M) {
+	orig := ensureSandboxResolvConf
+	ensureSandboxResolvConf = func() error { return nil }
+	code := m.Run()
+	ensureSandboxResolvConf = orig
+	os.Exit(code)
+}
 
 // dockerCall is one recorded docker invocation.
 type dockerCall struct {
@@ -284,6 +296,72 @@ func TestSandboxUpArgsOmitAttemptWhenZero(t *testing.T) {
 	}
 	if !strings.Contains(joined, "TASK_PROMPT=") {
 		t.Errorf("task prompt env missing: %s", joined)
+	}
+}
+
+// The container must run with a mounted resolv.conf naming REAL resolvers:
+// on user-defined networks docker forces 127.0.0.11 into resolv.conf, and
+// gVisor's netstack cannot reach that embedded DNS proxy -- every lookup
+// inside the box then fails with EAI_AGAIN (live finding, 2026-09-09 e2e).
+func TestSandboxUpArgsMountResolvConf(t *testing.T) {
+	args := sandboxUpArgs(sandboxItem(), runnerName)
+	if i := indexOf(args, "-v"); i < 0 || args[i+1] != sandboxResolvConf+":/etc/resolv.conf:ro" {
+		t.Errorf("run must bind-mount the sandbox resolv.conf: %v", args)
+	}
+}
+
+// writeSandboxResolvConf seeds the mount target from SANDBOX_DNS_SERVERS and
+// never overwrites an existing file (an operator edit must win).
+func TestWriteSandboxResolvConf(t *testing.T) {
+	t.Setenv("SANDBOX_DNS_SERVERS", "1.1.1.1, 100.100.2.136 ,,9.9.9.9")
+	path := filepath.Join(t.TempDir(), "nested", "sbx-resolv.conf")
+	if err := writeSandboxResolvConf(path); err != nil {
+		t.Fatalf("writeSandboxResolvConf: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	want := "nameserver 1.1.1.1\nnameserver 100.100.2.136\nnameserver 9.9.9.9\n"
+	if string(got) != want {
+		t.Errorf("resolv.conf = %q, want %q", got, want)
+	}
+	// Second run is a no-op for an operator-edited file.
+	if err := os.WriteFile(path, []byte("nameserver 10.0.0.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSandboxResolvConf(path); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	got, _ = os.ReadFile(path)
+	if string(got) != "nameserver 10.0.0.1\n" {
+		t.Errorf("existing file must not be overwritten, got %q", got)
+	}
+}
+
+// A resolv.conf that cannot be ensured refuses the start loudly: docker run
+// would fail on the missing mount anyway, but with a reason the API can't
+// attribute. Nothing may execute.
+func TestHandleSandboxUpResolvConfFailure(t *testing.T) {
+	sink, client := newReportAPIServer(t)
+	dk := &fakeDocker{}
+	orig := ensureSandboxResolvConf
+	ensureSandboxResolvConf = func() error { return errors.New("read-only filesystem") }
+	t.Cleanup(func() { ensureSandboxResolvConf = orig })
+	a := &Agent{Client: client, dockerRun: dk.run}
+
+	if err := a.handleSandboxUp(context.Background(), sandboxItem()); err != nil {
+		t.Fatalf("handleSandboxUp: %v", err)
+	}
+	// The read-only digest inspect may precede the refusal; only execution
+	// (docker run) is forbidden.
+	for _, c := range dk.calls {
+		if c.args[0] == "run" {
+			t.Fatalf("docker run must never execute when resolv.conf is unusable, got %v", c.args)
+		}
+	}
+	if got := sink.count(api.EventSandboxUpFailed); got != 1 {
+		t.Fatalf("want one sandbox_up_failed report, got %d", got)
 	}
 }
 

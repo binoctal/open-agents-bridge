@@ -9,7 +9,9 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -23,7 +25,41 @@ const (
 	sandboxRuntime   = "runsc"
 	sandboxNetwork   = "sbx-net"
 	sandboxPidsLimit = "64"
+	// resolv.conf mounted over the container's own: on user-defined networks
+	// docker forces 127.0.0.11 (its embedded DNS proxy) into resolv.conf, and
+	// gVisor's netstack cannot reach that proxy -- every getaddrinfo inside
+	// the box then dies with EAI_AGAIN (verified live: direct queries to real
+	// resolvers succeed, 127.0.0.11 is ECONNREFUSED, and --dns only changes
+	// what the unreachable proxy would forward to). The file is created by
+	// ensureSandboxResolvConf from SANDBOX_DNS_SERVERS if absent.
+	sandboxResolvConf = "/etc/hosting-agent/sbx-resolv.conf"
 )
+
+// ensureSandboxResolvConf is a seam so tests never touch the real path.
+var ensureSandboxResolvConf = func() error { return writeSandboxResolvConf(sandboxResolvConf) }
+
+// writeSandboxResolvConf materializes the mounted resolv.conf when missing.
+// SANDBOX_DNS_SERVERS is a comma-separated list; default 1.1.1.1 (public,
+// and the egress-lockdown rules on sbx-net already allow udp/tcp 53 out).
+func writeSandboxResolvConf(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	servers := os.Getenv("SANDBOX_DNS_SERVERS")
+	if servers == "" {
+		servers = "1.1.1.1"
+	}
+	var b strings.Builder
+	for _, s := range strings.Split(servers, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			fmt.Fprintf(&b, "nameserver %s\n", s)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
 
 // dockerRunner is the exec seam for sandbox container commands. The default
 // runs the real docker CLI; tests inject a recorder.
@@ -65,6 +101,8 @@ func sandboxUpArgs(item api.WorkItem, imageName string) []string {
 		"--cpus", fmt.Sprintf("%g", sc.VCPU),
 		"--pids-limit", sandboxPidsLimit,
 		"--tmpfs", fmt.Sprintf("/tmp:size=%dm,rw,noexec", sc.StorageMiB),
+		// Real resolvers, not the unreachable 127.0.0.11 (see sandboxResolvConf).
+		"-v", sandboxResolvConf + ":/etc/resolv.conf:ro",
 		"-e", "TASK_TOKEN=" + item.TaskToken,
 		"-e", "API_BASE_URL=" + item.APIBaseURL,
 		"-e", "MISSION_ID=" + item.MissionID,
@@ -160,6 +198,13 @@ func (a *Agent) handleSandboxUp(ctx context.Context, item api.WorkItem) error {
 	if err != nil {
 		a.logf("sandbox %s: refusing start: %v", item.SandboxID, err)
 		return report(api.EventSandboxUpFailed, "", err.Error())
+	}
+
+	// The resolv.conf bind-mount target must exist or docker run fails on the
+	// mount itself; fail early with a reason the API can surface instead.
+	if err := ensureSandboxResolvConf(); err != nil {
+		a.logf("sandbox %s: refusing start: %v", item.SandboxID, err)
+		return report(api.EventSandboxUpFailed, "", fmt.Sprintf("resolv.conf: %v", err))
 	}
 
 	out, err := a.docker()(ctx, sandboxUpArgs(item, imageName)...)
