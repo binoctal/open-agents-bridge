@@ -50,6 +50,8 @@ func sandboxItem() api.WorkItem {
 		TaskToken:      "stt_plaintext",
 		APIBaseURL:     "https://api.openagents.top",
 		TimeoutSeconds: 1800,
+		TaskPrompt:     "# T\n\n\ndo the thing",
+		Attempt:        2,
 		SizeClass: &api.SizeClass{
 			ID: "sandbox-s1", VCPU: 0.5, MemoryMiB: 512, StorageMiB: 1024,
 		},
@@ -98,6 +100,15 @@ func TestHandleSandboxUpArgs(t *testing.T) {
 	}
 	if !strings.Contains(joined, "API_BASE_URL=https://api.openagents.top") {
 		t.Errorf("api base url not passed via env: %s", joined)
+	}
+	// The task payload rides env too (5.2): the runner refuses to start
+	// without TASK_PROMPT, and ATTEMPT is the dispatch generation the runner
+	// echoes back for G19 attempt pairing.
+	if !strings.Contains(joined, "TASK_PROMPT=# T") {
+		t.Errorf("task prompt not passed via env: %s", joined)
+	}
+	if !strings.Contains(joined, "ATTEMPT=2") {
+		t.Errorf("dispatch attempt not passed via env: %s", joined)
 	}
 	if !strings.Contains(joined, " "+runnerName) {
 		t.Errorf("verified image name missing from run: %s", joined)
@@ -233,24 +244,46 @@ func TestHandleSandboxUpDigestGate(t *testing.T) {
 	}
 }
 
-// An up item missing its payload (tier, image, token) is rejected before any
-// docker call -- a sandbox started without its credential is a brick that
-// still burns node resources.
+// An up item missing its payload (tier, image, token, prompt) is rejected
+// before any docker call -- a sandbox started without its credential or its
+// prompt is a brick that still burns node resources.
 func TestHandleSandboxUpMalformed(t *testing.T) {
 	sink, client := newReportAPIServer(t)
 	dk := &fakeDocker{}
 	a := &Agent{Client: client, dockerRun: dk.run}
 
+	want := 1
+	for name, mutate := range map[string]func(*api.WorkItem){
+		"no token":  func(i *api.WorkItem) { i.TaskToken = "" },
+		"no prompt": func(i *api.WorkItem) { i.TaskPrompt = "" },
+	} {
+		item := sandboxItem()
+		mutate(&item)
+		if err := a.handleSandboxUp(context.Background(), item); err != nil {
+			t.Fatalf("%s: handleSandboxUp: %v", name, err)
+		}
+		if len(dk.calls) != 0 {
+			t.Fatalf("%s: malformed item must not reach docker, got %v", name, dk.calls)
+		}
+		if got := sink.count(api.EventSandboxUpFailed); got != want {
+			t.Fatalf("%s: want sandbox_up_failed report #%d, got %d", name, want, got)
+		}
+		want++
+	}
+}
+
+// Attempt 0 (payload-less item) omits the ATTEMPT env entirely: the runner
+// then soft-passes attempt on its callbacks, exactly like pre-attempt bridge
+// runners -- never a forged attempt 0.
+func TestSandboxUpArgsOmitAttemptWhenZero(t *testing.T) {
 	item := sandboxItem()
-	item.TaskToken = ""
-	if err := a.handleSandboxUp(context.Background(), item); err != nil {
-		t.Fatalf("handleSandboxUp: %v", err)
+	item.Attempt = 0
+	joined := strings.Join(sandboxUpArgs(item, runnerName), " ")
+	if strings.Contains(joined, "ATTEMPT=") {
+		t.Errorf("attempt 0 must not inject ATTEMPT env: %s", joined)
 	}
-	if len(dk.calls) != 0 {
-		t.Fatalf("malformed item must not reach docker, got %v", dk.calls)
-	}
-	if sink.count(api.EventSandboxUpFailed) != 1 {
-		t.Errorf("want sandbox_up_failed report")
+	if !strings.Contains(joined, "TASK_PROMPT=") {
+		t.Errorf("task prompt env missing: %s", joined)
 	}
 }
 

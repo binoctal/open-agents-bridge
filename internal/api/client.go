@@ -110,6 +110,11 @@ type WorkItem struct {
 	TaskToken      string `json:"taskToken,omitempty"`
 	APIBaseURL     string `json:"apiBaseUrl,omitempty"`
 	TimeoutSeconds int    `json:"timeoutSeconds,omitempty"`
+	// TaskPrompt is the composed prompt the runner executes (TASK_PROMPT env,
+	// add-cloud-executor 5.2). Attempt is the dispatch generation the runner
+	// echoes back on its terminal callbacks (G19 attempt pairing).
+	TaskPrompt string `json:"taskPrompt,omitempty"`
+	Attempt    int    `json:"attempt,omitempty"`
 }
 
 // PresignedObject maps an R2 key to its 15-minute GET URL.

@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/binoctal/open-agents/hosting-agent/internal/api"
@@ -55,7 +56,7 @@ func (a *Agent) docker() dockerRunner {
 // what docker accepts; the pin was already checked against it).
 func sandboxUpArgs(item api.WorkItem, imageName string) []string {
 	sc := item.SizeClass
-	return []string{
+	args := []string{
 		"run", "-d",
 		"--name", item.ContainerName,
 		"--runtime", sandboxRuntime,
@@ -68,9 +69,19 @@ func sandboxUpArgs(item api.WorkItem, imageName string) []string {
 		"-e", "API_BASE_URL=" + item.APIBaseURL,
 		"-e", "MISSION_ID=" + item.MissionID,
 		"-e", "TASK_ID=" + item.TaskID,
+		"-e", "TASK_PROMPT=" + item.TaskPrompt,
+	}
+	// The dispatch generation: the runner echoes it back on task-result /
+	// task-error so the callback can pair the report with the attempt that
+	// ran it (G19). Omitted on 0 (payload-less item) -- the runner then
+	// soft-passes, same as pre-attempt bridge runners.
+	if item.Attempt > 0 {
+		args = append(args, "-e", "ATTEMPT="+strconv.Itoa(item.Attempt))
+	}
+	return append(args,
 		"--pull", "never", // digest-pinned image must be pre-pulled (task 4.3); never float
 		imageName,
-	}
+	)
 }
 
 // splitDigestRef splits "name@sha256:<64 lowercase hex>" into its parts.
@@ -132,8 +143,8 @@ func (a *Agent) handleSandboxUp(ctx context.Context, item api.WorkItem) error {
 		}
 		return nil
 	}
-	if item.SizeClass == nil || item.ImageRef == "" || item.ContainerName == "" || item.TaskToken == "" {
-		a.logf("sandbox %s: up item missing payload (sizeClass/imageRef/containerName/taskToken)", item.SandboxID)
+	if item.SizeClass == nil || item.ImageRef == "" || item.ContainerName == "" || item.TaskToken == "" || item.TaskPrompt == "" {
+		a.logf("sandbox %s: up item missing payload (sizeClass/imageRef/containerName/taskToken/taskPrompt)", item.SandboxID)
 		return report(api.EventSandboxUpFailed, "", "malformed sandbox_up item")
 	}
 
