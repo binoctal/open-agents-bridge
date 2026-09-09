@@ -100,7 +100,10 @@ func sandboxUpArgs(item api.WorkItem, imageName string) []string {
 		"--memory", fmt.Sprintf("%dm", sc.MemoryMiB),
 		"--cpus", fmt.Sprintf("%g", sc.VCPU),
 		"--pids-limit", sandboxPidsLimit,
-		"--tmpfs", fmt.Sprintf("/tmp:size=%dm,rw,noexec", sc.StorageMiB),
+		// mode=1777 is explicit because the runner executes as the
+		// unprivileged node user: a root-owned 0755 tmpfs would make the
+		// CLI's HOME=/tmp state writes fail.
+		"--tmpfs", fmt.Sprintf("/tmp:size=%dm,rw,noexec,mode=1777", sc.StorageMiB),
 		// Real resolvers, not the unreachable 127.0.0.11 (see sandboxResolvConf).
 		"-v", sandboxResolvConf + ":/etc/resolv.conf:ro",
 		"-e", "TASK_TOKEN=" + item.TaskToken,

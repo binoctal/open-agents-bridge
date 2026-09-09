@@ -103,6 +103,11 @@ func TestHandleSandboxUpArgs(t *testing.T) {
 	if i := indexOf(args, "--tmpfs"); i < 0 || !strings.Contains(args[i+1], "size=1024m") || !strings.Contains(args[i+1], "noexec") {
 		t.Errorf("tmpfs args wrong: %v", args)
 	}
+	// The runner is the unprivileged node user: a non-1777 tmpfs mode would
+	// make HOME=/tmp state writes fail at CLI startup.
+	if i := indexOf(args, "--tmpfs"); !strings.Contains(args[i+1], "mode=1777") {
+		t.Errorf("tmpfs must be world-writable (mode=1777): %v", args)
+	}
 	if i := indexOf(args, "--pull"); i < 0 || args[i+1] != "never" {
 		t.Errorf("--pull never missing: %v", args)
 	}

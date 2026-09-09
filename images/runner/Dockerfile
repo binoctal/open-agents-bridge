@@ -21,4 +21,12 @@ WORKDIR /workspace
 COPY runner.mjs /opt/runner/runner.mjs
 COPY entrypoint.sh /opt/runner/entrypoint.sh
 RUN chmod 0555 /opt/runner/runner.mjs /opt/runner/entrypoint.sh
+# Run as the unprivileged `node` user (uid 1000, built into the official
+# node base): the claude CLI refuses --dangerously-skip-permissions under
+# root/sudo, so a root runner dies on every task (live e2e 2026-09-09).
+# HOME points at the container's noexec tmpfs -- the CLI's state files land
+# there and nothing persists past the container.
+RUN chown node:node /workspace
+USER node
+ENV HOME=/tmp
 ENTRYPOINT ["/opt/runner/entrypoint.sh"]
