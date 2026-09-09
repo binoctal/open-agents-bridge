@@ -78,6 +78,12 @@ func sandboxUpArgs(item api.WorkItem, imageName string) []string {
 	if item.Attempt > 0 {
 		args = append(args, "-e", "ATTEMPT="+strconv.Itoa(item.Attempt))
 	}
+	// The mission's catalog model: the runner CLI passes it as --model so its
+	// LLM calls name a model the outlet's catalog accepts. Omitted when empty
+	// (payload-less item) -- the runner then falls back to the CLI default.
+	if item.Model != "" {
+		args = append(args, "-e", "MODEL="+item.Model)
+	}
 	return append(args,
 		"--pull", "never", // digest-pinned image must be pre-pulled (task 4.3); never float
 		imageName,
