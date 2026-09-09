@@ -63,6 +63,10 @@ async function main() {
   const cli = spawnSync('claude', args, {
     cwd: '/workspace',
     encoding: 'utf8',
+    // The prompt rides stdin, not argv: `claude -p` reads a piped stdin, and
+    // this way nothing task-related shows in the container's process list
+    // (same discipline as the token staying out of the command line).
+    input: env.TASK_PROMPT,
     timeout: 25 * 60 * 1000, // stop before the API's timeout sweep destroys us
     env: {
       ...env,

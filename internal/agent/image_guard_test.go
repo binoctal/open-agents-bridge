@@ -111,6 +111,12 @@ func TestRunnerEntrypointNoSecrets(t *testing.T) {
 	if !strings.Contains(mjs, "process.env") && !strings.Contains(mjs, "env.TASK_TOKEN") {
 		t.Errorf("runner.mjs must read its credential from env, not from a file or literal")
 	}
+	// TASK_PROMPT must actually REACH the CLI: validated-as-set but never
+	// passed was a live e2e failure (2026-09-09) where every task died with
+	// "Input must be provided either through stdin or as a prompt argument".
+	if !strings.Contains(mjs, "input: env.TASK_PROMPT") {
+		t.Errorf("runner.mjs must feed TASK_PROMPT to the CLI via spawnSync stdin")
+	}
 }
 
 // The scanner itself must exist and scan the built image's env + history --
