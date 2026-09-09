@@ -56,14 +56,29 @@ type File struct {
 // app port Coolify exposed; release tears the deployment's local footprint;
 // probe is the ready-alive TCP dial (fix-seed-audit-blockers S4: a
 // crash-looped container looks ready from the API side, so the API asks and
-// the agent observes).
+// the agent observes). sandbox_up / sandbox_destroy (add-cloud-executor 4.1)
+// start and tear down a runsc-isolated cloud sandbox; they ride the same poll
+// but are keyed by sandboxId, not deploymentId.
 const (
-	ActionMaterialize   = "materialize"
-	ActionRegisterRoute = "register_route"
-	ActionRemoveRoute   = "remove_route"
-	ActionRelease       = "release"
-	ActionProbe         = "probe"
+	ActionMaterialize    = "materialize"
+	ActionRegisterRoute  = "register_route"
+	ActionRemoveRoute    = "remove_route"
+	ActionRelease        = "release"
+	ActionProbe          = "probe"
+	ActionSandboxUp      = "sandbox_up"
+	ActionSandboxDestroy = "sandbox_destroy"
 )
+
+// SizeClass is the tier payload of a sandbox_up item: the cgroup limits are
+// generated from these on the node (vcpu -> --cpus, memory -> --memory,
+// storage -> --tmpfs). Keep in lockstep with SandboxWorkItem in
+// apps/api/src/services/cloud-sandboxes.ts.
+type SizeClass struct {
+	ID         string  `json:"id"`
+	VCPU       float64 `json:"vcpu"`
+	MemoryMiB  int     `json:"memoryMib"`
+	StorageMiB int     `json:"storageMib"`
+}
 
 // WorkItem is one unit of work the API wants this agent to perform.
 type WorkItem struct {
@@ -82,6 +97,19 @@ type WorkItem struct {
 	// GET (15min) -- the agent fetches it before touching the store.
 	ManifestURL  string `json:"manifestUrl,omitempty"`
 	SourcePrefix string `json:"sourcePrefix,omitempty"`
+
+	// Sandbox fields (add-cloud-executor 4.1); empty on deployment items.
+	SandboxID     string     `json:"sandboxId,omitempty"`
+	ExecutorID    string     `json:"executorId,omitempty"`
+	TaskID        string     `json:"taskId,omitempty"`
+	ContainerName string     `json:"containerName,omitempty"`
+	SizeClass     *SizeClass `json:"sizeClass,omitempty"`
+	ImageRef      string     `json:"imageRef,omitempty"`
+	// TaskToken is the plaintext single-task credential; it exists only in
+	// this poll response and the container env -- never on disk, never logged.
+	TaskToken      string `json:"taskToken,omitempty"`
+	APIBaseURL     string `json:"apiBaseUrl,omitempty"`
+	TimeoutSeconds int    `json:"timeoutSeconds,omitempty"`
 }
 
 // PresignedObject maps an R2 key to its 15-minute GET URL.
@@ -122,6 +150,11 @@ const (
 	EventRouteRemoved      = "route_removed"
 	EventReleased          = "released"
 	EventRuntimeFail       = "runtime_fail"
+
+	EventSandboxUp            = "sandbox_up"
+	EventSandboxUpFailed      = "sandbox_up_failed"
+	EventSandboxDestroy       = "sandbox_destroy"
+	EventSandboxDestroyFailed = "sandbox_destroy_failed"
 )
 
 // GetWork fetches the current work list.
@@ -191,6 +224,20 @@ func (c *Client) Report(ctx context.Context, deploymentID, event string, repoPor
 		"event":        event,
 		"repoPort":     repoPort,
 		"detail":       detail,
+	}
+	return c.postJSON(ctx, "/internal/hosting-agent/report", payload, nil)
+}
+
+// ReportSandbox posts the outcome of a sandbox work item (keyed by sandboxId;
+// the API's /report route dispatches on that field). containerID is required
+// for sandbox_up -- it is what the metering side joins on.
+func (c *Client) ReportSandbox(ctx context.Context, sandboxID, event, containerID, detail string) error {
+	payload := map[string]any{
+		"agentId":     c.AgentID,
+		"sandboxId":   sandboxID,
+		"event":       event,
+		"containerId": containerID,
+		"detail":      detail,
 	}
 	return c.postJSON(ctx, "/internal/hosting-agent/report", payload, nil)
 }

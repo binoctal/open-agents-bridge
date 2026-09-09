@@ -64,6 +64,10 @@ type Agent struct {
 	// inject a fake. nil falls back to a real localhost dial.
 	probeDial func(ctx context.Context, port int) error
 
+	// dockerRun is the docker exec seam for sandbox lifecycle commands
+	// (add-cloud-executor 4.1); tests inject a recorder. nil runs the real CLI.
+	dockerRun dockerRunner
+
 	// inFlight guards against overlapping materializes of one deployment
 	// (a slow tree while the next poll re-offers the same work item).
 	inFlightMu sync.Mutex
@@ -162,11 +166,17 @@ func (a *Agent) pollWork(ctx context.Context) error {
 }
 
 func (a *Agent) handle(ctx context.Context, item api.WorkItem) error {
-	if !a.claim(item.DeploymentID) {
-		a.logf("deploy %s: %s already in flight, skipping", item.DeploymentID, item.Action)
+	// Sandbox items have no deploymentId; the in-flight key must still be
+	// per-object so a re-offer during a slow docker run does not double-start.
+	key := item.DeploymentID
+	if key == "" {
+		key = "sbx:" + item.SandboxID
+	}
+	if !a.claim(key) {
+		a.logf("%s: %s already in flight, skipping", key, item.Action)
 		return nil
 	}
-	defer a.release(item.DeploymentID)
+	defer a.release(key)
 
 	switch item.Action {
 	case api.ActionMaterialize:
@@ -179,8 +189,12 @@ func (a *Agent) handle(ctx context.Context, item api.WorkItem) error {
 		return a.handleRelease(ctx, item)
 	case api.ActionProbe:
 		return a.handleProbe(ctx, item)
+	case api.ActionSandboxUp:
+		return a.handleSandboxUp(ctx, item)
+	case api.ActionSandboxDestroy:
+		return a.handleSandboxDestroy(ctx, item)
 	default:
-		a.logf("deploy %s: unknown action %q", item.DeploymentID, item.Action)
+		a.logf("%s: unknown action %q", key, item.Action)
 		return nil
 	}
 }
