@@ -2981,14 +2981,7 @@ func (b *Bridge) handleWorkflowStartJob(msg Message) {
 		}
 		taskId := getString(task, "id")
 		// Notify web that task has started
-		b.sendMessage(Message{
-			Type: "workflow:task_started",
-			Payload: map[string]interface{}{
-				"jobId":  jobId,
-				"taskId": taskId,
-			},
-			Timestamp: time.Now().UnixMilli(),
-		})
+		b.sendMessage(taskStartedMessage(jobId, taskId, b.config.DeviceID))
 	}
 }
 
@@ -3026,14 +3019,7 @@ func (b *Bridge) handleWorkflowStartTask(msg Message) {
 	b.logInfo("[%s] Starting workflow task %s (agent: %s) in job %s", logger.ModWorkflow, taskId, agentId, jobId)
 
 	// Notify progress
-	b.sendMessage(Message{
-		Type: "workflow:task_started",
-		Payload: map[string]interface{}{
-			"jobId":  jobId,
-			"taskId": taskId,
-		},
-		Timestamp: time.Now().UnixMilli(),
-	})
+	b.sendMessage(taskStartedMessage(jobId, taskId, b.config.DeviceID))
 }
 
 // isLiveTaskSession reports whether an existing session for a task ID is
@@ -3114,6 +3100,14 @@ func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 	b.startTaskSession(jobId, taskId, agent, title, description, context, workDir, attempt)
 }
 
+// ExecutorKindBridge is the executor kind this binary reports on every
+// task-lifecycle frame. The bridge IS the bridge-kind executor (a cloud
+// sandbox reports through its own driver and stamps kind there), so the
+// constant — not a task_assign payload round-trip — is the source of truth:
+// web-originated start paths (workflow:start_task) have no assign payload to
+// echo from, yet still ran on a bridge.
+const ExecutorKindBridge = "bridge"
+
 // taskStartedMessage builds the workflow:task_started frame for the
 // orchestrator-dispatch path (known-issue #7): previously the only start
 // signal there was task_progress {progress:0, step:"started"} and the
@@ -3154,9 +3148,10 @@ func taskStartedMessage(jobId, taskId, deviceId string) Message {
 	return Message{
 		Type: "workflow:task_started",
 		Payload: map[string]interface{}{
-			"jobId":    jobId,
-			"taskId":   taskId,
-			"deviceId": deviceId,
+			"jobId":        jobId,
+			"taskId":       taskId,
+			"deviceId":     deviceId,
+			"executorKind": ExecutorKindBridge,
 		},
 		Timestamp: time.Now().UnixMilli(),
 	}
@@ -3178,11 +3173,12 @@ func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, row
 		b.sendMessage(Message{
 			Type: "workflow:task_error",
 			Payload: map[string]interface{}{
-				"jobId":     jobId,
-				"taskId":    taskId,
-				"deviceId":  b.config.DeviceID,
-				"error":     err.Error(),
-				"errorType": "crash",
+				"jobId":        jobId,
+				"taskId":       taskId,
+				"deviceId":     b.config.DeviceID,
+				"executorKind": ExecutorKindBridge,
+				"error":        err.Error(),
+				"errorType":    "crash",
 				// Terminal report for a session that never started still
 				// belongs to the dispatch generation that tried (G19).
 				"attempt": attempt,
@@ -3201,11 +3197,12 @@ func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, row
 	b.sendMessage(Message{
 		Type: "workflow:task_progress",
 		Payload: map[string]interface{}{
-			"jobId":    jobId,
-			"taskId":   taskId,
-			"deviceId": b.config.DeviceID,
-			"progress": 0,
-			"step":     "started",
+			"jobId":        jobId,
+			"taskId":       taskId,
+			"deviceId":     b.config.DeviceID,
+			"executorKind": ExecutorKindBridge,
+			"progress":     0,
+			"step":         "started",
 		},
 		Timestamp: time.Now().UnixMilli(),
 	})
@@ -3311,11 +3308,12 @@ func (b *Bridge) handleWorkflowTaskMerge(msg Message) {
 		b.sendMessage(Message{
 			Type: "workflow:task_error",
 			Payload: map[string]interface{}{
-				"jobId":     jobId,
-				"taskId":    taskId,
-				"deviceId":  b.config.DeviceID,
-				"error":     err.Error(),
-				"errorType": "merge_failed",
+				"jobId":        jobId,
+				"taskId":       taskId,
+				"deviceId":     b.config.DeviceID,
+				"executorKind": ExecutorKindBridge,
+				"error":        err.Error(),
+				"errorType":    "merge_failed",
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
@@ -3342,9 +3340,10 @@ func (b *Bridge) handleWorkflowTaskMerge(msg Message) {
 	b.sendMessage(Message{
 		Type: "workflow:task_result",
 		Payload: map[string]interface{}{
-			"jobId":  jobId,
-			"taskId": taskId,
-			"merged": true,
+			"jobId":        jobId,
+			"taskId":       taskId,
+			"executorKind": ExecutorKindBridge,
+			"merged":       true,
 		},
 		Timestamp: time.Now().UnixMilli(),
 	})
@@ -3814,10 +3813,11 @@ func (b *Bridge) handleQuestionMarker(sessionID string, sess *session.Session, c
 	b.sendMessage(Message{
 		Type: "workflow:task_question",
 		Payload: map[string]interface{}{
-			"missionId": jobID,
-			"taskId":    taskID,
-			"question":  question,
-			"deviceId":  b.config.DeviceID,
+			"missionId":    jobID,
+			"taskId":       taskID,
+			"question":     question,
+			"deviceId":     b.config.DeviceID,
+			"executorKind": ExecutorKindBridge,
 		},
 		Timestamp: time.Now().UnixMilli(),
 	})

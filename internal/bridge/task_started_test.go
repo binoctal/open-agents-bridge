@@ -10,6 +10,10 @@ import (
 // workflow:task_started emitters were echoes of web-origin commands. The
 // dispatch path must emit task_started too, with the same payload fields the
 // dispatch family carries (jobId, taskId, deviceId).
+//
+// add-executor-abstraction: every task-lifecycle frame also carries
+// executorKind — the web client renders the 执行方 badge from live WS
+// reports, so a frame without it cannot say what kind of executor ran.
 func TestTaskStartedMessage(t *testing.T) {
 	msg := taskStartedMessage("job_1", "task_2", "dev_3")
 	if msg.Type != "workflow:task_started" {
@@ -23,6 +27,9 @@ func TestTaskStartedMessage(t *testing.T) {
 		if _, ok := p[k]; !ok {
 			t.Fatalf("payload missing %q: %v", k, p)
 		}
+	}
+	if p["executorKind"] != ExecutorKindBridge {
+		t.Fatalf("executorKind = %v, want %q", p["executorKind"], ExecutorKindBridge)
 	}
 	if msg.Timestamp <= 0 {
 		t.Fatalf("timestamp not set: %d", msg.Timestamp)
