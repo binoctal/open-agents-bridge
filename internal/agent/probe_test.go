@@ -76,7 +76,7 @@ func TestHandleProbeStreakGate(t *testing.T) {
 	sink, client := newReportAPIServer(t)
 	var dialErr error
 	a := &Agent{
-		Client: client,
+		Client:    client,
 		probeDial: func(ctx context.Context, port int) error { return dialErr },
 	}
 	item := api.WorkItem{DeploymentID: "d1", MissionID: "m1", Action: api.ActionProbe, AppPort: 30000}

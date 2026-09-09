@@ -17,8 +17,8 @@ type dockerCall struct {
 // fakeDocker answers scripted outcomes per command head and records every
 // call. Outcomes map the joined args to (stdout, err).
 type fakeDocker struct {
-	calls     []dockerCall
-	outcomes  map[string]struct {
+	calls    []dockerCall
+	outcomes map[string]struct {
 		stdout string
 		err    error
 	}
@@ -33,16 +33,22 @@ func (f *fakeDocker) run(ctx context.Context, args ...string) (string, error) {
 	return "", nil
 }
 
+// A 64-hex config digest fixture; every up item must pin one (supply chain).
+const runnerName = "open-agents-runner:2026-09-09"
+
+var pinnedDigest = strings.Repeat("ab", 32)
+var runnerRef = runnerName + "@sha256:" + pinnedDigest
+
 func sandboxItem() api.WorkItem {
 	return api.WorkItem{
-		Action:        api.ActionSandboxUp,
-		SandboxID:     "sbx-1",
-		MissionID:     "m-1",
-		TaskID:        "t-1",
-		ContainerName: "sbx-abc123",
-		ImageRef:      "ghcr.io/open-agents/runner@sha256:deadbeef",
-		TaskToken:     "stt_plaintext",
-		APIBaseURL:    "https://api.openagents.top",
+		Action:         api.ActionSandboxUp,
+		SandboxID:      "sbx-1",
+		MissionID:      "m-1",
+		TaskID:         "t-1",
+		ContainerName:  "sbx-abc123",
+		ImageRef:       runnerRef,
+		TaskToken:      "stt_plaintext",
+		APIBaseURL:     "https://api.openagents.top",
 		TimeoutSeconds: 1800,
 		SizeClass: &api.SizeClass{
 			ID: "sandbox-s1", VCPU: 0.5, MemoryMiB: 512, StorageMiB: 1024,
@@ -52,22 +58,29 @@ func sandboxItem() api.WorkItem {
 
 // The up path must generate exactly the security-baseline docker invocation:
 // runsc runtime, locked-down network, tier-derived cgroup limits, pids
-// ceiling, noexec tmpfs, token only in env, and no floating image pulls.
+// ceiling, noexec tmpfs, token only in env, and no floating image pulls. The
+// image runs by its digest-VERIFIED name (inspect precedes run).
 func TestHandleSandboxUpArgs(t *testing.T) {
 	sink, client := newReportAPIServer(t)
 	dk := &fakeDocker{outcomes: map[string]struct {
 		stdout string
 		err    error
-	}{"run -d": {"container-full-id\n", nil}}}
+	}{
+		"image inspect": {"sha256:" + pinnedDigest + "\n", nil},
+		"run -d":        {"container-full-id\n", nil},
+	}}
 	a := &Agent{Client: client, dockerRun: dk.run}
 
 	if err := a.handleSandboxUp(context.Background(), sandboxItem()); err != nil {
 		t.Fatalf("handleSandboxUp: %v", err)
 	}
-	if len(dk.calls) != 1 {
-		t.Fatalf("want 1 docker call, got %d", len(dk.calls))
+	if len(dk.calls) != 2 {
+		t.Fatalf("want 2 docker calls (image inspect + run), got %d", len(dk.calls))
 	}
-	args := dk.calls[0].args
+	if insp := dk.calls[0].args; insp[0] != "image" || insp[1] != "inspect" || insp[len(insp)-1] != runnerName {
+		t.Fatalf("first call must inspect the pinned image by name, got %v", insp)
+	}
+	args := dk.calls[1].args
 	assertHas(t, args, "--runtime", "runsc")
 	assertHas(t, args, "--network", "sbx-net")
 	assertHas(t, args, "--memory", "512m")
@@ -86,8 +99,11 @@ func TestHandleSandboxUpArgs(t *testing.T) {
 	if !strings.Contains(joined, "API_BASE_URL=https://api.openagents.top") {
 		t.Errorf("api base url not passed via env: %s", joined)
 	}
-	if !strings.Contains(joined, "ghcr.io/open-agents/runner@sha256:deadbeef") {
-		t.Errorf("image ref missing: %s", joined)
+	if !strings.Contains(joined, " "+runnerName) {
+		t.Errorf("verified image name missing from run: %s", joined)
+	}
+	if strings.Contains(joined, "@sha256:") {
+		t.Errorf("run must use the digest-stripped name, not the pin: %s", joined)
 	}
 	if sink.count(api.EventSandboxUp) != 1 {
 		t.Fatalf("want one sandbox_up report, got %d", sink.count(api.EventSandboxUp))
@@ -105,7 +121,8 @@ func TestHandleSandboxUpNameConflictRecovers(t *testing.T) {
 		stdout string
 		err    error
 	}{
-		"run -d":     {"", errors.New(`docker run -d: exit: Error response from daemon: Conflict. The container name "/sbx-abc123" is already in use`)},
+		"image inspect":    {"sha256:" + pinnedDigest + "\n", nil},
+		"run -d":           {"", errors.New(`docker run -d: exit: Error response from daemon: Conflict. The container name "/sbx-abc123" is already in use`)},
 		"inspect --format": {"existing-id\n", nil},
 	}}
 	a := &Agent{Client: client, dockerRun: dk.run}
@@ -119,8 +136,8 @@ func TestHandleSandboxUpNameConflictRecovers(t *testing.T) {
 	if sink.count(api.EventSandboxUpFailed) != 0 {
 		t.Errorf("unexpected sandbox_up_failed")
 	}
-	if len(dk.calls) != 2 || dk.calls[1].args[0] != "inspect" {
-		t.Fatalf("want run+inspect, got %v", dk.calls)
+	if len(dk.calls) != 3 || dk.calls[1].args[0] != "run" || dk.calls[2].args[0] != "inspect" {
+		t.Fatalf("want inspect+run+inspect, got %v", dk.calls)
 	}
 }
 
@@ -131,7 +148,10 @@ func TestHandleSandboxUpFailureReports(t *testing.T) {
 	dk := &fakeDocker{outcomes: map[string]struct {
 		stdout string
 		err    error
-	}{"run -d": {"", errors.New("docker run: No such image")}}}
+	}{
+		"image inspect": {"sha256:" + pinnedDigest + "\n", nil},
+		"run -d":        {"", errors.New("docker run: cgroup refused")},
+	}}
 	a := &Agent{Client: client, dockerRun: dk.run}
 
 	if err := a.handleSandboxUp(context.Background(), sandboxItem()); err != nil {
@@ -140,8 +160,76 @@ func TestHandleSandboxUpFailureReports(t *testing.T) {
 	if sink.count(api.EventSandboxUpFailed) != 1 {
 		t.Fatalf("want one sandbox_up_failed, got %d", sink.count(api.EventSandboxUpFailed))
 	}
-	if !strings.Contains(sink.lastDetail(api.EventSandboxUpFailed), "No such image") {
+	if !strings.Contains(sink.lastDetail(api.EventSandboxUpFailed), "cgroup refused") {
 		t.Errorf("detail should carry the docker error, got %q", sink.lastDetail(api.EventSandboxUpFailed))
+	}
+}
+
+// Supply-chain gate (spec: digest mismatch refuses start): a re-pointed tag,
+// a truncated digest, a floating ref, or a missing local image all refuse
+// BEFORE docker run -- nothing unvetted ever executes.
+func TestHandleSandboxUpDigestGate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ref     string
+		inspOut string
+		inspErr error
+		want    string
+	}{
+		{
+			name:    "digest mismatch (tag re-pointed by rebuild)",
+			ref:     runnerRef,
+			inspOut: "sha256:" + strings.Repeat("cd", 32) + "\n",
+			want:    "digest mismatch",
+		},
+		{
+			name:    "image not present locally",
+			ref:     runnerRef,
+			inspErr: errors.New("docker image inspect: Error: No such image"),
+			want:    "not present locally",
+		},
+		{
+			name: "floating tag refused",
+			ref:  "open-agents-runner:latest",
+			want: "digest-pinned",
+		},
+		{
+			name: "truncated digest refused",
+			ref:  runnerName + "@sha256:deadbeef",
+			want: "digest-pinned",
+		},
+		{
+			name: "uppercase digest refused",
+			ref:  runnerName + "@sha256:" + strings.ToUpper(strings.Repeat("ab", 32)),
+			want: "digest-pinned",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink, client := newReportAPIServer(t)
+			dk := &fakeDocker{outcomes: map[string]struct {
+				stdout string
+				err    error
+			}{"image inspect": {tc.inspOut, tc.inspErr}}}
+			a := &Agent{Client: client, dockerRun: dk.run}
+
+			item := sandboxItem()
+			item.ImageRef = tc.ref
+			if err := a.handleSandboxUp(context.Background(), item); err != nil {
+				t.Fatalf("handleSandboxUp: %v", err)
+			}
+			if sink.count(api.EventSandboxUpFailed) != 1 {
+				t.Fatalf("want one sandbox_up_failed, got %d", sink.count(api.EventSandboxUpFailed))
+			}
+			detail := sink.lastDetail(api.EventSandboxUpFailed)
+			if !strings.Contains(detail, tc.want) {
+				t.Errorf("detail %q should mention %q", detail, tc.want)
+			}
+			for _, call := range dk.calls {
+				if call.args[0] == "run" {
+					t.Fatalf("docker run must never execute on a digest-gate failure, got %v", call.args)
+				}
+			}
+		})
 	}
 }
 
@@ -171,8 +259,8 @@ func TestHandleSandboxUpMalformed(t *testing.T) {
 func TestHandleSandboxDestroyIdempotent(t *testing.T) {
 	sink, client := newReportAPIServer(t)
 	for _, tc := range []struct {
-		name    string
-		rmErr   error
+		name  string
+		rmErr error
 	}{
 		{"removed", nil},
 		{"already gone", errors.New("docker rm: Error: No such container: sbx-abc123")},

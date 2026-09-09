@@ -49,8 +49,11 @@ func (a *Agent) docker() dockerRunner {
 
 // sandboxUpArgs builds the docker run argument list from the work item. The
 // plaintext task token rides only the container env (-e), never a label or
-// the command line of a long-lived process someone could ps.
-func sandboxUpArgs(item api.WorkItem) []string {
+// the command line of a long-lived process someone could ps. imageName is the
+// digest-verified local name (ImageRef minus its @sha256 pin -- a
+// locally-built image is not addressable by its config digest, so the name is
+// what docker accepts; the pin was already checked against it).
+func sandboxUpArgs(item api.WorkItem, imageName string) []string {
 	sc := item.SizeClass
 	return []string{
 		"run", "-d",
@@ -66,8 +69,53 @@ func sandboxUpArgs(item api.WorkItem) []string {
 		"-e", "MISSION_ID=" + item.MissionID,
 		"-e", "TASK_ID=" + item.TaskID,
 		"--pull", "never", // digest-pinned image must be pre-pulled (task 4.3); never float
-		item.ImageRef,
+		imageName,
 	}
+}
+
+// splitDigestRef splits "name@sha256:<64 lowercase hex>" into its parts.
+// ok=false when the ref is not strictly digest-pinned: a floating ref must
+// never run, and neither must a truncated or uppercase digest -- the supply
+// chain pins the EXACT image the API vetted, not something that looks like it.
+func splitDigestRef(ref string) (name, digest string, ok bool) {
+	const marker = "@sha256:"
+	at := strings.LastIndex(ref, marker)
+	if at <= 0 {
+		return "", "", false
+	}
+	d := ref[at+len(marker):]
+	if len(d) != 64 {
+		return "", "", false
+	}
+	for _, c := range d {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return "", "", false
+		}
+	}
+	return ref[:at], d, true
+}
+
+// verifySandboxImage pins the local image to the work item's digest before
+// anything runs. The pin is the image CONFIG digest (`docker image inspect
+// --format {{.Id}}`) because the runner image is built locally on the node
+// (design D8: local build + recorded digest -- a locally built image has no
+// RepoDigest to compare against). Mismatch means the tag was re-pointed by a
+// rebuild the API never vetted: refuse loudly, never run what arrived.
+// Returns the digest-stripped name for the docker run.
+func (a *Agent) verifySandboxImage(ctx context.Context, item api.WorkItem) (string, error) {
+	name, want, ok := splitDigestRef(item.ImageRef)
+	if !ok {
+		return "", fmt.Errorf("image ref must be digest-pinned (name@sha256:<64hex>): %q", item.ImageRef)
+	}
+	out, err := a.docker()(ctx, "image", "inspect", "--format", "{{.Id}}", name)
+	if err != nil {
+		return "", fmt.Errorf("runner image %s not present locally (pre-pull/build required): %v", name, err)
+	}
+	local := strings.ToLower(strings.TrimSpace(out))
+	if local != "sha256:"+want {
+		return "", fmt.Errorf("image digest mismatch: local %s, pinned sha256:%s", local, want)
+	}
+	return name, nil
 }
 
 // handleSandboxUp starts the sandbox container and reports sandbox_up with
@@ -89,7 +137,15 @@ func (a *Agent) handleSandboxUp(ctx context.Context, item api.WorkItem) error {
 		return report(api.EventSandboxUpFailed, "", "malformed sandbox_up item")
 	}
 
-	out, err := a.docker()(ctx, sandboxUpArgs(item)...)
+	// Supply-chain gate (spec: digest mismatch refuses start): the pin is
+	// checked BEFORE docker run so a re-pointed tag never executes.
+	imageName, err := a.verifySandboxImage(ctx, item)
+	if err != nil {
+		a.logf("sandbox %s: refusing start: %v", item.SandboxID, err)
+		return report(api.EventSandboxUpFailed, "", err.Error())
+	}
+
+	out, err := a.docker()(ctx, sandboxUpArgs(item, imageName)...)
 	if err != nil {
 		if strings.Contains(err.Error(), "already in use") || strings.Contains(out, "already in use") {
 			// The container exists: recover its id and treat this as up.
