@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"strconv"
 	"testing"
 )
@@ -46,5 +48,57 @@ func TestHostPortRe(t *testing.T) {
 				t.Fatalf("%q: got %v, want %v", tc.line, got, tc.want)
 			}
 		}
+	}
+}
+
+// add-cloud-executor 4.6: the watermark carries a running-sandbox count (sbx-
+// name prefix) alongside containers/ports. The semantics the API leans on:
+// a set pointer (even to 0) means "counted", nil means "unknown" -- a docker
+// hiccup must NOT read as "no sandboxes running".
+func withFakePS(t *testing.T, out string, err error) {
+	t.Helper()
+	prev := psDocker
+	psDocker = func(ctx context.Context, args ...string) (string, error) { return out, err }
+	t.Cleanup(func() { psDocker = prev })
+}
+
+func TestCollectWatermarkSandboxCount(t *testing.T) {
+	withFakePS(t, "sbx-abc123def456 abc123def456 0.0.0.0:30001->3000/tcp\n"+
+		"my-coolify-app def456789abc \n"+
+		"sbx-fffe11dd22cc aabbccddeeff \n", nil)
+	w := CollectWatermark(context.Background())
+	if w.ContainersRunning != 3 {
+		t.Fatalf("ContainersRunning = %d, want 3", w.ContainersRunning)
+	}
+	if w.SandboxesRunning == nil || *w.SandboxesRunning != 2 {
+		t.Fatalf("SandboxesRunning = %v, want *2", w.SandboxesRunning)
+	}
+	if len(w.PortsInUse) != 1 || w.PortsInUse[0] != 30001 {
+		t.Fatalf("PortsInUse = %v, want [30001]", w.PortsInUse)
+	}
+}
+
+// Zero sandboxes is a REAL count and must be sent as 0, not omitted: the
+// launch gate treats NULL as unknown (refuse), so conflating the two would
+// wedge sandbox dispatch on a quiet node.
+func TestCollectWatermarkZeroSandboxesStillCounted(t *testing.T) {
+	withFakePS(t, "my-coolify-app def456789abc 0.0.0.0:31234->80/tcp\n", nil)
+	w := CollectWatermark(context.Background())
+	if w.SandboxesRunning == nil || *w.SandboxesRunning != 0 {
+		t.Fatalf("SandboxesRunning = %v, want *0", w.SandboxesRunning)
+	}
+}
+
+// A docker failure leaves the field nil -> the API stores unknown. A false
+// zero here would let the concurrency gate admit launches onto a node whose
+// real sandbox count nobody knows.
+func TestCollectWatermarkDockerFailureIsUnknown(t *testing.T) {
+	withFakePS(t, "", errors.New("docker: command not found"))
+	w := CollectWatermark(context.Background())
+	if w.SandboxesRunning != nil {
+		t.Fatalf("SandboxesRunning = %v, want nil", w.SandboxesRunning)
+	}
+	if w.ContainersRunning != 0 {
+		t.Fatalf("ContainersRunning = %d, want 0", w.ContainersRunning)
 	}
 }

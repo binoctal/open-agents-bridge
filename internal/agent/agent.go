@@ -394,28 +394,46 @@ func (a *Agent) logf(format string, args ...any) {
 	}
 }
 
+// psDocker is the exec seam for the watermark's docker ps (add-cloud-executor
+// 4.6): CollectWatermark goes through it, tests swap it to fake container
+// listings without docker on the box.
+var psDocker dockerRunner = realDocker
+
 // CollectWatermark reads node capacity: MemAvailable/MemTotal from
 // /proc/meminfo and the running-container count from docker (best-effort --
 // a docker hiccup reports 0 containers, never blocks the loop). PortsInUse
-// (S3) parses the published host ports out of `docker ps --format {{.Ports}}`
-// -- lines like "0.0.0.0:30001->3000/tcp" -- so the API's allocation scan
-// sees occupants its own table knows nothing about. Best-effort like the
-// container count: a docker hiccup yields no ports, never blocks the loop.
+// (S3) parses the published host ports out of the `docker ps` output -- lines
+// like "name 0.0.0.0:30001->3000/tcp" -- so the API's allocation scan sees
+// occupants its own table knows nothing about. SandboxesRunning (4.6) counts
+// containers whose name starts with sbx- (containerNameFor), sent -- even as
+// zero -- only when the ps succeeded; on failure the field stays nil so the
+// API stores unknown instead of a false "no sandboxes". Best-effort like the
+// container count: a docker hiccup yields no ports and no sandbox count,
+// never blocks the loop.
 func CollectWatermark(ctx context.Context) api.Watermark {
 	w := api.Watermark{
 		MemoryAvailableBytes: meminfo("MemAvailable"),
 		MemoryTotalBytes:     meminfo("MemTotal"),
 	}
-	if out, err := exec.CommandContext(ctx, "docker", "ps", "--filter", "status=running", "--format", "{{.ID}} {{.Ports}}").Output(); err == nil {
+	if out, err := psDocker(ctx, "ps", "--filter", "status=running", "--format", "{{.Names}} {{.ID}} {{.Ports}}"); err == nil {
 		w.ContainersRunning = 0
 		seen := map[int]bool{}
-		for _, line := range strings.Split(string(out), "\n") {
+		sbx := 0
+		for _, line := range strings.Split(out, "\n") {
 			// The .ID half keeps one non-empty line per container, including
 			// those that publish no ports (whose .Ports half is blank).
 			if strings.TrimSpace(line) == "" {
 				continue
 			}
 			w.ContainersRunning++
+			// The .Names half (first field, comma-joined aliases) is the
+			// sandbox discriminator; break so multi-alias names count once.
+			for _, name := range strings.Split(strings.Fields(line)[0], ",") {
+				if strings.HasPrefix(name, "sbx-") {
+					sbx++
+					break
+				}
+			}
 			for _, m := range hostPortRe.FindAllStringSubmatch(line, -1) {
 				if p, err := strconv.Atoi(m[1]); err == nil && p > 0 && p < 65536 && !seen[p] {
 					seen[p] = true
@@ -423,6 +441,7 @@ func CollectWatermark(ctx context.Context) api.Watermark {
 				}
 			}
 		}
+		w.SandboxesRunning = &sbx
 	}
 	return w
 }

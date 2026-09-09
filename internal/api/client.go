@@ -140,6 +140,13 @@ type Watermark struct {
 	ContainersRunning    int    `json:"containersRunning"`
 	BootID               string `json:"bootId,omitempty"`
 	PortsInUse           []int  `json:"portsInUse,omitempty"`
+	// SandboxesRunning counts running sandbox containers (sbx- name prefix,
+	// add-cloud-executor 4.6). Set -- including to zero -- whenever the docker
+	// ps behind the watermark succeeded, so the API can distinguish "no
+	// sandboxes" (0) from both "agent predates sandbox support" (field absent
+	// -> stored NULL) and "docker hiccup, count unknown" (nil -> NULL again;
+	// the launch gate must refuse on unknown, never read it as free).
+	SandboxesRunning *int `json:"sandboxesRunning,omitempty"`
 }
 
 // Report events (terminal states of each work action).
