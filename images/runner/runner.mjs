@@ -56,10 +56,30 @@ function extractCommitHash(text) {
 
 const summaryOf = (text) => (text || '').trim().slice(0, 400) || '(no output)'
 
+/**
+ * The CLI's kill time, derived from the AUTHORITATIVE sandbox window when the
+ * node handed it down (SANDBOX_DEADLINE_EPOCH_MS = cloud_sandboxes.timeout_at
+ * as epoch ms), falling back to 25min when it did not (older node path) --
+ * the hardcoded value used to be the ONLY source and was decoupled from the
+ * real window, truncating long single-turn tasks ~25min in.
+ * (fix-runner-etimedout-long-turns)
+ */
+const REPORT_MARGIN_MS = 45_000 // leave the task-error callback time to land
+const MIN_WINDOW_MS = 30_000 // a late-started task still gets a short run
+const FALLBACK_TIMEOUT_MS = 25 * 60_000
+
+function cliTimeoutMs() {
+  const raw = env.SANDBOX_DEADLINE_EPOCH_MS
+  if (!raw || !/^\d+$/.test(raw)) return FALLBACK_TIMEOUT_MS
+  return Math.max(MIN_WINDOW_MS, Number(raw) - Date.now() - REPORT_MARGIN_MS)
+}
+
 async function main() {
   const args = ['-p', '--output-format', 'json', '--dangerously-skip-permissions']
   if (env.MODEL) args.push('--model', env.MODEL)
 
+  const windowMs = 25 * 60_000
+  const startedAt = Date.now()
   const cli = spawnSync('claude', args, {
     cwd: '/workspace',
     encoding: 'utf8',
@@ -67,7 +87,9 @@ async function main() {
     // this way nothing task-related shows in the container's process list
     // (same discipline as the token staying out of the command line).
     input: env.TASK_PROMPT,
-    timeout: 25 * 60 * 1000, // stop before the API's timeout sweep destroys us
+    // Stop just before the API's timeout sweep destroys the box, so the
+    // task-error callback below still lands while we exist.
+    timeout: windowMs,
     env: {
       ...env,
       // The platform outlet speaks the Anthropic Messages API; the task token
@@ -80,9 +102,17 @@ async function main() {
   })
 
   if (cli.error) {
+    // spawnSync surfaces a timeout as cli.error (ETIMEDOUT), NOT as
+    // status===null: a CLI that ran the whole window and was killed mid-run
+    // is NOT a spawn failure, and mislabeling it "failed to start" sent
+    // diagnosis down the wrong path for months.
+    const timedOut = cli.error.code === 'ETIMEDOUT'
+    const elapsed = Math.round((Date.now() - startedAt) / 1000)
     await post('/api/sandbox/task-error', {
-      error: `runner CLI failed to start: ${cli.error.message}`,
-      errorType: 'runner_spawn_error',
+      error: timedOut
+        ? `runner CLI exceeded the sandbox execution window (${Math.round(windowMs / 1000)}s) and was killed after ${elapsed}s`
+        : `runner CLI failed to start: ${cli.error.message}`,
+      errorType: timedOut ? 'runner_timeout' : 'runner_spawn_error',
     })
     return
   }

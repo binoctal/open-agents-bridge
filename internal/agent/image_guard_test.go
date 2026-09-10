@@ -117,6 +117,26 @@ func TestRunnerEntrypointNoSecrets(t *testing.T) {
 	if !strings.Contains(mjs, "input: env.TASK_PROMPT") {
 		t.Errorf("runner.mjs must feed TASK_PROMPT to the CLI via spawnSync stdin")
 	}
+	// fix-runner-etimedout-long-turns: the CLI kill time must be derived from
+	// the authoritative sandbox window (SANDBOX_DEADLINE_EPOCH_MS handed down
+	// by the node), with a fallback for the older no-env path -- a hardcoded
+	// 25min decoupled from the window truncated long single-turn tasks.
+	if !strings.Contains(mjs, "SANDBOX_DEADLINE_EPOCH_MS") {
+		t.Errorf("runner.mjs must read SANDBOX_DEADLINE_EPOCH_MS")
+	}
+	// Anchor the CALL SITE, not the identifier: a cliTimeoutMs definition
+	// sitting uncalled (spawnSync back on a literal) is exactly the
+	// regression this guard exists for, and the bare identifier matches it.
+	if !strings.Contains(mjs, "windowMs = cliTimeoutMs()") || !strings.Contains(mjs, "timeout: windowMs") {
+		t.Errorf("runner.mjs spawnSync must consume the deadline-derived window (windowMs = cliTimeoutMs(); timeout: windowMs)")
+	}
+	// A spawnSync timeout surfaces as cli.error (ETIMEDOUT), and a CLI that
+	// ran the whole window before being killed is NOT a spawn failure:
+	// mislabeling it "runner_spawn_error"/"failed to start" sent diagnosis
+	// down the wrong path for months.
+	if !strings.Contains(mjs, "cli.error.code === 'ETIMEDOUT'") {
+		t.Errorf("runner.mjs must branch on cli.error.code === 'ETIMEDOUT' to report timeouts honestly")
+	}
 }
 
 // The scanner itself must exist and scan the built image's env + history --

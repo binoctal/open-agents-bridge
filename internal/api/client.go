@@ -110,6 +110,13 @@ type WorkItem struct {
 	TaskToken      string `json:"taskToken,omitempty"`
 	APIBaseURL     string `json:"apiBaseUrl,omitempty"`
 	TimeoutSeconds int    `json:"timeoutSeconds,omitempty"`
+	// TimeoutAt is the sandbox's absolute wall-clock deadline (RFC3339,
+	// cloud_sandboxes.timeout_at). The node hands it to the container as
+	// SANDBOX_DEADLINE_EPOCH_MS so the runner derives its CLI kill time from
+	// the authoritative window instead of a hardcoded 25min
+	// (fix-runner-etimedout-long-turns). Absolute, not remaining: a stale
+	// re-offer must not extend the window by re-deriving it later.
+	TimeoutAt string `json:"timeoutAt,omitempty"`
 	// TaskPrompt is the composed prompt the runner executes (TASK_PROMPT env,
 	// add-cloud-executor 5.2). Attempt is the dispatch generation the runner
 	// echoes back on its terminal callbacks (G19 attempt pairing). Model is

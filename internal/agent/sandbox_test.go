@@ -62,6 +62,7 @@ func sandboxItem() api.WorkItem {
 		TaskToken:      "stt_plaintext",
 		APIBaseURL:     "https://api.openagents.top",
 		TimeoutSeconds: 1800,
+		TimeoutAt:      "2026-09-10T12:30:00Z",
 		TaskPrompt:     "# T\n\n\ndo the thing",
 		Attempt:        2,
 		SizeClass: &api.SizeClass{
@@ -301,6 +302,42 @@ func TestSandboxUpArgsOmitAttemptWhenZero(t *testing.T) {
 	}
 	if !strings.Contains(joined, "TASK_PROMPT=") {
 		t.Errorf("task prompt env missing: %s", joined)
+	}
+}
+
+// fix-runner-etimedout-long-turns: the container must learn the sandbox's
+// AUTHORITATIVE wall-clock deadline as absolute epoch ms, so the runner
+// derives its CLI kill time from the real window instead of a hardcoded 25min
+// decoupled from it. 2026-09-10T12:30:00Z = 1789043400000 ms.
+func TestSandboxUpArgsDeadlineEnv(t *testing.T) {
+	joined := strings.Join(sandboxUpArgs(sandboxItem(), runnerName), " ")
+	if !strings.Contains(joined, "SANDBOX_DEADLINE_EPOCH_MS=1789043400000") {
+		t.Errorf("deadline env must carry timeout_at as epoch ms: %s", joined)
+	}
+}
+
+// No TimeoutAt on the item (older API): the env is omitted entirely and the
+// runner falls back to its 25min default -- never a zero/negative deadline.
+func TestSandboxUpArgsOmitDeadlineWhenAbsent(t *testing.T) {
+	item := sandboxItem()
+	item.TimeoutAt = ""
+	joined := strings.Join(sandboxUpArgs(item, runnerName), " ")
+	if strings.Contains(joined, "SANDBOX_DEADLINE_EPOCH_MS=") {
+		t.Errorf("missing timeoutAt must not inject a deadline env: %s", joined)
+	}
+	if !strings.Contains(joined, "TASK_PROMPT=") {
+		t.Errorf("task prompt env missing: %s", joined)
+	}
+}
+
+// A malformed TimeoutAt (not RFC3339) must not kill the launch -- the env is
+// skipped and the runner's 25min fallback applies, same as an absent value.
+func TestSandboxUpArgsSkipMalformedDeadline(t *testing.T) {
+	item := sandboxItem()
+	item.TimeoutAt = "not-a-timestamp"
+	joined := strings.Join(sandboxUpArgs(item, runnerName), " ")
+	if strings.Contains(joined, "SANDBOX_DEADLINE_EPOCH_MS=") {
+		t.Errorf("malformed timeoutAt must not inject a deadline env: %s", joined)
 	}
 }
 

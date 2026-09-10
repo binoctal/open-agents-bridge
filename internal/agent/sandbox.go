@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/binoctal/open-agents/hosting-agent/internal/api"
 )
@@ -124,6 +125,15 @@ func sandboxUpArgs(item api.WorkItem, imageName string) []string {
 	// (payload-less item) -- the runner then falls back to the CLI default.
 	if item.Model != "" {
 		args = append(args, "-e", "MODEL="+item.Model)
+	}
+	// The sandbox's wall-clock deadline: absolute epoch ms so the runner
+	// derives its CLI kill time from the authoritative window (deadline minus
+	// a reporting margin) rather than a hardcoded 25min decoupled from it.
+	// Skipped when absent (older API): the runner then falls back to 25min.
+	if item.TimeoutAt != "" {
+		if t, err := time.Parse(time.RFC3339, item.TimeoutAt); err == nil {
+			args = append(args, "-e", "SANDBOX_DEADLINE_EPOCH_MS="+strconv.FormatInt(t.UnixMilli(), 10))
+		}
 	}
 	return append(args,
 		"--pull", "never", // digest-pinned image must be pre-pulled (task 4.3); never float
