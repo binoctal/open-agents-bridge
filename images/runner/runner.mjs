@@ -78,7 +78,7 @@ async function main() {
   const args = ['-p', '--output-format', 'json', '--dangerously-skip-permissions']
   if (env.MODEL) args.push('--model', env.MODEL)
 
-  const windowMs = 25 * 60_000
+  const windowMs = cliTimeoutMs()
   const startedAt = Date.now()
   const cli = spawnSync('claude', args, {
     cwd: '/workspace',
