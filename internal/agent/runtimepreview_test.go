@@ -443,8 +443,9 @@ func TestUpDrivesToRunning(t *testing.T) {
 func TestUpReusesAppByNameScanWhenStateLost(t *testing.T) {
 	rp, fapi, fc, _ := newTestRT(t, testObjects(t))
 	seedManifest(t, fapi)
-	// Pre-existing app with the derived name, no in-memory/persisted state.
-	fc.apps["app-preexisting"] = "oa-preview-m1"
+	// Pre-existing app under the Coolify-derived name ("<repo>.git:main-<suffix>"),
+	// no in-memory/persisted state.
+	fc.apps["app-preexisting"] = "oa-preview-m1.git:main-cigzcidikctv24ntoxjmom5y"
 
 	if err := rp.up(context.Background(), upItem()); err != nil {
 		t.Fatalf("up: %v", err)

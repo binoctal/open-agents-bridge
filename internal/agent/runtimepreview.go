@@ -388,8 +388,13 @@ func (rp *RuntimePreviews) findOrCreateApp(ctx context.Context, missionID, repoK
 	if err != nil {
 		return "", err
 	}
+	// Coolify derives the name from the repo URL basename plus a random
+	// suffix ("<repoKey>.git:main-<suffix>"), so the scan matches on the
+	// repoKey prefix -- an exact match never hits and a re-activate would
+	// create a duplicate app that then 409s on the domain (staging 7.1
+	// live finding, 2026-09-11).
 	for _, app := range apps {
-		if app.Name == name {
+		if app.Name == name || strings.HasPrefix(app.Name, name+".git") {
 			return app.UUID, nil
 		}
 	}
@@ -515,7 +520,7 @@ func (rp *RuntimePreviews) stop(ctx context.Context, item api.WorkItem) error {
 			return fmt.Errorf("find app for stop: %w", err)
 		}
 		for _, app := range apps {
-			if app.Name == repoKeyFor(item.MissionID) {
+			if name := repoKeyFor(item.MissionID); app.Name == name || strings.HasPrefix(app.Name, name+".git") {
 				st = &rtState{CoolifyAppID: app.UUID, Host: item.Host, Label: rp.labelOf(item.Host)}
 				break
 			}
