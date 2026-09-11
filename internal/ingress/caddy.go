@@ -27,6 +27,9 @@ type Caddy struct {
 	Addr string
 	// DomainSuffix builds the host matcher: {label}.DomainSuffix.
 	DomainSuffix string
+	// LogDir holds per-instance runtime preview access logs
+	// (add-dynamic-preview-compute 5.3). Must be writable by the caddy user.
+	LogDir string
 
 	HTTP *http.Client
 }
@@ -106,20 +109,20 @@ func (c *Caddy) Remove(ctx context.Context, deploymentID string) error {
 // The server name in a stock Caddyfile is "srv0"; deployments route under it.
 // If the host uses a different server name the first call 404s and the error
 // names the path, which is enough to diagnose from logs.
-func (c *Caddy) doRoute(ctx context.Context, method, path string, route map[string]any) error {
+func (c *Caddy) doRoute(ctx context.Context, method, path string, body any) error {
 	var reader io.Reader
-	if route != nil {
-		body, err := json.Marshal(route)
+	if body != nil {
+		raw, err := json.Marshal(body)
 		if err != nil {
 			return err
 		}
-		reader = bytes.NewReader(body)
+		reader = bytes.NewReader(raw)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, path, reader)
 	if err != nil {
 		return err
 	}
-	if route != nil {
+	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.HTTP.Do(req)
@@ -138,4 +141,56 @@ func (c *Caddy) doRoute(ctx context.Context, method, path string, route map[stri
 	n, _ := resp.Body.Read(buf)
 	sb.Write(buf[:n])
 	return fmt.Errorf("caddy %s route: status %d: %s", strings.ToLower(method), resp.StatusCode, sb.String())
+}
+
+// accessLogName is the stable Caddy custom logger name for one runtime
+// preview instance (add-dynamic-preview-compute 5.3).
+func accessLogName(instanceID string) string { return "oa-rt-" + instanceID }
+
+// AttachAccessLog wires one runtime preview host to a per-instance JSON
+// access log file, the idle-detection data source (design D3 + 5.1 spike: HTTP
+// server metrics expose no per-host data, so reads come from the log file).
+//
+// Two config moves, each DELETE-then-PUT because the admin API rejects a PUT
+// against an existing map key with "key already exists". The DELETE errors
+// are ignored: absence is the desired pre-state. A Caddyfile reload wipes
+// admin-config changes, so callers must re-attach periodically (the idle
+// sweep re-asserts, same self-heal discipline as routes).
+func (c *Caddy) AttachAccessLog(ctx context.Context, instanceID, host string) error {
+	logger := map[string]any{
+		"writer": map[string]any{
+			"output":   "file",
+			"filename": c.LogDir + "/" + instanceID + ".log",
+		},
+		"encoder": map[string]any{"format": "json"},
+		// Without the include filter the named logger also captures Caddy's
+		// own runtime logs (observed auto_https lines in the spike).
+		"include": []string{"http.log.access"},
+	}
+	_ = c.doRoute(ctx, http.MethodDelete,
+		fmt.Sprintf("http://%s/config/logging/logs/%s", c.Addr, accessLogName(instanceID)), nil)
+	if err := c.doRoute(ctx, http.MethodPut,
+		fmt.Sprintf("http://%s/config/logging/logs/%s", c.Addr, accessLogName(instanceID)), logger); err != nil {
+		return err
+	}
+	_ = c.doRoute(ctx, http.MethodDelete,
+		fmt.Sprintf("http://%s/config/apps/http/servers/srv0/logs/logger_names/%s", c.Addr, host), nil)
+	return c.doRoute(ctx, http.MethodPut,
+		fmt.Sprintf("http://%s/config/apps/http/servers/srv0/logs/logger_names/%s", c.Addr, host),
+		[]string{accessLogName(instanceID)})
+}
+
+// DetachAccessLog removes both halves of the wiring; absence is success.
+// The host mapping goes first so no new entries land in a logger that is
+// about to be deleted.
+func (c *Caddy) DetachAccessLog(ctx context.Context, instanceID, host string) error {
+	if err := c.doRoute(ctx, http.MethodDelete,
+		fmt.Sprintf("http://%s/config/apps/http/servers/srv0/logs/logger_names/%s", c.Addr, host), nil); err != nil && !isNotFound(err) {
+		return err
+	}
+	if err := c.doRoute(ctx, http.MethodDelete,
+		fmt.Sprintf("http://%s/config/logging/logs/%s", c.Addr, accessLogName(instanceID)), nil); err != nil && !isNotFound(err) {
+		return err
+	}
+	return nil
 }

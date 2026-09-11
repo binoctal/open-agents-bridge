@@ -23,6 +23,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -67,6 +68,13 @@ const (
 	ActionProbe          = "probe"
 	ActionSandboxUp      = "sandbox_up"
 	ActionSandboxDestroy = "sandbox_destroy"
+
+	// Runtime preview actions (add-dynamic-preview-compute 5.2): an
+	// `activating` row is offered as runtime_up (materialize the snapshot tree
+	// into the mission's prebuilt Coolify app and swap it in), a `stopping`
+	// row as runtime_stop. Keyed by instanceId, not deploymentId.
+	ActionRuntimeUp   = "runtime_up"
+	ActionRuntimeStop = "runtime_stop"
 )
 
 // SizeClass is the tier payload of a sandbox_up item: the cgroup limits are
@@ -126,6 +134,14 @@ type WorkItem struct {
 	TaskPrompt string `json:"taskPrompt,omitempty"`
 	Attempt    int    `json:"attempt,omitempty"`
 	Model      string `json:"model,omitempty"`
+
+	// Runtime preview fields (add-dynamic-preview-compute 3.3); empty on
+	// deployment and sandbox items. Host is the {label}.deploy suffix host the
+	// agent routes; PreviewID/SnapshotTaskID identify the R2 snapshot the tree
+	// materializes from (shas presign against previews/{previewId}/{sha}).
+	InstanceID     string `json:"instanceId,omitempty"`
+	PreviewID      string `json:"previewId,omitempty"`
+	SnapshotTaskID string `json:"snapshotTaskId,omitempty"`
 }
 
 // PresignedObject maps an R2 key to its 15-minute GET URL.
@@ -178,6 +194,13 @@ const (
 	EventSandboxUpFailed      = "sandbox_up_failed"
 	EventSandboxDestroy       = "sandbox_destroy"
 	EventSandboxDestroyFailed = "sandbox_destroy_failed"
+
+	// Runtime preview report events (add-dynamic-preview-compute 3.3): keyed
+	// by instanceId on /report; replays against moved rows are no-ops (the
+	// API status-CASes each transition).
+	EventRuntimeRunning = "runtime_running"
+	EventRuntimeStopped = "runtime_stopped"
+	EventRuntimeFailed  = "runtime_failed"
 )
 
 // GetWork fetches the current work list.
@@ -261,6 +284,56 @@ func (c *Client) ReportSandbox(ctx context.Context, sandboxID, event, containerI
 		"event":       event,
 		"containerId": containerID,
 		"detail":      detail,
+	}
+	return c.postJSON(ctx, "/internal/hosting-agent/report", payload, nil)
+}
+
+// RuntimeSnapshotManifest is GET /runtime-snapshot's answer: the full
+// path->sha256 map of the instance's current snapshot plus its identity. The
+// agent pages /runtime-presign from this (batches of <=500 shas).
+type RuntimeSnapshotManifest struct {
+	PreviewID      string            `json:"previewId"`
+	SnapshotTaskID string            `json:"snapshotTaskId"`
+	TaskLabel      string            `json:"taskLabel"`
+	Files          map[string]string `json:"files"`
+}
+
+// FetchRuntimeSnapshot fetches the manifest of an instance's current snapshot.
+func (c *Client) FetchRuntimeSnapshot(ctx context.Context, instanceID string) (*RuntimeSnapshotManifest, error) {
+	var out RuntimeSnapshotManifest
+	if err := c.getJSON(ctx, "/internal/hosting-agent/runtime-snapshot?instanceId="+url.QueryEscape(instanceID), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RuntimePresign exchanges snapshot object hashes for presigned GETs. Keys are
+// the full R2 keys previews/{previewId}/{sha}; the sha is the tail segment.
+func (c *Client) RuntimePresign(ctx context.Context, instanceID string, shas []string) (*PresignResponse, error) {
+	payload := map[string]any{
+		"agentId":    c.AgentID,
+		"instanceId": instanceID,
+		"shas":       shas,
+	}
+	var out PresignResponse
+	if err := c.postJSON(ctx, "/internal/hosting-agent/runtime-presign", payload, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ReportRuntimePreview posts a runtime preview event (keyed by instanceId;
+// the API's /report route dispatches on that field). coolifyAppID rides
+// runtime_running (the app the swap landed in); idle=true marks an idle
+// auto-stop (drives the API's idle_stopped_at).
+func (c *Client) ReportRuntimePreview(ctx context.Context, instanceID, event, coolifyAppID string, idle bool, detail string) error {
+	payload := map[string]any{
+		"agentId":      c.AgentID,
+		"instanceId":   instanceID,
+		"event":        event,
+		"coolifyAppId": coolifyAppID,
+		"idle":         idle,
+		"detail":       detail,
 	}
 	return c.postJSON(ctx, "/internal/hosting-agent/report", payload, nil)
 }

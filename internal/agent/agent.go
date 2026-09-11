@@ -44,6 +44,10 @@ type Agent struct {
 	GitHTTP *githttp.Manager
 	Ingress Ingress // may be nil (local dev without Caddy)
 
+	// RT drives runtime preview instances (add-dynamic-preview-compute
+	// group 5); nil = feature disabled (no Coolify configured).
+	RT *RuntimePreviews
+
 	WorkPollInterval  time.Duration
 	WatermarkInterval time.Duration
 
@@ -95,6 +99,17 @@ func (a *Agent) Run(ctx context.Context) error {
 	usage := time.NewTicker(a.usageInterval())
 	defer usage.Stop()
 
+	// Runtime previews: adopt persisted instances after a restart, warm the
+	// base image cache (both best-effort), and sweep idle/liveness on a tick.
+	var rtIdle <-chan time.Time
+	if a.RT != nil {
+		a.RT.Recover()
+		go a.RT.PrePullImages(ctx)
+		rt := time.NewTicker(time.Minute)
+		defer rt.Stop()
+		rtIdle = rt.C
+	}
+
 	// First tick immediate: don't sit idle for a full interval at boot.
 	if err := a.pollWork(ctx); err != nil {
 		return err
@@ -119,6 +134,8 @@ func (a *Agent) Run(ctx context.Context) error {
 			if err := a.reportUsage(ctx); err != nil {
 				return err
 			}
+		case <-rtIdle:
+			a.RT.SweepIdle(ctx)
 		}
 	}
 }
@@ -166,6 +183,13 @@ func (a *Agent) pollWork(ctx context.Context) error {
 }
 
 func (a *Agent) handle(ctx context.Context, item api.WorkItem) error {
+	// Runtime preview items manage their own in-flight claims: runtime_up
+	// runs async (a Coolify build takes minutes), so the claim must outlive
+	// this call -- the generic claim/release below cannot express that.
+	if item.InstanceID != "" {
+		a.RT.dispatch(item)
+		return nil
+	}
 	// Sandbox items have no deploymentId; the in-flight key must still be
 	// per-object so a re-offer during a slow docker run does not double-start.
 	key := item.DeploymentID

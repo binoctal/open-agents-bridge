@@ -76,6 +76,11 @@ func (s *Store) Remove(deploymentID string) error {
 // that reports a different commit would be a bug, not a new snapshot.
 const fixedCommitDate = "1970-01-01T00:00:00Z"
 
+// presignFunc is the batch-presign seam: hosted deployments adapt
+// PresignSource, runtime previews adapt RuntimePresign. Both answer with
+// R2 keys whose tail segment is the sha, so fetchBatch is prefix-agnostic.
+type presignFunc func(ctx context.Context, shas []string) (*api.PresignResponse, error)
+
 // Materialize ensures every manifest object exists locally (verified by
 // sha256), then produces repos/{deploymentID}.git: a bare repo whose single
 // commit contains exactly the manifest tree. Returns the commit hash.
@@ -84,11 +89,23 @@ const fixedCommitDate = "1970-01-01T00:00:00Z"
 // set; partial retry against a stale set is pointless) -- same contract as
 // node-runner's puller.
 func (s *Store) Materialize(ctx context.Context, deploymentID, sourcePrefix string, manifest []api.File) (string, error) {
-	if len(manifest) == 0 {
-		return "", fmt.Errorf("materialize %s: empty manifest", deploymentID)
+	presign := func(ctx context.Context, shas []string) (*api.PresignResponse, error) {
+		return s.Presigner.PresignSource(ctx, deploymentID, shas)
 	}
+	if err := s.FetchMissing(ctx, manifest, presign); err != nil {
+		return "", fmt.Errorf("materialize %s: %w", deploymentID, err)
+	}
+	return s.BuildRepo(ctx, deploymentID, manifest, nil, true)
+}
 
-	// 1. Content store: which objects are missing?
+// FetchMissing ensures every manifest object exists locally, presigning via
+// fn in batches of 500 (add-dynamic-preview-compute 5.2: the runtime preview
+// path reuses the whole pipeline through this seam, only the presign origin
+// differs).
+func (s *Store) FetchMissing(ctx context.Context, manifest []api.File, fn presignFunc) error {
+	if len(manifest) == 0 {
+		return fmt.Errorf("empty manifest")
+	}
 	var missing []string
 	for _, f := range manifest {
 		if !s.hasObject(f.SHA256) {
@@ -97,13 +114,32 @@ func (s *Store) Materialize(ctx context.Context, deploymentID, sourcePrefix stri
 	}
 	for i := 0; i < len(missing); i += 500 {
 		end := min(i+500, len(missing))
-		if err := s.fetchBatch(ctx, deploymentID, sourcePrefix, missing[i:end]); err != nil {
-			return "", fmt.Errorf("materialize %s: %w", deploymentID, err)
+		if err := s.fetchBatch(ctx, fn, missing[i:end]); err != nil {
+			return err
 		}
 	}
+	return nil
+}
 
-	// 2. Assemble the work tree in scratch space.
-	work := filepath.Join(s.Dir, "repos", deploymentID+".work")
+// ObjectBytes returns the verified content of one object already in the
+// store (the runtime preview path reads runtime.json this way after
+// FetchMissing, before generating the Dockerfile that rides the same commit).
+func (s *Store) ObjectBytes(sha string) ([]byte, error) {
+	if !s.hasObject(sha) {
+		return nil, fmt.Errorf("object %s not in store", sha)
+	}
+	return os.ReadFile(s.objectPath(sha))
+}
+
+// BuildRepo produces repos/{repoKey}.git: a bare repo whose single commit
+// contains exactly the manifest tree plus any extra files (the generated
+// Dockerfile for runtime previews -- deliberately NOT sha-store content, it
+// is derived, not fetched). Returns the commit hash. staticFallback governs
+// the nixpacks static-site heuristic; runtime trees build from a Dockerfile
+// and skip it.
+func (s *Store) BuildRepo(ctx context.Context, repoKey string, manifest []api.File, extra map[string][]byte, staticFallback bool) (string, error) {
+	// 1. Assemble the work tree in scratch space.
+	work := filepath.Join(s.Dir, "repos", repoKey+".work")
 	if err := os.RemoveAll(work); err != nil {
 		return "", err
 	}
@@ -114,33 +150,47 @@ func (s *Store) Materialize(ctx context.Context, deploymentID, sourcePrefix stri
 	for _, f := range manifest {
 		dst := filepath.Join(work, filepath.FromSlash(f.Path))
 		if filepath.Clean(dst) != dst || !strings.HasPrefix(dst, work+string(os.PathSeparator)) {
-			return "", fmt.Errorf("materialize %s: manifest path escapes root: %s", deploymentID, f.Path)
+			return "", fmt.Errorf("build repo %s: manifest path escapes root: %s", repoKey, f.Path)
 		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return "", err
 		}
 		if err := hardlinkOrCopy(s.objectPath(f.SHA256), dst); err != nil {
-			return "", fmt.Errorf("materialize %s: place %s: %w", deploymentID, f.Path, err)
+			return "", fmt.Errorf("build repo %s: place %s: %w", repoKey, f.Path, err)
+		}
+	}
+	for path, content := range extra {
+		dst := filepath.Join(work, filepath.FromSlash(path))
+		if filepath.Clean(dst) != dst || !strings.HasPrefix(dst, work+string(os.PathSeparator)) {
+			return "", fmt.Errorf("build repo %s: extra path escapes root: %s", repoKey, path)
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(dst, content, 0o644); err != nil {
+			return "", fmt.Errorf("build repo %s: place extra %s: %w", repoKey, path, err)
 		}
 	}
 
-	// 2b. Static-site fallback (fix-seed-audit-blockers S4). A tree with
+	// 1b. Static-site fallback (fix-seed-audit-blockers S4). A tree with
 	// index.html but no start/build command is a static site; nixpacks picks
 	// its node provider off the mere PRESENCE of package.json, builds no CMD,
 	// and the container crash-loops while the row reads ready (2026-09-08
 	// live incident). Moving the manifest aside makes nixpacks fall through
 	// to its static provider: nginx serving the tree on $PORT, zero injected
 	// code to maintain. Pure function of the manifest -> idempotent commit.
-	if err := applyStaticFallback(work, manifest); err != nil {
-		return "", fmt.Errorf("materialize %s: static fallback: %w", deploymentID, err)
+	if staticFallback {
+		if err := applyStaticFallback(work, manifest); err != nil {
+			return "", fmt.Errorf("build repo %s: static fallback: %w", repoKey, err)
+		}
 	}
 
-	// 3. Single-commit repo, then bare-copy and atomic swap.
+	// 2. Single-commit repo, then bare-copy and atomic swap.
 	if err := runGit(ctx, work, "init", "--quiet", "--initial-branch=main"); err != nil {
-		return "", fmt.Errorf("materialize %s: git init: %w", deploymentID, err)
+		return "", fmt.Errorf("build repo %s: git init: %w", repoKey, err)
 	}
 	if err := runGit(ctx, work, "add", "-A"); err != nil {
-		return "", fmt.Errorf("materialize %s: git add: %w", deploymentID, err)
+		return "", fmt.Errorf("build repo %s: git add: %w", repoKey, err)
 	}
 	gitEnv := []string{
 		"GIT_AUTHOR_NAME=Open Agents Deploy",
@@ -151,21 +201,21 @@ func (s *Store) Materialize(ctx context.Context, deploymentID, sourcePrefix stri
 		"GIT_COMMITTER_DATE=" + fixedCommitDate,
 	}
 	if err := runGitEnv(ctx, gitEnv, work, "commit", "--quiet", "-m", "deployment snapshot"); err != nil {
-		return "", fmt.Errorf("materialize %s: git commit: %w", deploymentID, err)
+		return "", fmt.Errorf("build repo %s: git commit: %w", repoKey, err)
 	}
 	out, err := outputGit(ctx, work, "rev-parse", "HEAD")
 	if err != nil {
-		return "", fmt.Errorf("materialize %s: rev-parse: %w", deploymentID, err)
+		return "", fmt.Errorf("build repo %s: rev-parse: %w", repoKey, err)
 	}
 	commit := strings.TrimSpace(out)
 
-	final := s.RepoPath(deploymentID)
+	final := s.RepoPath(repoKey)
 	swap := final + ".swap"
 	if err := os.RemoveAll(swap); err != nil {
 		return "", err
 	}
 	if err := runGit(ctx, work, "clone", "--quiet", "--bare", work, swap); err != nil {
-		return "", fmt.Errorf("materialize %s: bare clone: %w", deploymentID, err)
+		return "", fmt.Errorf("build repo %s: bare clone: %w", repoKey, err)
 	}
 	// A concurrent http-backend may hold the old repo open mid-pull; removing
 	// the previous final first means the swap is rename-atomic for new opens.
@@ -173,7 +223,7 @@ func (s *Store) Materialize(ctx context.Context, deploymentID, sourcePrefix stri
 		return "", err
 	}
 	if err := os.Rename(swap, final); err != nil {
-		return "", fmt.Errorf("materialize %s: swap repo in: %w", deploymentID, err)
+		return "", fmt.Errorf("build repo %s: swap repo in: %w", repoKey, err)
 	}
 	return commit, nil
 }
@@ -238,16 +288,17 @@ func (s *Store) hasObject(sha string) bool {
 	return err == nil
 }
 
-// fetchBatch presigns one batch and downloads + verifies each object. Any
-// failure fails the whole batch so the caller re-signs (fresh 15-min URLs).
-func (s *Store) fetchBatch(ctx context.Context, deploymentID, sourcePrefix string, shas []string) error {
-	resp, err := s.Presigner.PresignSource(ctx, deploymentID, shas)
+// fetchBatch presigns one batch via fn and downloads + verifies each object.
+// Any failure fails the whole batch so the caller re-signs (fresh 15-min URLs).
+func (s *Store) fetchBatch(ctx context.Context, fn presignFunc, shas []string) error {
+	resp, err := fn(ctx, shas)
 	if err != nil {
 		return fmt.Errorf("presign: %w", err)
 	}
 	byKey := map[string]string{}
 	for _, obj := range resp.URLs {
-		// key = deploys/{deploymentId}/{sha} -- the sha is the tail
+		// key = {prefix}/{sha} (deploys/... or previews/...) -- the sha is
+		// the tail segment, so the prefix origin does not matter here.
 		if i := strings.LastIndex(obj.Key, "/"); i >= 0 {
 			byKey[obj.Key[i+1:]] = obj.URL
 		}

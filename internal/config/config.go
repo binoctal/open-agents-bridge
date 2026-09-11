@@ -56,6 +56,38 @@ type Config struct {
 	// WatermarkInterval is how often node capacity is reported (design D6
 	// input: reject-new decisions live in the API).
 	WatermarkIntervalSec int
+
+	// CoolifyBaseURL is the Coolify API origin (default http://127.0.0.1:8000 —
+	// same-host Coolify on the ECS node). Empty disables runtime previews
+	// (local dev / tests have no Coolify).
+	CoolifyBaseURL string
+
+	// CoolifyAPIToken authenticates against the Coolify API. Required when
+	// CoolifyBaseURL is set — a missing token would turn every runtime_up into
+	// a silent 401 loop, same failure class as the missing internal secret.
+	CoolifyAPIToken string
+
+	// CoolifyProjectUUID / CoolifyServerUUID / CoolifyEnvironmentName place
+	// the agent-created runtime preview applications inside the existing
+	// Coolify project (design D5: per-mission prebuilt app oa-preview-{id}).
+	CoolifyProjectUUID     string
+	CoolifyServerUUID      string
+	CoolifyEnvironmentName string
+
+	// RuntimePreviewPortMin/Max bound the runtime preview host port range
+	// (32100-32199 by default; disjoint from hosted 30000-31999 and git http
+	// 24100-24199, so no cross-allocator coordination).
+	RuntimePreviewPortMin int
+	RuntimePreviewPortMax int
+
+	// RuntimePreviewIdleTTLMinutes is the zero-access window after which a
+	// running preview is idle-stopped (design D3, default 30).
+	RuntimePreviewIdleTTLMinutes int
+
+	// RuntimePreviewLogDir holds Caddy per-host access logs. Must be writable
+	// by the caddy user (the spike found root-owned /var/log rejected); the
+	// default is Coolify's caddy-owned /var/lib/caddy.
+	RuntimePreviewLogDir string
 }
 
 // FromEnv builds a Config from environment variables, applying defaults and
@@ -74,6 +106,16 @@ func FromEnv() (*Config, error) {
 		GitPortMax:           envInt("GIT_HTTP_PORT_MAX", 24199),
 		WorkPollIntervalSec:  envInt("WORK_POLL_INTERVAL_SEC", 10),
 		WatermarkIntervalSec: envInt("WATERMARK_INTERVAL_SEC", 60),
+
+		CoolifyBaseURL:               strings.TrimRight(envOr("COOLIFY_BASE_URL", "http://127.0.0.1:8000"), "/"),
+		CoolifyAPIToken:              os.Getenv("COOLIFY_API_TOKEN"),
+		CoolifyProjectUUID:           os.Getenv("COOLIFY_PROJECT_UUID"),
+		CoolifyServerUUID:            os.Getenv("COOLIFY_SERVER_UUID"),
+		CoolifyEnvironmentName:       envOr("COOLIFY_ENVIRONMENT_NAME", "production"),
+		RuntimePreviewPortMin:        envInt("RUNTIME_PREVIEW_PORT_MIN", 32100),
+		RuntimePreviewPortMax:        envInt("RUNTIME_PREVIEW_PORT_MAX", 32199),
+		RuntimePreviewIdleTTLMinutes: envInt("RUNTIME_PREVIEW_IDLE_TTL_MINUTES", 30),
+		RuntimePreviewLogDir:         envOr("RUNTIME_PREVIEW_LOG_DIR", "/var/lib/caddy/oa-runtime"),
 	}
 
 	switch {
@@ -83,6 +125,8 @@ func FromEnv() (*Config, error) {
 		return nil, fmt.Errorf("API_BASE_URL is required")
 	case c.GitPortMin >= c.GitPortMax:
 		return nil, fmt.Errorf("GIT_HTTP_PORT_MIN (%d) must be below GIT_HTTP_PORT_MAX (%d)", c.GitPortMin, c.GitPortMax)
+	case c.RuntimePreviewPortMin >= c.RuntimePreviewPortMax:
+		return nil, fmt.Errorf("RUNTIME_PREVIEW_PORT_MIN (%d) must be below RUNTIME_PREVIEW_PORT_MAX (%d)", c.RuntimePreviewPortMin, c.RuntimePreviewPortMax)
 	}
 	return c, nil
 }

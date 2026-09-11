@@ -297,3 +297,87 @@ func TestDownloadVerifiedRejectsCorruptObject(t *testing.T) {
 		t.Fatal("a failed verification must not leave an object behind")
 	}
 }
+
+// --- runtime preview path (add-dynamic-preview-compute 5.2) -----------------
+
+// fakeRuntimePresigner keys objects under previews/{previewId}/ -- the tail
+// segment is still the sha, exercising fetchBatch's prefix-agnosticism.
+type fakeRuntimePresigner struct {
+	base string
+}
+
+func (f *fakeRuntimePresigner) RuntimePresign(ctx context.Context, instanceID string, shas []string) (*api.PresignResponse, error) {
+	resp := &api.PresignResponse{}
+	for _, s := range shas {
+		resp.URLs = append(resp.URLs, api.PresignedObject{
+			Key: fmt.Sprintf("previews/pv-1/%s", s),
+			URL: f.base + "/" + s,
+		})
+	}
+	return resp, nil
+}
+
+func TestRuntimePreviewTreeFetchesViaRuntimePresignAndAddsExtraFiles(t *testing.T) {
+	requireGit(t)
+	rjContent := `{"version":1,"startCommand":["node","server.js"],"port":3000}`
+	rj := file("runtime.json", rjContent)
+	app := file("server.js", "console.log('up')")
+	objects := map[string][]byte{rj.SHA256: []byte(rjContent), app.SHA256: []byte("console.log('up')")}
+
+	srv := objectServer(objects)
+	defer srv.Close()
+	st := New(t.TempDir(), nil)
+	presigner := &fakeRuntimePresigner{base: srv.URL}
+
+	presign := func(ctx context.Context, shas []string) (*api.PresignResponse, error) {
+		return presigner.RuntimePresign(ctx, "inst1", shas)
+	}
+	manifest := []api.File{rj, app}
+	if err := st.FetchMissing(context.Background(), manifest, presign); err != nil {
+		t.Fatalf("fetch missing: %v", err)
+	}
+	got, err := st.ObjectBytes(rj.SHA256)
+	if err != nil || string(got) != rjContent {
+		t.Fatalf("ObjectBytes must read the verified object, got (%q, %v)", got, err)
+	}
+	if _, err := st.ObjectBytes(sha([]byte("not fetched"))); err == nil {
+		t.Fatal("ObjectBytes of an absent object must fail")
+	}
+
+	dockerfile := []byte("FROM node:22-slim\nCOPY . .\n")
+	commit1, err := st.BuildRepo(context.Background(), "oa-preview-m1", manifest, map[string][]byte{"Dockerfile": dockerfile}, false)
+	if err != nil {
+		t.Fatalf("build repo: %v", err)
+	}
+	// Deterministic like Materialize: same inputs -> same commit (a re-drive
+	// after a report hiccup must not look like a new snapshot).
+	commit2, err := st.BuildRepo(context.Background(), "oa-preview-m1", manifest, map[string][]byte{"Dockerfile": dockerfile}, false)
+	if err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	if commit1 != commit2 {
+		t.Fatalf("same manifest + extra must yield the same commit, got %s then %s", commit1, commit2)
+	}
+	// The extra file actually landed in the tree.
+	out, err := outputGit(context.Background(), st.RepoPath("oa-preview-m1"), "ls-tree", "-r", "--name-only", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Dockerfile") || !strings.Contains(out, "runtime.json") {
+		t.Fatalf("tree must contain the extra Dockerfile and the manifest tree, got:\n%s", out)
+	}
+}
+
+func TestBuildRepoRejectsEscapingExtraPath(t *testing.T) {
+	requireGit(t)
+	app := file("server.js", "x")
+	st, _ := newTestStore(t, map[string][]byte{app.SHA256: []byte("x")})
+	if err := st.FetchMissing(context.Background(), []api.File{app}, func(ctx context.Context, shas []string) (*api.PresignResponse, error) {
+		return st.Presigner.PresignSource(ctx, "d", shas)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.BuildRepo(context.Background(), "k", []api.File{app}, map[string][]byte{"../escape": []byte("x")}, false); err == nil {
+		t.Fatal("extra path escaping the root must be rejected")
+	}
+}
