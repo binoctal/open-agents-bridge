@@ -152,7 +152,9 @@ func seedBuildableRepo(t *testing.T, repoRoot string) {
 // Full runtime flow (task 6.2 coexistence): a Next-shaped repo (config
 // without output:'export', standalone output present) reports kind=runtime,
 // packs the standalone tree, and uploads a runtime.json-anchored manifest —
-// while never looking for a static output dir.
+// while never looking for a static output dir. Since add-dynamic-preview-
+// compute the terminal snapshot rides the merge sentinel task id; the
+// per-task path is gated off (test below).
 func TestRunAndUpload_RuntimeFlow(t *testing.T) {
 	repo := t.TempDir()
 	seedBuildableRepo(t, repo)
@@ -165,7 +167,7 @@ func TestRunAndUpload_RuntimeFlow(t *testing.T) {
 			Uploads:   []api.PreviewUpload{{Path: "runtime.json", URL: "https://r2.example.com/put-rt"}},
 		},
 	}
-	RunAndUpload(fake, nil, "mission-1", repo, "task-1", nil)
+	RunAndUpload(fake, nil, "mission-1", repo, TaskIDMerge, nil)
 
 	if len(fake.reportedKinds) != 1 || fake.reportedKinds[0] != KindRuntime {
 		t.Fatalf("reported kinds = %v, want [runtime]", fake.reportedKinds)
@@ -173,8 +175,8 @@ func TestRunAndUpload_RuntimeFlow(t *testing.T) {
 	if fake.createCalls != 1 {
 		t.Fatalf("create calls = %d, want 1", fake.createCalls)
 	}
-	if fake.completedBody != (api.CompletePreviewBody{TaskID: "task-1", Kind: KindRuntime}) {
-		t.Errorf("complete body = %+v, want task-1/runtime", fake.completedBody)
+	if fake.completedBody != (api.CompletePreviewBody{TaskID: TaskIDMerge, Kind: KindRuntime}) {
+		t.Errorf("complete body = %+v, want merge/runtime", fake.completedBody)
 	}
 	if fake.createMeta == nil || fake.createMeta.FileCount == 0 {
 		t.Errorf("declare meta = %+v, want a file count", fake.createMeta)
@@ -183,6 +185,98 @@ func TestRunAndUpload_RuntimeFlow(t *testing.T) {
 	// from a static dir.
 	if s := string(fake.uploadedBytes["https://r2.example.com/put-rt"]); s == "" || s[0] != '{' {
 		t.Errorf("runtime.json upload = %q, want the packed JSON", s)
+	}
+}
+
+// v1 granularity gate: a runtime tree on the per-task path (real task id)
+// reports its kind but never packs/uploads — runtime snapshots are
+// terminal-only, the merge-final build registers them.
+func TestRunAndUpload_RuntimeTaskPathSkipped(t *testing.T) {
+	repo := t.TempDir()
+	seedBuildableRepo(t, repo)
+	writeFileT(t, repo, "next.config.js", "module.exports = {}")
+	seedNextBuild(t, repo)
+
+	fake := &fakeUploader{}
+	RunAndUpload(fake, nil, "mission-1", repo, "task-1", nil)
+
+	if len(fake.reportedKinds) != 1 || fake.reportedKinds[0] != KindRuntime {
+		t.Fatalf("reported kinds = %v, want [runtime] (mission-level kind still reported)", fake.reportedKinds)
+	}
+	if fake.createCalls != 0 {
+		t.Errorf("create calls = %d, want 0 on the task path", fake.createCalls)
+	}
+}
+
+// setHostPlatform simulates a BYOD host platform for the native-addon gate.
+func setHostPlatform(t *testing.T, goos, goarch string) {
+	t.Helper()
+	oldOS, oldArch := hostGOOS, hostGOARCH
+	hostGOOS, hostGOARCH = goos, goarch
+	t.Cleanup(func() { hostGOOS, hostGOARCH = oldOS, oldArch })
+}
+
+// Task 2.2: native addons packed on a host that differs from the node target
+// (linux/amd64) degrade to not-runnable — no declare, no crash-loop shipping.
+func TestRunAndUpload_RuntimeNativeMismatchDegrades(t *testing.T) {
+	setHostPlatform(t, "darwin", "arm64")
+	repo := t.TempDir()
+	seedBuildableRepo(t, repo)
+	writeFileT(t, repo, "next.config.js", "module.exports = {}")
+	seedNextBuild(t, repo)
+	writeFileT(t, repo, ".next/standalone/node_modules/sharp/build/Release/sharp-linux-x64.node", "elf")
+
+	fake := &fakeUploader{}
+	RunAndUpload(fake, nil, "mission-1", repo, TaskIDMerge, nil)
+
+	if fake.createCalls != 0 {
+		t.Errorf("create calls = %d, want 0 (not-runnable terminal must not upload)", fake.createCalls)
+	}
+	if len(fake.reportedKinds) != 1 || fake.reportedKinds[0] != KindRuntime {
+		t.Fatalf("reported kinds = %v, want [runtime] (detection is honest, only the upload degrades)", fake.reportedKinds)
+	}
+}
+
+// Same tree on a node-target host passes the gate: cloud bridges (gVisor
+// linux) are the native-compatible case.
+func TestRunAndUpload_RuntimeNativeOnNodeTargetHost(t *testing.T) {
+	setHostPlatform(t, "linux", "amd64")
+	repo := t.TempDir()
+	seedBuildableRepo(t, repo)
+	writeFileT(t, repo, "next.config.js", "module.exports = {}")
+	seedNextBuild(t, repo)
+	writeFileT(t, repo, ".next/standalone/node_modules/sharp/build/Release/sharp-linux-x64.node", "elf")
+
+	fake := &fakeUploader{
+		createResp: &api.DeclarePreviewResponse{
+			PreviewID: "p1",
+			Uploads:   []api.PreviewUpload{{Path: "runtime.json", URL: "https://r2.example.com/put-rt"}},
+		},
+	}
+	RunAndUpload(fake, nil, "mission-1", repo, TaskIDMerge, nil)
+
+	if fake.createCalls != 1 {
+		t.Errorf("create calls = %d, want 1 (native addons on the node target host are fine)", fake.createCalls)
+	}
+}
+
+// Task 2.3: a runtime repo whose build produced no standalone output (e.g.
+// output:'standalone' missing from next.config) degrades softly — kind is
+// still reported, nothing is declared, and the mission flow is unaffected.
+func TestRunAndUpload_RuntimePackFailureSoftDegrades(t *testing.T) {
+	repo := t.TempDir()
+	seedBuildableRepo(t, repo)
+	writeFileT(t, repo, "next.config.js", "module.exports = {}")
+	// Build script is a no-op, so .next/standalone never appears.
+
+	fake := &fakeUploader{}
+	RunAndUpload(fake, nil, "mission-1", repo, TaskIDMerge, nil)
+
+	if len(fake.reportedKinds) != 1 || fake.reportedKinds[0] != KindRuntime {
+		t.Fatalf("reported kinds = %v, want [runtime]", fake.reportedKinds)
+	}
+	if fake.createCalls != 0 {
+		t.Errorf("create calls = %d, want 0 (pack failure must not declare)", fake.createCalls)
 	}
 }
 

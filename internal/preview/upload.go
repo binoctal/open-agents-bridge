@@ -188,10 +188,36 @@ func RunAndUpload(client Uploader, cache *Cache, jobID, repoRoot, taskID string,
 
 	// Runtime branch (task 6.1): pack the standalone tree instead of looking
 	// for a static output dir, then ride the exact same upload pipeline.
+	// add-dynamic-preview-compute adds two gates in front of the pack:
 	if kind == KindRuntime {
+		// v1 granularity gate: runtime snapshots are terminal-only. The
+		// per-task path (a real task id) stays static-only; a runtime tree
+		// simply gets no snapshot until the merge-final build registers the
+		// mission's terminal state. Skipping here also saves the pack+upload
+		// for every task of every runtime mission.
+		if taskID != TaskIDMerge {
+			logf("[%s] preview: runtime tree for mission %s on task %s: runtime snapshots are terminal-only, waiting for the merge-final build", logger.ModPreview, jobID, taskID)
+			return
+		}
 		packedDir, err := PackNextStandalone(repoRoot)
 		if err != nil {
+			// Soft degradation (task 2.3): a runtime tree has no static
+			// output to fall back to, so the terminal degrades to no
+			// snapshot. Log and return — never block the mission flow.
 			logf("[%s] preview: runtime pack failed for mission %s: %v", logger.ModPreview, jobID, err)
+			return
+		}
+		// Conservative native-addon gate (task 2.2): addons present AND the
+		// BYOD host platform differs from the node target means the .node
+		// binaries cannot load in the container — degrade honestly instead
+		// of shipping a guaranteed crash-loop.
+		native, err := HasNativeAddons(packedDir)
+		if err != nil {
+			logf("[%s] preview: native-addon scan failed for mission %s, degrading to not-runnable: %v", logger.ModPreview, jobID, err)
+			return
+		}
+		if native && !HostMatchesNodeTarget() {
+			logf("[%s] preview: mission %s tree has native addons packed on %s/%s, node target is linux/amd64 — degrading to not-runnable", logger.ModPreview, jobID, hostGOOS, hostGOARCH)
 			return
 		}
 		rtFiles, err := BuildManifest(packedDir)

@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 )
 
 // RuntimeManifest is the runtime.json contract (add-runtime-deploy-v0 D3):
@@ -31,6 +33,43 @@ var nextStandaloneRuntime = RuntimeManifest{
 	StartCommand:    []string{"node", "server.js"},
 	Port:            3000,
 	HealthCheckPath: "/",
+}
+
+// The node containers the platform runs are linux/amd64 (node:22-slim /
+// node:20-slim on the current single-node fleet). Native addons packed into
+// the standalone tree are platform-tagged, so a BYOD bridge on a different
+// host produces .node binaries the container cannot load. hostGOOS/hostGOARCH
+// are vars so unit tests can simulate a mismatched host.
+var (
+	hostGOOS   = runtime.GOOS
+	hostGOARCH = runtime.GOARCH
+)
+
+// HostMatchesNodeTarget reports whether native binaries produced on this
+// host would load inside the node containers.
+func HostMatchesNodeTarget() bool {
+	return hostGOOS == "linux" && hostGOARCH == "amd64"
+}
+
+// HasNativeAddons reports whether the packed tree contains native loadable
+// binaries (*.node). Conservative gate for the runtime upload (task 2.2):
+// when addons exist and the host platform differs from the node target, the
+// terminal degrades to not-runnable instead of shipping a tree that is
+// guaranteed to crash on require. Pure-JS trees pass on every host — the
+// container only supplies the node binary, not the packages.
+func HasNativeAddons(root string) (bool, error) {
+	found := false
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && strings.HasSuffix(path, ".node") {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found, err
 }
 
 // copyDir recursively copies src into dst (dst/src-basename semantics: the
