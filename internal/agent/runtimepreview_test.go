@@ -103,10 +103,21 @@ type fakeRTCoolify struct {
 	stopped  []string
 	depState string // deployment status the poll sees
 	createIn coolify.ApplicationInput
+
+	// Per-user project seam (coolify-project-per-user): projects maps name ->
+	// uuid (pre-seeded = already exists); ensureErr forces the D5 failure
+	// path; ensureCalls counts EnsureProject invocations.
+	projects    map[string]string
+	ensureCalls int
+	ensureErr   error
 }
 
 func newFakeRTCoolify() *fakeRTCoolify {
-	return &fakeRTCoolify{apps: map[string]string{}, depState: "finished"}
+	return &fakeRTCoolify{
+		apps:     map[string]string{},
+		depState: "finished",
+		projects: map[string]string{},
+	}
 }
 
 func (f *fakeRTCoolify) ListApplications(ctx context.Context) ([]coolify.Application, error) {
@@ -126,6 +137,21 @@ func (f *fakeRTCoolify) CreateApplication(ctx context.Context, in coolify.Applic
 	uuid := fmt.Sprintf("app-%d", f.nextUUID)
 	f.apps[uuid] = strings.TrimSuffix(filepath.Base(in.GitRepository), ".git")
 	f.createIn = in
+	return uuid, nil
+}
+
+func (f *fakeRTCoolify) EnsureProject(ctx context.Context, name string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ensureCalls++
+	if f.ensureErr != nil {
+		return "", f.ensureErr
+	}
+	if uuid, ok := f.projects[name]; ok {
+		return uuid, nil
+	}
+	uuid := fmt.Sprintf("proj-%d", len(f.projects)+1)
+	f.projects[name] = uuid
 	return uuid, nil
 }
 
@@ -649,4 +675,87 @@ func newTestRT2(t *testing.T, rp *RuntimePreviews, _ *fakeRTAPI) (*RuntimePrevie
 		dial:    func(ctx context.Context, port int) error { return nil },
 	}
 	return rp2, fapi, fc, fi
+}
+
+// ─── per-user project placement (coolify-project-per-user task 2.4) ────────
+
+func TestUpPlacesNewAppInPerUserProject(t *testing.T) {
+	rp, _, fc, _ := newTestRT(t, testObjects(t))
+	seedManifest(t, rp.API.(*fakeRTAPI))
+
+	item := upItem()
+	item.UserID = "user_42"
+	if err := rp.up(context.Background(), item); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if fc.ensureCalls != 1 {
+		t.Fatalf("must resolve the per-user project exactly once, got %d", fc.ensureCalls)
+	}
+	if _, ok := fc.projects["oa-user-user_42"]; !ok {
+		t.Fatalf("must ensure project oa-user-user_42, got %+v", fc.projects)
+	}
+	if fc.createIn.ProjectUUID != "proj-1" {
+		t.Fatalf("new app must land in the per-user project uuid, got %q", fc.createIn.ProjectUUID)
+	}
+}
+
+func TestUpWithoutUserIDFallsBackToStaticProject(t *testing.T) {
+	rp, _, fc, _ := newTestRT(t, testObjects(t))
+	seedManifest(t, rp.API.(*fakeRTAPI))
+
+	if err := rp.up(context.Background(), upItem()); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if fc.ensureCalls != 0 {
+		t.Fatalf("no userId on the wire: must not touch the project seam, got %d calls", fc.ensureCalls)
+	}
+	if fc.createIn.ProjectUUID != rp.Cfg.CoolifyProjectUUID {
+		t.Fatalf("must use the static configured project, got %q", fc.createIn.ProjectUUID)
+	}
+}
+
+func TestUpEnsureProjectErrorFailsHonest(t *testing.T) {
+	rp, _, fc, _ := newTestRT(t, testObjects(t))
+	seedManifest(t, rp.API.(*fakeRTAPI))
+	fc.ensureErr = &coolify.Error{Status: 502, Endpoint: "GET /api/v1/projects", Body: "bad gateway"}
+
+	item := upItem()
+	item.UserID = "user_42"
+	if err := rp.up(context.Background(), item); err == nil {
+		t.Fatal("ensureProject failure must fail the up drive, not fall back")
+	}
+	if fc.nextUUID != 0 {
+		t.Fatal("no application may be created into the shared project")
+	}
+}
+
+func TestUpEnsureProjectErrorReportsRuntimeFailed(t *testing.T) {
+	// dispatch runs up in a goroutine, so wait for the report BY CONTENT
+	// (poll the report list), never on a clock guess.
+	rp, fapi, fc, _ := newTestRT(t, testObjects(t))
+	seedManifest(t, fapi)
+	fc.ensureErr = &coolify.Error{Status: 502, Endpoint: "GET /api/v1/projects", Body: "bad gateway"}
+
+	item := upItem()
+	item.UserID = "user_42"
+	rp.dispatch(item)
+
+	deadline := time.Now().Add(2 * time.Second)
+	var got *rtReport
+	for time.Now().Before(deadline) {
+		if rs := fapi.reportsOf("inst1"); len(rs) > 0 {
+			got = &rs[0]
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got == nil || got.event != api.EventRuntimeFailed {
+		t.Fatalf("must report runtime_failed, got %+v", got)
+	}
+	if !strings.Contains(got.detail, "per-user coolify project") {
+		t.Fatalf("failure detail must name the project resolution, got %q", got.detail)
+	}
+	if fc.nextUUID != 0 {
+		t.Fatal("no application may be created into the shared project")
+	}
 }

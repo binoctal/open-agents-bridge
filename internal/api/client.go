@@ -142,6 +142,11 @@ type WorkItem struct {
 	InstanceID     string `json:"instanceId,omitempty"`
 	PreviewID      string `json:"previewId,omitempty"`
 	SnapshotTaskID string `json:"snapshotTaskId,omitempty"`
+	// UserID is the server-side owner (runtime_preview_instances.user_id)
+	// the agent uses to place new Coolify applications in a per-user project
+	// (coolify-project-per-user). Empty on old-API wire and non-preview
+	// items: the agent then falls back to the static configured project.
+	UserID string `json:"userId,omitempty"`
 }
 
 // PresignedObject maps an R2 key to its 15-minute GET URL.

@@ -32,6 +32,7 @@ import (
 type rtCoolify interface {
 	ListApplications(ctx context.Context) ([]coolify.Application, error)
 	CreateApplication(ctx context.Context, in coolify.ApplicationInput) (string, error)
+	EnsureProject(ctx context.Context, name string) (string, error)
 	GetApplication(ctx context.Context, uuid string) (*coolify.Application, error)
 	UpdateApplication(ctx context.Context, uuid string, in coolify.ApplicationInput) error
 	Deploy(ctx context.Context, uuid string, force bool) (string, error)
@@ -291,7 +292,7 @@ func (rp *RuntimePreviews) up(ctx context.Context, item api.WorkItem) error {
 		return fmt.Errorf("serve repo: %w", err)
 	}
 
-	appUUID, err := rp.findOrCreateApp(ctx, item.MissionID, repoKey, gitPort)
+	appUUID, err := rp.findOrCreateApp(ctx, item.MissionID, item.UserID, repoKey, gitPort)
 	if err != nil {
 		return fmt.Errorf("coolify app: %w", err)
 	}
@@ -371,8 +372,11 @@ func (rp *RuntimePreviews) labelOf(host string) string {
 // findOrCreateApp resolves the per-mission Coolify application: live in-memory
 // state first, then the persisted state file, then a name scan (state file
 // lost but the app lives), then create. Validated with a GET before use --
-// a manually deleted app must not 404-loop the drive.
-func (rp *RuntimePreviews) findOrCreateApp(ctx context.Context, missionID, repoKey string, gitPort int) (string, error) {
+// a manually deleted app must not 404-loop the drive. The create branch
+// places the app in the owner's per-user project when the work item carries
+// a userId (coolify-project-per-user); without one (old-API wire) it falls
+// back to the static configured project (design D4).
+func (rp *RuntimePreviews) findOrCreateApp(ctx context.Context, missionID, userID, repoKey string, gitPort int) (string, error) {
 	name := repoKey // Coolify derives the name from the repo basename
 	if st := rp.activeFor(missionID); st != nil && st.CoolifyAppID != "" {
 		if app, err := rp.Coolify.GetApplication(ctx, st.CoolifyAppID); err == nil && app != nil {
@@ -399,8 +403,18 @@ func (rp *RuntimePreviews) findOrCreateApp(ctx context.Context, missionID, repoK
 		}
 	}
 	gitURL := fmt.Sprintf("http://%s:%d/%s.git", rp.Cfg.GitBindHost, gitPort, repoKey)
+	projectUUID := rp.Cfg.CoolifyProjectUUID
+	if userID != "" {
+		var err error
+		projectUUID, err = rp.Coolify.EnsureProject(ctx, coolify.PerUserProjectName(userID))
+		if err != nil {
+			// Fail the instance, never silently place it in the shared
+			// project (design D5).
+			return "", fmt.Errorf("per-user coolify project: %w", err)
+		}
+	}
 	return rp.Coolify.CreateApplication(ctx, coolify.ApplicationInput{
-		ProjectUUID:     rp.Cfg.CoolifyProjectUUID,
+		ProjectUUID:     projectUUID,
 		ServerUUID:      rp.Cfg.CoolifyServerUUID,
 		EnvironmentName: rp.Cfg.CoolifyEnvironmentName,
 		GitRepository:   gitURL,

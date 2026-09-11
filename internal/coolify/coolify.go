@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -330,4 +331,73 @@ func (c *Client) Start(ctx context.Context, applicationUUID string) error {
 // DeleteApplication hard-deletes the application and its containers.
 func (c *Client) DeleteApplication(ctx context.Context, applicationUUID string) error {
 	return c.request(ctx, http.MethodDelete, "/api/v1/applications/"+url.PathEscape(applicationUUID), nil, nil)
+}
+
+// --- Projects (coolify-project-per-user) -----------------------------------
+
+// PerUserProjectName is the per-user project naming convention, identical to
+// the API worker's perUserProjectName (apps/api coolify-client.ts).
+func PerUserProjectName(userID string) string { return "oa-user-" + userID }
+
+// projectUUIDByName caches resolved projects for this process (a project's
+// uuid never changes once created); a restart rebuilds it at one list call.
+var projectUUIDByName sync.Map
+
+// ListProjects returns the team's projects (uuid + name only).
+func (c *Client) ListProjects(ctx context.Context) ([]struct{ UUID, Name string }, error) {
+	var raw []struct {
+		UUID string `json:"uuid"`
+		Name string `json:"name"`
+	}
+	if err := c.request(ctx, http.MethodGet, "/api/v1/projects", nil, &raw); err != nil {
+		return nil, err
+	}
+	out := make([]struct{ UUID, Name string }, 0, len(raw))
+	for _, p := range raw {
+		out = append(out, struct{ UUID, Name string }{p.UUID, p.Name})
+	}
+	return out, nil
+}
+
+// CreateProject makes a new project. Coolify auto-creates the default
+// `production` environment via the Project model's created hook, so callers
+// keep EnvironmentName "production" with no extra call.
+func (c *Client) CreateProject(ctx context.Context, name string) (string, error) {
+	var created struct {
+		UUID string `json:"uuid"`
+	}
+	err := c.request(ctx, http.MethodPost, "/api/v1/projects", map[string]any{
+		"name":        name,
+		"description": "per-user placement (coolify-project-per-user)",
+	}, &created)
+	if err != nil {
+		return "", err
+	}
+	return created.UUID, nil
+}
+
+// EnsureProject resolves the named project, creating it when missing. Exact
+// name match; a concurrent double-create can leave a redundant same-name
+// project (accepted, design D1). Errors propagate -- callers must fail the
+// deployment rather than fall back to the shared project (design D5).
+func (c *Client) EnsureProject(ctx context.Context, name string) (string, error) {
+	if cached, ok := projectUUIDByName.Load(name); ok {
+		return cached.(string), nil
+	}
+	projects, err := c.ListProjects(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, p := range projects {
+		if p.Name == name {
+			projectUUIDByName.Store(name, p.UUID)
+			return p.UUID, nil
+		}
+	}
+	uuid, err := c.CreateProject(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	projectUUIDByName.Store(name, uuid)
+	return uuid, nil
 }
