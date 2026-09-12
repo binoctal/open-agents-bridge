@@ -87,10 +87,18 @@ type presignFunc func(ctx context.Context, shas []string) (*api.PresignResponse,
 //
 // Presign batches are re-fetched wholesale on any failure (URLs expire as a
 // set; partial retry against a stale set is pointless) -- same contract as
-// node-runner's puller.
+// node-runner's puller. Presigns go to the store's configured Presigner; use
+// MaterializeVia to route them to a specific endpoint (dual-home D2: each
+// environment has its own R2 bucket and credentials).
 func (s *Store) Materialize(ctx context.Context, deploymentID, sourcePrefix string, manifest []api.File) (string, error) {
+	return s.MaterializeVia(ctx, s.Presigner, deploymentID, sourcePrefix, manifest)
+}
+
+// MaterializeVia is Materialize with the presign origin pinned to p -- the
+// client of the endpoint that offered the work item.
+func (s *Store) MaterializeVia(ctx context.Context, p Presigner, deploymentID, sourcePrefix string, manifest []api.File) (string, error) {
 	presign := func(ctx context.Context, shas []string) (*api.PresignResponse, error) {
-		return s.Presigner.PresignSource(ctx, deploymentID, shas)
+		return p.PresignSource(ctx, deploymentID, shas)
 	}
 	if err := s.FetchMissing(ctx, manifest, presign); err != nil {
 		return "", fmt.Errorf("materialize %s: %w", deploymentID, err)

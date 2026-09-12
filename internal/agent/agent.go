@@ -2,9 +2,10 @@
 // (materialize / route wiring / release, driven by the API) and a watermark
 // report loop (node capacity for the API's reject-new governance, design D6).
 //
-// Both loops are best-effort per tick with one exception: an Unauthorized
-// from the API is fatal and exits the process (rotated secret -> restart
-// churn a human sees, node-runner's fatalHeartbeat pattern).
+// Both loops are best-effort per tick and iterate every configured API
+// endpoint (dual-home): an Unauthorized from one endpoint retires that
+// endpoint only (D3); the process exits when every endpoint is retired
+// (restart churn a human sees, node-runner's fatalHeartbeat pattern).
 package agent
 
 import (
@@ -37,9 +38,31 @@ type Ingress interface {
 	Remove(ctx context.Context, deploymentID string) error
 }
 
+// APIEndpoint is one served API environment (dual-home-hosting-agent D1/D2).
+// The single ECS node hosts both staging and production, so the agent serves
+// every configured endpoint at once and routes each work item's reports,
+// presigns and preview placement back to the endpoint that offered it.
+type APIEndpoint struct {
+	Client *api.Client
+	// BaseURL is the endpoint's routing identity: runtime preview state
+	// persists it so the idle sweep reports to the owning environment even
+	// after a restart.
+	BaseURL string
+	// CoolifyProjectUUID is this environment's static runtime-preview
+	// placement fallback (items without a userId).
+	CoolifyProjectUUID string
+}
+
 // Agent wires the loops together.
 type Agent struct {
-	Client  *api.Client
+	// Client is the single-endpoint shorthand: used exactly when Endpoints
+	// is empty, preserving the pre-dual-home construction for local dev and
+	// the existing tests.
+	Client *api.Client
+	// Endpoints is every served API environment (dual-home). Empty means
+	// [Client].
+	Endpoints []APIEndpoint
+
 	Store   *store.Store
 	GitHTTP *githttp.Manager
 	Ingress Ingress // may be nil (local dev without Caddy)
@@ -82,6 +105,53 @@ type Agent struct {
 	// in a row (~30s at the default poll) is a dead app and is reported once
 	// per streak. Guarded by inFlightMu.
 	probeFails map[string]int
+
+	// epDisabled marks endpoints taken out by a 401 (D3): a rotated secret
+	// on one environment must not degrade service to the others, so the
+	// endpoint is skipped until process restart instead of exiting. Guarded
+	// by inFlightMu.
+	epDisabled map[*api.Client]bool
+}
+
+// endpoints resolves the served set: Endpoints when set, else the legacy
+// single Client.
+func (a *Agent) endpoints() []APIEndpoint {
+	if len(a.Endpoints) > 0 {
+		return a.Endpoints
+	}
+	return []APIEndpoint{{Client: a.Client}}
+}
+
+func (a *Agent) endpointDisabled(c *api.Client) bool {
+	a.inFlightMu.Lock()
+	defer a.inFlightMu.Unlock()
+	return a.epDisabled[c]
+}
+
+// disableEndpoint retires an endpoint whose credential was rejected and
+// announces it in the log every time (journal visibility for a human, D3).
+func (a *Agent) disableEndpoint(ep APIEndpoint) {
+	a.inFlightMu.Lock()
+	if a.epDisabled == nil {
+		a.epDisabled = map[*api.Client]bool{}
+	}
+	already := a.epDisabled[ep.Client]
+	a.epDisabled[ep.Client] = true
+	a.inFlightMu.Unlock()
+	if !already {
+		a.logf("endpoint %s disabled: credential rejected (401); restart the agent with a fresh secret to re-enable", ep.BaseURL)
+	}
+}
+
+// fatalIfAllDisabled is the process exit condition (D3): with every endpoint
+// retired the agent can serve nothing, so it exits for systemd to restart.
+func (a *Agent) fatalIfAllDisabled() error {
+	for _, ep := range a.endpoints() {
+		if !a.endpointDisabled(ep.Client) {
+			return nil
+		}
+	}
+	return fmt.Errorf("all API endpoints disabled (credential rejected)")
 }
 
 // Run drives both loops until ctx is done.
@@ -161,33 +231,41 @@ func (a *Agent) usageInterval() time.Duration {
 	return 5 * time.Minute
 }
 
-// pollWork fetches one batch and handles each item sequentially -- a single
-// node serves at most a handful of whitelist deployments; per-item failures
-// are reported to the API and never abort the batch. A credential rejection
-// aborts everything: it returns to Run, which returns it to main (exit 1).
+// pollWork fetches one batch per endpoint and handles each item sequentially
+// -- a single node serves at most a handful of whitelist deployments; per-item
+// failures are reported to the API and never abort the batch. Per-endpoint
+// failures (including a 401, which retires that endpoint per D3) never abort
+// the other endpoints; only every-endpoint-disabled returns an error to Run
+// (exit 1, systemd restart).
 func (a *Agent) pollWork(ctx context.Context) error {
-	items, err := a.Client.GetWork(ctx)
-	if err != nil {
-		if api.Unauthorized(err) {
-			return err
+	for _, ep := range a.endpoints() {
+		if a.endpointDisabled(ep.Client) {
+			continue
 		}
-		a.logf("work poll failed: %v", err)
-		return nil
-	}
-	for _, item := range items {
-		if err := a.handle(ctx, item); err != nil {
-			return err
+		items, err := ep.Client.GetWork(ctx)
+		if err != nil {
+			if api.Unauthorized(err) {
+				a.disableEndpoint(ep)
+				continue
+			}
+			a.logf("work poll failed (%s): %v", ep.BaseURL, err)
+			continue
+		}
+		for _, item := range items {
+			if err := a.handle(ctx, ep, item); err != nil {
+				return err
+			}
 		}
 	}
-	return nil
+	return a.fatalIfAllDisabled()
 }
 
-func (a *Agent) handle(ctx context.Context, item api.WorkItem) error {
+func (a *Agent) handle(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {
 	// Runtime preview items manage their own in-flight claims: runtime_up
 	// runs async (a Coolify build takes minutes), so the claim must outlive
 	// this call -- the generic claim/release below cannot express that.
 	if item.InstanceID != "" {
-		a.RT.dispatch(item)
+		a.RT.dispatch(item, RtEndpoint{API: ep.Client, BaseURL: ep.BaseURL, ProjectUUID: ep.CoolifyProjectUUID})
 		return nil
 	}
 	// Sandbox items have no deploymentId; the in-flight key must still be
@@ -204,75 +282,77 @@ func (a *Agent) handle(ctx context.Context, item api.WorkItem) error {
 
 	switch item.Action {
 	case api.ActionMaterialize:
-		return a.handleMaterialize(ctx, item)
+		return a.handleMaterialize(ctx, ep, item)
 	case api.ActionRegisterRoute:
-		return a.handleRegisterRoute(ctx, item)
+		return a.handleRegisterRoute(ctx, ep, item)
 	case api.ActionRemoveRoute:
-		return a.handleRemoveRoute(ctx, item)
+		return a.handleRemoveRoute(ctx, ep, item)
 	case api.ActionRelease:
-		return a.handleRelease(ctx, item)
+		return a.handleRelease(ctx, ep, item)
 	case api.ActionProbe:
-		return a.handleProbe(ctx, item)
+		return a.handleProbe(ctx, ep, item)
 	case api.ActionSandboxUp:
-		return a.handleSandboxUp(ctx, item)
+		return a.handleSandboxUp(ctx, ep, item)
 	case api.ActionSandboxDestroy:
-		return a.handleSandboxDestroy(ctx, item)
+		return a.handleSandboxDestroy(ctx, ep, item)
 	default:
 		a.logf("%s: unknown action %q", key, item.Action)
 		return nil
 	}
 }
 
-func (a *Agent) handleMaterialize(ctx context.Context, item api.WorkItem) error {
+func (a *Agent) handleMaterialize(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {
 	// The manifest rides R2, not the work item (D1 statement cap): fetch it
 	// first -- a manifest the agent cannot read is a materialize failure,
-	// same as an unreadable object later in the loop.
-	manifest, err := a.Client.FetchManifest(ctx, item.ManifestURL)
+	// same as an unreadable object later in the loop. The presign exchange
+	// below MUST use the offering endpoint: each environment has its own R2
+	// bucket and credentials (D2), so MaterializeVia takes the client.
+	manifest, err := ep.Client.FetchManifest(ctx, item.ManifestURL)
 	if err != nil {
 		a.logf("deploy %s: manifest fetch failed: %v", item.DeploymentID, err)
-		return a.report(ctx, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
+		return a.report(ctx, ep, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
 	}
-	commit, err := a.Store.Materialize(ctx, item.DeploymentID, item.SourcePrefix, manifest)
+	commit, err := a.Store.MaterializeVia(ctx, ep.Client, item.DeploymentID, item.SourcePrefix, manifest)
 	if err != nil {
 		a.logf("deploy %s: materialize failed: %v", item.DeploymentID, err)
-		return a.report(ctx, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
+		return a.report(ctx, ep, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
 	}
 	port, err := a.GitHTTP.Serve(item.DeploymentID)
 	if err != nil {
 		a.logf("deploy %s: git http serve failed: %v", item.DeploymentID, err)
-		return a.report(ctx, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
+		return a.report(ctx, ep, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
 	}
 	a.logf("deploy %s: materialized %s at http://127.0.0.1:%d/%s.git",
 		item.DeploymentID, commit[:12], port, item.DeploymentID)
-	return a.report(ctx, item.DeploymentID, api.EventMaterialized, port, commit)
+	return a.report(ctx, ep, item.DeploymentID, api.EventMaterialized, port, commit)
 }
 
-func (a *Agent) handleRegisterRoute(ctx context.Context, item api.WorkItem) error {
+func (a *Agent) handleRegisterRoute(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {
 	if a.Ingress == nil {
 		a.logf("deploy %s: route wiring disabled (no Caddy admin), reporting failure", item.DeploymentID)
-		return a.report(ctx, item.DeploymentID, api.EventMaterializeFailed, 0, "route wiring disabled")
+		return a.report(ctx, ep, item.DeploymentID, api.EventMaterializeFailed, 0, "route wiring disabled")
 	}
 	addr := fmt.Sprintf("127.0.0.1:%d", item.AppPort)
 	if err := a.Ingress.Upsert(ctx, item.DeploymentID, addr); err != nil {
 		a.logf("deploy %s: route upsert failed: %v", item.DeploymentID, err)
-		return a.report(ctx, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
+		return a.report(ctx, ep, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
 	}
 	a.logf("deploy %s: route %s -> %s registered", item.DeploymentID, item.Host, addr)
-	return a.report(ctx, item.DeploymentID, api.EventRouteRegistered, 0, item.Host)
+	return a.report(ctx, ep, item.DeploymentID, api.EventRouteRegistered, 0, item.Host)
 }
 
-func (a *Agent) handleRemoveRoute(ctx context.Context, item api.WorkItem) error {
+func (a *Agent) handleRemoveRoute(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {
 	if a.Ingress != nil {
 		if err := a.Ingress.Remove(ctx, item.DeploymentID); err != nil {
 			a.logf("deploy %s: route remove failed: %v", item.DeploymentID, err)
-			return a.report(ctx, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
+			return a.report(ctx, ep, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
 		}
 	}
 	a.logf("deploy %s: route removed", item.DeploymentID)
-	return a.report(ctx, item.DeploymentID, api.EventRouteRemoved, 0, "")
+	return a.report(ctx, ep, item.DeploymentID, api.EventRouteRemoved, 0, "")
 }
 
-func (a *Agent) handleRelease(ctx context.Context, item api.WorkItem) error {
+func (a *Agent) handleRelease(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {
 	// Full local teardown: route first (a released repo must stop answering),
 	// then the git port, then the repo itself. Route errors are logged but do
 	// not block the rest -- a route that was never registered (delete before
@@ -287,10 +367,10 @@ func (a *Agent) handleRelease(ctx context.Context, item api.WorkItem) error {
 	}
 	if err := a.Store.Remove(item.DeploymentID); err != nil {
 		a.logf("deploy %s: repo removal failed: %v", item.DeploymentID, err)
-		return a.report(ctx, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
+		return a.report(ctx, ep, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
 	}
 	a.logf("deploy %s: released (route + repo + port recycled)", item.DeploymentID)
-	return a.report(ctx, item.DeploymentID, api.EventReleased, 0, "")
+	return a.report(ctx, ep, item.DeploymentID, api.EventReleased, 0, "")
 }
 
 // handleProbe is the ready-alive check (S4): dial the app's published host
@@ -298,7 +378,7 @@ func (a *Agent) handleRelease(ctx context.Context, item api.WorkItem) error {
 // report runtime_fail once (the API's transition table takes ready -> failed,
 // and the streak entry is dropped so a retry/restart that fails again starts
 // a fresh streak instead of double-reporting).
-func (a *Agent) handleProbe(ctx context.Context, item api.WorkItem) error {
+func (a *Agent) handleProbe(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {
 	if a.probeDial == nil {
 		a.probeDial = defaultProbeDial
 	}
@@ -323,7 +403,7 @@ func (a *Agent) handleProbe(ctx context.Context, item api.WorkItem) error {
 	a.inFlightMu.Unlock()
 	a.logf("deploy %s: port %d dead after %d consecutive probes, reporting runtime_fail",
 		item.DeploymentID, item.AppPort, streak)
-	return a.report(ctx, item.DeploymentID, api.EventRuntimeFail, 0, fmt.Sprintf("tcp dial 127.0.0.1:%d failed %d consecutive probes: %v", item.AppPort, streak, err))
+	return a.report(ctx, ep, item.DeploymentID, api.EventRuntimeFail, 0, fmt.Sprintf("tcp dial 127.0.0.1:%d failed %d consecutive probes: %v", item.AppPort, streak, err))
 }
 
 // defaultProbeDial opens a short-lived TCP connection to the app port. Any
@@ -338,29 +418,39 @@ func defaultProbeDial(ctx context.Context, port int) error {
 	return conn.Close()
 }
 
-// report posts one event; a 401 is fatal (returned so Run/main exit), anything
-// else is logged (the API re-offers the work item on the next poll, so a
-// dropped report self-heals).
-func (a *Agent) report(ctx context.Context, deploymentID, event string, repoPort int, detail string) error {
-	if err := a.Client.Report(ctx, deploymentID, event, repoPort, detail); err != nil {
+// report posts one event to the offering endpoint; a 401 retires that
+// endpoint (D3), anything else is logged (the API re-offers the work item on
+// the next poll, so a dropped report self-heals).
+func (a *Agent) report(ctx context.Context, ep APIEndpoint, deploymentID, event string, repoPort int, detail string) error {
+	if err := ep.Client.Report(ctx, deploymentID, event, repoPort, detail); err != nil {
 		if api.Unauthorized(err) {
-			return err
+			a.disableEndpoint(ep)
+		} else {
+			a.logf("deploy %s: report %s failed: %v", deploymentID, event, err)
 		}
-		a.logf("deploy %s: report %s failed: %v", deploymentID, event, err)
 	}
 	return nil
 }
 
+// reportWatermark fans the one node-level watermark out to every active
+// endpoint (D4): each environment's allocator then sees the full node port
+// occupancy, so cross-environment deployments can never race for a port.
 func (a *Agent) reportWatermark(ctx context.Context) error {
 	w := CollectWatermark(ctx)
 	w.BootID = a.BootID
-	if err := a.Client.ReportWatermark(ctx, w); err != nil {
-		if api.Unauthorized(err) {
-			return err
+	for _, ep := range a.endpoints() {
+		if a.endpointDisabled(ep.Client) {
+			continue
 		}
-		a.logf("watermark report failed: %v", err)
+		if err := ep.Client.ReportWatermark(ctx, w); err != nil {
+			if api.Unauthorized(err) {
+				a.disableEndpoint(ep)
+				continue
+			}
+			a.logf("watermark report failed (%s): %v", ep.BaseURL, err)
+		}
 	}
-	return nil
+	return a.fatalIfAllDisabled()
 }
 
 // reportUsage samples per-container memory and posts the batch. Skipped when
@@ -368,18 +458,27 @@ func (a *Agent) reportWatermark(ctx context.Context) error {
 // already carries liveness); a non-401 failure is logged, not fatal -- the
 // next tick's batch covers the gap and the API's rollup treats a sample-less
 // ready hour conservatively by design.
+// reportUsage fans the node-wide sample batch out to every active endpoint
+// (D4): each API keeps the samples whose coolify app id it owns and drops the
+// rest as orphans, so dual-environment billing never crosses.
 func (a *Agent) reportUsage(ctx context.Context) error {
 	samples := CollectUsageSamples(ctx, time.Now().UTC())
 	if len(samples) == 0 {
 		return nil
 	}
-	if err := a.Client.ReportUsage(ctx, samples); err != nil {
-		if api.Unauthorized(err) {
-			return err
+	for _, ep := range a.endpoints() {
+		if a.endpointDisabled(ep.Client) {
+			continue
 		}
-		a.logf("usage report failed: %v", err)
+		if err := ep.Client.ReportUsage(ctx, samples); err != nil {
+			if api.Unauthorized(err) {
+				a.disableEndpoint(ep)
+				continue
+			}
+			a.logf("usage report failed (%s): %v", ep.BaseURL, err)
+		}
 	}
-	return nil
+	return a.fatalIfAllDisabled()
 }
 
 // NewBootID mints a fresh process-lifetime identity (design D8). It only ever
@@ -399,6 +498,9 @@ func NewBootID() string {
 func (a *Agent) claim(deploymentID string) bool {
 	a.inFlightMu.Lock()
 	defer a.inFlightMu.Unlock()
+	if a.inFlight == nil {
+		a.inFlight = make(map[string]bool)
+	}
 	if a.inFlight[deploymentID] {
 		return false
 	}

@@ -86,7 +86,7 @@ func TestHandleSandboxUpArgs(t *testing.T) {
 	}}
 	a := &Agent{Client: client, dockerRun: dk.run}
 
-	if err := a.handleSandboxUp(context.Background(), sandboxItem()); err != nil {
+	if err := a.handleSandboxUp(context.Background(), a.endpoints()[0], sandboxItem()); err != nil {
 		t.Fatalf("handleSandboxUp: %v", err)
 	}
 	if len(dk.calls) != 2 {
@@ -156,7 +156,7 @@ func TestHandleSandboxUpNameConflictRecovers(t *testing.T) {
 	}}
 	a := &Agent{Client: client, dockerRun: dk.run}
 
-	if err := a.handleSandboxUp(context.Background(), sandboxItem()); err != nil {
+	if err := a.handleSandboxUp(context.Background(), a.endpoints()[0], sandboxItem()); err != nil {
 		t.Fatalf("handleSandboxUp: %v", err)
 	}
 	if sink.count(api.EventSandboxUp) != 1 || sink.lastContainerID(api.EventSandboxUp) != "existing-id" {
@@ -183,7 +183,7 @@ func TestHandleSandboxUpFailureReports(t *testing.T) {
 	}}
 	a := &Agent{Client: client, dockerRun: dk.run}
 
-	if err := a.handleSandboxUp(context.Background(), sandboxItem()); err != nil {
+	if err := a.handleSandboxUp(context.Background(), a.endpoints()[0], sandboxItem()); err != nil {
 		t.Fatalf("handleSandboxUp: %v", err)
 	}
 	if sink.count(api.EventSandboxUpFailed) != 1 {
@@ -243,7 +243,7 @@ func TestHandleSandboxUpDigestGate(t *testing.T) {
 
 			item := sandboxItem()
 			item.ImageRef = tc.ref
-			if err := a.handleSandboxUp(context.Background(), item); err != nil {
+			if err := a.handleSandboxUp(context.Background(), a.endpoints()[0], item); err != nil {
 				t.Fatalf("handleSandboxUp: %v", err)
 			}
 			if sink.count(api.EventSandboxUpFailed) != 1 {
@@ -277,7 +277,7 @@ func TestHandleSandboxUpMalformed(t *testing.T) {
 	} {
 		item := sandboxItem()
 		mutate(&item)
-		if err := a.handleSandboxUp(context.Background(), item); err != nil {
+		if err := a.handleSandboxUp(context.Background(), a.endpoints()[0], item); err != nil {
 			t.Fatalf("%s: handleSandboxUp: %v", name, err)
 		}
 		if len(dk.calls) != 0 {
@@ -392,7 +392,7 @@ func TestHandleSandboxUpResolvConfFailure(t *testing.T) {
 	t.Cleanup(func() { ensureSandboxResolvConf = orig })
 	a := &Agent{Client: client, dockerRun: dk.run}
 
-	if err := a.handleSandboxUp(context.Background(), sandboxItem()); err != nil {
+	if err := a.handleSandboxUp(context.Background(), a.endpoints()[0], sandboxItem()); err != nil {
 		t.Fatalf("handleSandboxUp: %v", err)
 	}
 	// The read-only digest inspect may precede the refusal; only execution
@@ -424,7 +424,7 @@ func TestHandleSandboxDestroyIdempotent(t *testing.T) {
 		}{"rm -f": {"", tc.rmErr}}}
 		a := &Agent{Client: client, dockerRun: dk.run}
 		item := api.WorkItem{Action: api.ActionSandboxDestroy, SandboxID: "sbx-1", ContainerName: "sbx-abc123"}
-		if err := a.handleSandboxDestroy(context.Background(), item); err != nil {
+		if err := a.handleSandboxDestroy(context.Background(), a.endpoints()[0], item); err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
 		if sink.count(api.EventSandboxDestroy) == 0 {
@@ -449,7 +449,7 @@ func TestHandleSandboxDestroyFailure(t *testing.T) {
 	}{"rm -f": {"", errors.New("docker rm: device or resource busy")}}}
 	a := &Agent{Client: client, dockerRun: dk.run}
 	item := api.WorkItem{Action: api.ActionSandboxDestroy, SandboxID: "sbx-1", ContainerName: "sbx-abc123"}
-	if err := a.handleSandboxDestroy(context.Background(), item); err != nil {
+	if err := a.handleSandboxDestroy(context.Background(), a.endpoints()[0], item); err != nil {
 		t.Fatalf("handleSandboxDestroy: %v", err)
 	}
 	if sink.count(api.EventSandboxDestroyFailed) != 1 {

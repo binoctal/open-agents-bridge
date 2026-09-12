@@ -418,7 +418,7 @@ func TestUpDrivesToRunning(t *testing.T) {
 	rp, fapi, fc, fi := newTestRT(t, testObjects(t))
 	seedManifest(t, fapi)
 
-	if err := rp.up(context.Background(), upItem()); err != nil {
+	if err := rp.up(context.Background(), upItem(), RtEndpoint{API: rp.API}); err != nil {
 		t.Fatalf("up: %v", err)
 	}
 	reports := fapi.reportsOf("inst1")
@@ -473,7 +473,7 @@ func TestUpReusesAppByNameScanWhenStateLost(t *testing.T) {
 	// no in-memory/persisted state.
 	fc.apps["app-preexisting"] = "oa-preview-m1.git:main-cigzcidikctv24ntoxjmom5y"
 
-	if err := rp.up(context.Background(), upItem()); err != nil {
+	if err := rp.up(context.Background(), upItem(), RtEndpoint{API: rp.API}); err != nil {
 		t.Fatalf("up: %v", err)
 	}
 	if fc.nextUUID != 0 {
@@ -492,7 +492,7 @@ func TestUpHonestFailOnUnsupportedNode(t *testing.T) {
 	// Overwrite the runtime.json content to the node-21 variant.
 	fapi.manifests["inst1"].Files["runtime.json"] = storeSha(t, rj)
 
-	err := rp.up(context.Background(), upItem())
+	err := rp.up(context.Background(), upItem(), RtEndpoint{API: rp.API})
 	if err == nil || !strings.Contains(err.Error(), "node major 21") {
 		t.Fatalf("unsupported node major must fail honestly, got %v", err)
 	}
@@ -501,12 +501,12 @@ func TestUpHonestFailOnUnsupportedNode(t *testing.T) {
 func TestStopTearsDownAndReports(t *testing.T) {
 	rp, fapi, fc, fi := newTestRT(t, testObjects(t))
 	seedManifest(t, fapi)
-	if err := rp.up(context.Background(), upItem()); err != nil {
+	if err := rp.up(context.Background(), upItem(), RtEndpoint{API: rp.API}); err != nil {
 		t.Fatal(err)
 	}
 	item := upItem()
 	item.Action = api.ActionRuntimeStop
-	if err := rp.stop(context.Background(), item); err != nil {
+	if err := rp.stop(context.Background(), item, RtEndpoint{API: rp.API}); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	if len(fc.stopped) != 1 || fc.stopped[0] != "app-1" {
@@ -532,7 +532,7 @@ func TestStopTearsDownAndReports(t *testing.T) {
 func TestSweepIdleStopsAfterTTL(t *testing.T) {
 	rp, fapi, fc, fi := newTestRT(t, testObjects(t))
 	seedManifest(t, fapi)
-	if err := rp.up(context.Background(), upItem()); err != nil {
+	if err := rp.up(context.Background(), upItem(), RtEndpoint{API: rp.API}); err != nil {
 		t.Fatal(err)
 	}
 	st := rp.activeFor("m1")
@@ -571,7 +571,7 @@ func TestSweepIdleStopsAfterTTL(t *testing.T) {
 func TestSweepCrashLoopReportsFailed(t *testing.T) {
 	rp, fapi, _, _ := newTestRT(t, testObjects(t))
 	seedManifest(t, fapi)
-	if err := rp.up(context.Background(), upItem()); err != nil {
+	if err := rp.up(context.Background(), upItem(), RtEndpoint{API: rp.API}); err != nil {
 		t.Fatal(err)
 	}
 	// Dead port on every probe.
@@ -605,7 +605,7 @@ func TestSweepCrashLoopReportsFailed(t *testing.T) {
 func TestRecoverReAdoptsPersistedStateWithRebaselinedWindow(t *testing.T) {
 	rp1, fapi, _, _ := newTestRT(t, testObjects(t))
 	seedManifest(t, fapi)
-	if err := rp1.up(context.Background(), upItem()); err != nil {
+	if err := rp1.up(context.Background(), upItem(), RtEndpoint{API: rp1.API}); err != nil {
 		t.Fatal(err)
 	}
 	// Traffic happened before the restart; the log holds 10 bytes.
@@ -638,7 +638,7 @@ func TestRecoverReAdoptsPersistedStateWithRebaselinedWindow(t *testing.T) {
 func TestUpAfterRestartReusesPersistedAppUUID(t *testing.T) {
 	rp1, fapi, _, _ := newTestRT(t, testObjects(t))
 	seedManifest(t, fapi)
-	if err := rp1.up(context.Background(), upItem()); err != nil {
+	if err := rp1.up(context.Background(), upItem(), RtEndpoint{API: rp1.API}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -646,7 +646,7 @@ func TestUpAfterRestartReusesPersistedAppUUID(t *testing.T) {
 	rp2, fapi2, fc2, _ := newTestRT2(t, rp1, fapi)
 	seedManifest(t, fapi2)
 	rp2.Recover()
-	if err := rp2.up(context.Background(), upItem()); err != nil {
+	if err := rp2.up(context.Background(), upItem(), RtEndpoint{API: rp2.API}); err != nil {
 		t.Fatalf("re-drive after restart: %v", err)
 	}
 	if fc2.nextUUID != 0 {
@@ -685,7 +685,7 @@ func TestUpPlacesNewAppInPerUserProject(t *testing.T) {
 
 	item := upItem()
 	item.UserID = "user_42"
-	if err := rp.up(context.Background(), item); err != nil {
+	if err := rp.up(context.Background(), item, RtEndpoint{API: rp.API}); err != nil {
 		t.Fatalf("up: %v", err)
 	}
 	if fc.ensureCalls != 1 {
@@ -703,14 +703,17 @@ func TestUpWithoutUserIDFallsBackToStaticProject(t *testing.T) {
 	rp, _, fc, _ := newTestRT(t, testObjects(t))
 	seedManifest(t, rp.API.(*fakeRTAPI))
 
-	if err := rp.up(context.Background(), upItem()); err != nil {
+	// The static fallback comes from the offering endpoint (dual-home D2),
+	// not the global config value.
+	ep := RtEndpoint{API: rp.API, BaseURL: "https://api.test", ProjectUUID: "ep-proj"}
+	if err := rp.up(context.Background(), upItem(), ep); err != nil {
 		t.Fatalf("up: %v", err)
 	}
 	if fc.ensureCalls != 0 {
 		t.Fatalf("no userId on the wire: must not touch the project seam, got %d calls", fc.ensureCalls)
 	}
-	if fc.createIn.ProjectUUID != rp.Cfg.CoolifyProjectUUID {
-		t.Fatalf("must use the static configured project, got %q", fc.createIn.ProjectUUID)
+	if fc.createIn.ProjectUUID != "ep-proj" {
+		t.Fatalf("must use the endpoint project, got %q", fc.createIn.ProjectUUID)
 	}
 }
 
@@ -721,7 +724,7 @@ func TestUpEnsureProjectErrorFailsHonest(t *testing.T) {
 
 	item := upItem()
 	item.UserID = "user_42"
-	if err := rp.up(context.Background(), item); err == nil {
+	if err := rp.up(context.Background(), item, RtEndpoint{API: rp.API}); err == nil {
 		t.Fatal("ensureProject failure must fail the up drive, not fall back")
 	}
 	if fc.nextUUID != 0 {
@@ -738,7 +741,7 @@ func TestUpEnsureProjectErrorReportsRuntimeFailed(t *testing.T) {
 
 	item := upItem()
 	item.UserID = "user_42"
-	rp.dispatch(item)
+	rp.dispatch(item, RtEndpoint{API: rp.API})
 
 	deadline := time.Now().Add(2 * time.Second)
 	var got *rtReport
@@ -757,5 +760,53 @@ func TestUpEnsureProjectErrorReportsRuntimeFailed(t *testing.T) {
 	}
 	if fc.nextUUID != 0 {
 		t.Fatal("no application may be created into the shared project")
+	}
+}
+
+// Dual-home D2 (dual-home-hosting-agent 2.3): runtime preview reports ride the
+// offering endpoint, and the sweep -- which holds no dispatch-time endpoint --
+// resolves the owning environment through the persisted APIBaseURL.
+func TestRuntimePreviewReportsRouteByOwningEndpoint(t *testing.T) {
+	rp, fapi, _, _ := newTestRT(t, testObjects(t))
+	seedManifest(t, fapi) // unused receiver: the offering endpoint is `offer`
+
+	offer := newFakeRTAPI(t, testObjects(t))
+	seedManifest(t, offer)
+	ep := RtEndpoint{API: offer, BaseURL: "https://api-env-a", ProjectUUID: "proj-a"}
+	if err := rp.up(context.Background(), upItem(), ep); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if len(offer.reportsOf("inst1")) == 0 {
+		t.Fatal("runtime_running must be reported through the offering endpoint")
+	}
+	if len(fapi.reportsOf("inst1")) != 0 {
+		t.Fatal("the configured API must not see another environment's reports")
+	}
+
+	// The persisted state carries the owner; the sweep resolves it via
+	// EndpointFor and reports runtime_stopped home.
+	st := rp.activeFor("m1")
+	if st == nil || st.APIBaseURL != "https://api-env-a" {
+		t.Fatalf("state must persist the owning endpoint, got %+v", st)
+	}
+	home := newFakeRTAPI(t, nil)
+	rp.EndpointFor = func(baseURL string) RtEndpoint {
+		if baseURL == "https://api-env-a" {
+			return RtEndpoint{API: home, BaseURL: baseURL}
+		}
+		return RtEndpoint{}
+	}
+	rp.idleStop(context.Background(), st)
+	stopped := false
+	for _, r := range home.reportsOf("inst1") {
+		if r.event == api.EventRuntimeStopped && r.idle {
+			stopped = true
+		}
+	}
+	if !stopped {
+		t.Fatal("the idle sweep must report runtime_stopped to the owning environment")
+	}
+	if len(fapi.reportsOf("inst1")) != 0 || len(offer.reportsOf("inst1")) != 1 {
+		t.Fatal("no report may leak to a non-owning endpoint")
 	}
 }

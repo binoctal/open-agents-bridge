@@ -15,6 +15,27 @@ import (
 	"strings"
 )
 
+// Endpoint is one API environment the agent serves. The single ECS node hosts
+// both staging and production Coolify projects, so the agent dual-homes
+// (dual-home-hosting-agent design D1): every loop iterates the endpoints and
+// every work-item report routes back to the endpoint that offered the item.
+type Endpoint struct {
+	// BaseURL is that environment's API worker origin,
+	// e.g. https://api-staging.openagents.top.
+	BaseURL string
+
+	// InternalSecret is that environment's X-Internal-Secret value. The two
+	// environments keep independent secrets (each is a worker-side wrangler
+	// secret), so the credential travels per endpoint, not globally.
+	InternalSecret string
+
+	// CoolifyProjectUUID is this environment's project for the runtime
+	// preview static placement fallback (items without a userId). Empty
+	// disables the static fallback for that endpoint; per-user placement
+	// (coolify-project-per-user) still works.
+	CoolifyProjectUUID string
+}
+
 // Config is the full runtime configuration of the hosting-agent.
 type Config struct {
 	// AgentID identifies this agent instance to the API (single-node today;
@@ -22,10 +43,18 @@ type Config struct {
 	// contract).
 	AgentID string
 
-	// InternalSecret is the shared infra secret (X-Internal-Secret header).
+	// Endpoints is every API environment this agent serves. Always non-empty
+	// after FromEnv validates. Populated from API_ENDPOINTS, or -- as the
+	// backward-compatible shorthand -- a single entry from API_BASE_URL +
+	// INTERNAL_SECRET (+ the global COOLIFY_PROJECT_UUID).
+	Endpoints []Endpoint
+
+	// InternalSecret is the legacy single-endpoint shorthand value (set only
+	// when API_ENDPOINTS is unset). Deprecated: read Endpoints instead.
 	InternalSecret string
 
-	// APIBaseURL is the API worker origin, e.g. https://api-staging.openagents.top.
+	// APIBaseURL is the legacy single-endpoint shorthand value (set only when
+	// API_ENDPOINTS is unset). Deprecated: read Endpoints instead.
 	APIBaseURL string
 
 	// CacheDir holds content-addressed R2 objects and bare repos
@@ -91,8 +120,9 @@ type Config struct {
 }
 
 // FromEnv builds a Config from environment variables, applying defaults and
-// validating the mandatory ones. Validation order matters: the secret first,
-// so a misconfigured deployment fails with the most actionable message.
+// validating the mandatory ones. Validation order matters: the endpoints
+// first, so a misconfigured deployment fails with the most actionable
+// message.
 func FromEnv() (*Config, error) {
 	c := &Config{
 		AgentID:              envOr("HOSTING_AGENT_ID", "primary"),
@@ -118,17 +148,80 @@ func FromEnv() (*Config, error) {
 		RuntimePreviewLogDir:         envOr("RUNTIME_PREVIEW_LOG_DIR", "/var/lib/caddy/oa-runtime"),
 	}
 
+	endpoints, err := resolveEndpoints(c.CoolifyProjectUUID)
+	if err != nil {
+		return nil, err
+	}
+	c.Endpoints = endpoints
+
 	switch {
-	case c.InternalSecret == "":
-		return nil, fmt.Errorf("INTERNAL_SECRET is required")
-	case c.APIBaseURL == "":
-		return nil, fmt.Errorf("API_BASE_URL is required")
 	case c.GitPortMin >= c.GitPortMax:
 		return nil, fmt.Errorf("GIT_HTTP_PORT_MIN (%d) must be below GIT_HTTP_PORT_MAX (%d)", c.GitPortMin, c.GitPortMax)
 	case c.RuntimePreviewPortMin >= c.RuntimePreviewPortMax:
 		return nil, fmt.Errorf("RUNTIME_PREVIEW_PORT_MIN (%d) must be below RUNTIME_PREVIEW_PORT_MAX (%d)", c.RuntimePreviewPortMin, c.RuntimePreviewPortMax)
 	}
 	return c, nil
+}
+
+// resolveEndpoints builds the endpoint list from API_ENDPOINTS (dual-home)
+// or, when unset, from the legacy API_BASE_URL + INTERNAL_SECRET shorthand.
+// API_ENDPOINTS is ';'-separated; each entry is
+// base_url|internal_secret[|coolify_project_uuid] with '|' as the field
+// separator (URLs cannot contain '|', secrets in this deployment class are
+// opaque tokens). The project field is optional: empty disables that
+// endpoint's static preview fallback.
+func resolveEndpoints(globalProjectUUID string) ([]Endpoint, error) {
+	raw := strings.TrimSpace(os.Getenv("API_ENDPOINTS"))
+	if raw == "" {
+		// Legacy shorthand: exactly one endpoint, project = the global UUID.
+		if os.Getenv("INTERNAL_SECRET") == "" {
+			return nil, fmt.Errorf("no API endpoint configured: set API_ENDPOINTS or INTERNAL_SECRET")
+		}
+		if os.Getenv("API_BASE_URL") == "" {
+			return nil, fmt.Errorf("no API endpoint configured: set API_ENDPOINTS or API_BASE_URL")
+		}
+		return []Endpoint{{
+			BaseURL:            strings.TrimRight(os.Getenv("API_BASE_URL"), "/"),
+			InternalSecret:     os.Getenv("INTERNAL_SECRET"),
+			CoolifyProjectUUID: globalProjectUUID,
+		}}, nil
+	}
+	var endpoints []Endpoint
+	seen := map[string]bool{}
+	for i, entry := range strings.Split(raw, ";") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		parts := strings.Split(entry, "|")
+		if len(parts) < 2 || len(parts) > 3 {
+			return nil, fmt.Errorf("API_ENDPOINTS entry %d: want base_url|internal_secret[|coolify_project_uuid], got %d fields", i+1, len(parts))
+		}
+		ep := Endpoint{
+			BaseURL:            strings.TrimRight(strings.TrimSpace(parts[0]), "/"),
+			InternalSecret:     strings.TrimSpace(parts[1]),
+			CoolifyProjectUUID: "",
+		}
+		if len(parts) == 3 {
+			ep.CoolifyProjectUUID = strings.TrimSpace(parts[2])
+		}
+		switch {
+		case ep.BaseURL == "":
+			return nil, fmt.Errorf("API_ENDPOINTS entry %d: base URL is empty", i+1)
+		case ep.InternalSecret == "":
+			return nil, fmt.Errorf("API_ENDPOINTS entry %d (%s): internal secret is empty", i+1, ep.BaseURL)
+		case seen[ep.BaseURL]:
+			// The same URL twice with (presumably) different secrets is a
+			// pasted-file accident, not a feature.
+			return nil, fmt.Errorf("API_ENDPOINTS entry %d: duplicate base URL %s", i+1, ep.BaseURL)
+		}
+		seen[ep.BaseURL] = true
+		endpoints = append(endpoints, ep)
+	}
+	if len(endpoints) == 0 {
+		return nil, fmt.Errorf("API_ENDPOINTS is set but contains no endpoints")
+	}
+	return endpoints, nil
 }
 
 func envOr(key, def string) string {

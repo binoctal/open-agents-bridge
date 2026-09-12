@@ -55,6 +55,18 @@ type rtAPI interface {
 	ReportRuntimePreview(ctx context.Context, instanceID, event, coolifyAppID string, idle bool, detail string) error
 }
 
+// RtEndpoint is the dispatch-time view of one served API environment
+// (dual-home-hosting-agent D2): an instance's snapshot fetches, presigns and
+// status reports all go through the endpoint that offered its work item, and
+// ProjectUUID is that environment's static Coolify placement fallback. BaseURL
+// persists into rtState so sweep- and recovery-driven reports still route to
+// the owning environment without holding a client reference on disk.
+type RtEndpoint struct {
+	API         rtAPI
+	BaseURL     string
+	ProjectUUID string
+}
+
 // RuntimePreviewConfig carries the runtime preview knobs (from config).
 type RuntimePreviewConfig struct {
 	CoolifyProjectUUID     string
@@ -89,6 +101,10 @@ type rtState struct {
 	Label        string    `json:"label"`
 	Host         string    `json:"host"`
 	StartedAt    time.Time `json:"startedAt"`
+	// APIBaseURL is the owning environment's API origin (dual-home D2):
+	// persisted so idle-sweep and post-restart reports route home even
+	// though the sweep holds no dispatch-time endpoint reference.
+	APIBaseURL string `json:"apiBaseUrl"`
 
 	// Idle tracking (in-memory re-baselined on load).
 	LastAccess time.Time `json:"-"`
@@ -106,6 +122,12 @@ type RuntimePreviews struct {
 	Store   *store.Store
 	GitHTTP *githttp.Manager
 	Cfg     RuntimePreviewConfig
+
+	// EndpointFor resolves a persisted APIBaseURL back to a live endpoint
+	// for sweep- and recovery-driven reports (dual-home D2). nil (or a
+	// miss) falls back to API + the static project -- single-endpoint
+	// setups and the existing tests keep working unchanged.
+	EndpointFor func(baseURL string) RtEndpoint
 
 	// dial is the liveness/readiness seam (tests inject).
 	dial func(ctx context.Context, port int) error
@@ -194,8 +216,9 @@ func generateDockerfile(m runtimeManifest) []byte {
 // Coolify build takes minutes; the shared poll loop must not block on it):
 // the in-flight claim is held by the goroutine, so re-offers during the build
 // are skipped, and the API re-offers after an agent restart (status-driven
-// convergence, design D6).
-func (rp *RuntimePreviews) dispatch(item api.WorkItem) {
+// convergence, design D6). ep is the offering endpoint (dual-home D2): every
+// exchange the drive makes -- snapshot, presign, reports -- goes through it.
+func (rp *RuntimePreviews) dispatch(item api.WorkItem, ep RtEndpoint) {
 	if rp == nil || item.InstanceID == "" {
 		return
 	}
@@ -209,16 +232,16 @@ func (rp *RuntimePreviews) dispatch(item api.WorkItem) {
 			// Generous fixed window: a dockerfile build is minutes, not seconds.
 			ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 10*time.Minute)
 			defer cancel()
-			if err := rp.up(ctx, item); err != nil {
-				rp.report(ctx, item.InstanceID, api.EventRuntimeFailed, "", false, err.Error())
+			if err := rp.up(ctx, item, ep); err != nil {
+				rp.reportTo(ctx, ep.API, item.InstanceID, api.EventRuntimeFailed, "", false, err.Error())
 			}
 		}()
 	case api.ActionRuntimeStop:
 		defer rp.release(item.InstanceID)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		if err := rp.stop(ctx, item); err != nil {
-			rp.report(ctx, item.InstanceID, api.EventRuntimeFailed, "", false, err.Error())
+		if err := rp.stop(ctx, item, ep); err != nil {
+			rp.reportTo(ctx, ep.API, item.InstanceID, api.EventRuntimeFailed, "", false, err.Error())
 		}
 	default:
 		rp.release(item.InstanceID)
@@ -252,8 +275,8 @@ func (rp *RuntimePreviews) release(instanceID string) {
 // find-or-create the Coolify app -> deploy -> readiness -> route + access log
 // -> report. Every step is idempotent, so an agent restart's re-offer of the
 // same activating row re-converges instead of duplicating state.
-func (rp *RuntimePreviews) up(ctx context.Context, item api.WorkItem) error {
-	manifest, err := rp.API.FetchRuntimeSnapshot(ctx, item.InstanceID)
+func (rp *RuntimePreviews) up(ctx context.Context, item api.WorkItem, ep RtEndpoint) error {
+	manifest, err := ep.API.FetchRuntimeSnapshot(ctx, item.InstanceID)
 	if err != nil {
 		return fmt.Errorf("fetch snapshot: %w", err)
 	}
@@ -267,7 +290,7 @@ func (rp *RuntimePreviews) up(ctx context.Context, item api.WorkItem) error {
 	}
 
 	presign := func(ctx context.Context, shas []string) (*api.PresignResponse, error) {
-		return rp.API.RuntimePresign(ctx, item.InstanceID, shas)
+		return ep.API.RuntimePresign(ctx, item.InstanceID, shas)
 	}
 	if err := rp.Store.FetchMissing(ctx, files, presign); err != nil {
 		return fmt.Errorf("fetch objects: %w", err)
@@ -292,7 +315,7 @@ func (rp *RuntimePreviews) up(ctx context.Context, item api.WorkItem) error {
 		return fmt.Errorf("serve repo: %w", err)
 	}
 
-	appUUID, err := rp.findOrCreateApp(ctx, item.MissionID, item.UserID, repoKey, gitPort)
+	appUUID, err := rp.findOrCreateApp(ctx, item.MissionID, item.UserID, repoKey, gitPort, ep.ProjectUUID)
 	if err != nil {
 		return fmt.Errorf("coolify app: %w", err)
 	}
@@ -347,6 +370,7 @@ func (rp *RuntimePreviews) up(ctx context.Context, item api.WorkItem) error {
 		Label:        rp.labelOf(item.Host),
 		Host:         item.Host,
 		StartedAt:    time.Now().UTC(),
+		APIBaseURL:   ep.BaseURL,
 		LastAccess:   time.Now().UTC(),
 	}
 	rp.setActive(item.MissionID, st)
@@ -355,7 +379,7 @@ func (rp *RuntimePreviews) up(ctx context.Context, item api.WorkItem) error {
 		// (name scan) and an idle-window reset. Log-worthy, not fatal.
 		_ = err
 	}
-	rp.report(ctx, item.InstanceID, api.EventRuntimeRunning, appUUID, false, "")
+	rp.reportTo(ctx, ep.API, item.InstanceID, api.EventRuntimeRunning, appUUID, false, "")
 	return nil
 }
 
@@ -375,8 +399,9 @@ func (rp *RuntimePreviews) labelOf(host string) string {
 // a manually deleted app must not 404-loop the drive. The create branch
 // places the app in the owner's per-user project when the work item carries
 // a userId (coolify-project-per-user); without one (old-API wire) it falls
-// back to the static configured project (design D4).
-func (rp *RuntimePreviews) findOrCreateApp(ctx context.Context, missionID, userID, repoKey string, gitPort int) (string, error) {
+// back to fallbackProject -- the offering endpoint's project (dual-home D2),
+// not the global config value.
+func (rp *RuntimePreviews) findOrCreateApp(ctx context.Context, missionID, userID, repoKey string, gitPort int, fallbackProject string) (string, error) {
 	name := repoKey // Coolify derives the name from the repo basename
 	if st := rp.activeFor(missionID); st != nil && st.CoolifyAppID != "" {
 		if app, err := rp.Coolify.GetApplication(ctx, st.CoolifyAppID); err == nil && app != nil {
@@ -403,7 +428,7 @@ func (rp *RuntimePreviews) findOrCreateApp(ctx context.Context, missionID, userI
 		}
 	}
 	gitURL := fmt.Sprintf("http://%s:%d/%s.git", rp.Cfg.GitBindHost, gitPort, repoKey)
-	projectUUID := rp.Cfg.CoolifyProjectUUID
+	projectUUID := fallbackProject
 	if userID != "" {
 		var err error
 		projectUUID, err = rp.Coolify.EnsureProject(ctx, coolify.PerUserProjectName(userID))
@@ -522,8 +547,9 @@ func (rp *RuntimePreviews) awaitReadiness(ctx context.Context, port int) error {
 
 // stop tears one instance down: container stopped (app + repo kept for the
 // next activate), route and access log detached, state dropped, reported with
-// idle=false (a user-visible stop).
-func (rp *RuntimePreviews) stop(ctx context.Context, item api.WorkItem) error {
+// idle=false (a user-visible stop). The report goes to the endpoint that
+// offered the stop item (dual-home D2).
+func (rp *RuntimePreviews) stop(ctx context.Context, item api.WorkItem, ep RtEndpoint) error {
 	st := rp.activeFor(item.MissionID)
 	if st == nil {
 		// Not tracked (already stopped, or a restart lost the state): the
@@ -544,7 +570,7 @@ func (rp *RuntimePreviews) stop(ctx context.Context, item api.WorkItem) error {
 	if err != nil {
 		return err
 	}
-	rp.report(ctx, item.InstanceID, api.EventRuntimeStopped, appID, false, "")
+	rp.reportTo(ctx, ep.API, item.InstanceID, api.EventRuntimeStopped, appID, false, "")
 	return nil
 }
 
@@ -580,7 +606,9 @@ func (rp *RuntimePreviews) teardown(ctx context.Context, st *rtState, missionID 
 }
 
 // idleStop is stop driven by the sweep: same teardown, but the single report
-// carries idle=true so the API stamps idle_stopped_at (design D3).
+// carries idle=true so the API stamps idle_stopped_at (design D3). The sweep
+// holds no dispatch-time endpoint, so the report routes via the instance's
+// persisted owner (dual-home D2).
 func (rp *RuntimePreviews) idleStop(ctx context.Context, st *rtState) {
 	appID, err := rp.teardown(ctx, st, st.MissionID)
 	if err != nil {
@@ -588,7 +616,7 @@ func (rp *RuntimePreviews) idleStop(ctx context.Context, st *rtState) {
 		_ = err
 		return
 	}
-	rp.report(ctx, st.InstanceID, api.EventRuntimeStopped, appID, true, "idle")
+	rp.reportTo(ctx, rp.endpointFor(st.APIBaseURL).API, st.InstanceID, api.EventRuntimeStopped, appID, true, "idle")
 }
 
 // ─── idle sweep + liveness (tasks 5.4/5.5) ─────────────────────────────────
@@ -684,7 +712,7 @@ func (rp *RuntimePreviews) probeAlive(ctx context.Context, st *rtState) bool {
 	delete(rp.byMission, st.MissionID)
 	rp.mu.Unlock()
 	rp.unpersist(st.MissionID)
-	rp.report(ctx, st.InstanceID, api.EventRuntimeFailed, st.CoolifyAppID, false,
+	rp.reportTo(ctx, rp.endpointFor(st.APIBaseURL).API, st.InstanceID, api.EventRuntimeFailed, st.CoolifyAppID, false,
 		fmt.Sprintf("port %d dead after %d consecutive probes (crash-loop)", st.Port, 3))
 	return false
 }
@@ -799,12 +827,31 @@ func (rp *RuntimePreviews) PrePullImages(ctx context.Context) {
 
 // ─── report ────────────────────────────────────────────────────────────────
 
-// report posts one runtime preview event; failures are logged by the caller
-// path (the API re-offers unconverged rows, so a dropped report self-heals).
-func (rp *RuntimePreviews) report(ctx context.Context, instanceID, event, coolifyAppID string, idle bool, detail string) {
-	if err := rp.API.ReportRuntimePreview(ctx, instanceID, event, coolifyAppID, idle, detail); err != nil {
+// reportTo posts one runtime preview event through the given endpoint
+// (dual-home D2: the endpoint that offered the item, or the persisted owner
+// for sweep-driven reports); failures are absorbed (the API re-offers
+// unconverged rows, so a dropped report self-heals).
+func (rp *RuntimePreviews) reportTo(ctx context.Context, cl rtAPI, instanceID, event, coolifyAppID string, idle bool, detail string) {
+	if cl == nil {
+		cl = rp.API
+	}
+	if err := cl.ReportRuntimePreview(ctx, instanceID, event, coolifyAppID, idle, detail); err != nil {
 		// Nothing to log through here without a Logf seam; the in-flight
 		// claim is released either way and the API re-offers.
 		_ = err
 	}
+}
+
+// endpointFor resolves a persisted APIBaseURL back to a live endpoint for
+// sweep- and recovery-driven reports (dual-home D2). No resolver (or a miss:
+// an endpoint removed from the config while its instances still live) falls
+// back to the single configured API -- the report may 404 there, but a lost
+// report self-heals via re-offer, unlike a silently dropped one.
+func (rp *RuntimePreviews) endpointFor(baseURL string) RtEndpoint {
+	if rp.EndpointFor != nil {
+		if ep := rp.EndpointFor(baseURL); ep.API != nil {
+			return ep
+		}
+	}
+	return RtEndpoint{API: rp.API, ProjectUUID: rp.Cfg.CoolifyProjectUUID}
 }

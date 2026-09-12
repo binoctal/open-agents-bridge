@@ -190,13 +190,15 @@ func (a *Agent) verifySandboxImage(ctx context.Context, item api.WorkItem) (stri
 // its container id. A name conflict means the container is already up under
 // this fixed name -- a re-offer after a lost report -- so the existing id is
 // inspected and reported instead of failing.
-func (a *Agent) handleSandboxUp(ctx context.Context, item api.WorkItem) error {
+func (a *Agent) handleSandboxUp(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {
+	// Reports go to the offering endpoint (D2); a 401 retires it (D3).
 	report := func(event, containerID, detail string) error {
-		if err := a.Client.ReportSandbox(ctx, item.SandboxID, event, containerID, detail); err != nil {
+		if err := ep.Client.ReportSandbox(ctx, item.SandboxID, event, containerID, detail); err != nil {
 			if api.Unauthorized(err) {
-				return err
+				a.disableEndpoint(ep)
+			} else {
+				a.logf("sandbox %s: report %s failed: %v", item.SandboxID, event, err)
 			}
-			a.logf("sandbox %s: report %s failed: %v", item.SandboxID, event, err)
 		}
 		return nil
 	}
@@ -245,13 +247,14 @@ func (a *Agent) handleSandboxUp(ctx context.Context, item api.WorkItem) error {
 
 // handleSandboxDestroy force-removes the container. "No such container" is
 // success -- the box is gone, which is all this action promises.
-func (a *Agent) handleSandboxDestroy(ctx context.Context, item api.WorkItem) error {
+func (a *Agent) handleSandboxDestroy(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {
 	report := func(event, detail string) error {
-		if err := a.Client.ReportSandbox(ctx, item.SandboxID, event, "", detail); err != nil {
+		if err := ep.Client.ReportSandbox(ctx, item.SandboxID, event, "", detail); err != nil {
 			if api.Unauthorized(err) {
-				return err
+				a.disableEndpoint(ep)
+			} else {
+				a.logf("sandbox %s: report %s failed: %v", item.SandboxID, event, err)
 			}
-			a.logf("sandbox %s: report %s failed: %v", item.SandboxID, event, err)
 		}
 		return nil
 	}

@@ -44,8 +44,21 @@ func run() error {
 		}
 	}
 
-	client := api.New(cfg.APIBaseURL, cfg.AgentID, cfg.InternalSecret)
-	st := store.New(cfg.CacheDir, client)
+	// One client per endpoint (dual-home-hosting-agent D1): each carries its
+	// environment's base URL + internal secret, so work items report and
+	// presign home to the environment that offered them (D2). The store's
+	// default Presigner is the first endpoint -- hosted deployments pin the
+	// offering endpoint per call via MaterializeVia.
+	eps := make([]agent.APIEndpoint, 0, len(cfg.Endpoints))
+	for _, ep := range cfg.Endpoints {
+		eps = append(eps, agent.APIEndpoint{
+			Client:             api.New(ep.BaseURL, cfg.AgentID, ep.InternalSecret),
+			BaseURL:            ep.BaseURL,
+			CoolifyProjectUUID: ep.CoolifyProjectUUID,
+		})
+	}
+	primary := eps[0].Client
+	st := store.New(cfg.CacheDir, primary)
 	git := githttp.New(cfg.CacheDir+"/repos", cfg.GitBindHost, cfg.GitPortMin, cfg.GitPortMax)
 
 	// One concrete Caddy writer serves both seams: the route-only Ingress
@@ -65,7 +78,17 @@ func run() error {
 	if coolifyClient.Configured() && cfg.CoolifyProjectUUID != "" && cfg.CoolifyServerUUID != "" {
 		rt = &agent.RuntimePreviews{
 			Coolify: coolifyClient,
-			API:     client,
+			API:     primary,
+			// Sweep/recover reports resolve their owning environment through
+			// the persisted APIBaseURL (dual-home D2).
+			EndpointFor: func(baseURL string) agent.RtEndpoint {
+				for _, ep := range eps {
+					if ep.BaseURL == baseURL {
+						return agent.RtEndpoint{API: ep.Client, BaseURL: ep.BaseURL, ProjectUUID: ep.CoolifyProjectUUID}
+					}
+				}
+				return agent.RtEndpoint{}
+			},
 			Ingress: caddy, // nil-ingress-safe when Caddy is off
 			Store:   st,
 			GitHTTP: git,
@@ -86,7 +109,7 @@ func run() error {
 	}
 
 	a := &agent.Agent{
-		Client:            client,
+		Endpoints:         eps,
 		Store:             st,
 		GitHTTP:           git,
 		Ingress:           routes,

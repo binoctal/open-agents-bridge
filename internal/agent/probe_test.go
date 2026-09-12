@@ -81,7 +81,7 @@ func TestHandleProbeStreakGate(t *testing.T) {
 	}
 	item := api.WorkItem{DeploymentID: "d1", MissionID: "m1", Action: api.ActionProbe, AppPort: 30000}
 	probe := func() {
-		if err := a.handleProbe(context.Background(), item); err != nil {
+		if err := a.handleProbe(context.Background(), a.endpoints()[0], item); err != nil {
 			t.Fatalf("handleProbe: %v", err)
 		}
 	}
