@@ -13,8 +13,13 @@ func TestParseDockerSize(t *testing.T) {
 		{"1.5GiB", 1610612736, true},
 		{"2048KiB", 2 * 1024 * 1024, true},
 		{"0B", 0, true},
+		// NetIO renders decimal SI on docker 26 (staging 5.3 cross-check:
+		// "1.46MB"-style tx halves were silently parsed as 0 before this).
+		{"1.46MB", 1_460_000, true},
+		{"454kB", 454_000, true},
+		{"20.7GB", 20_700_000_000, true},
+		{"2TB", 2_000_000_000_000, true},
 		{"", 0, false},
-		{"77.3 MB", 0, false}, // decimal units never appear in docker stats
 		{"abc", 0, false},
 	}
 	for _, c := range cases {
@@ -47,9 +52,12 @@ func TestSplitNetIOTx(t *testing.T) {
 		{"819B / 2048KiB", 2 * 1024 * 1024, true},
 		{"1.5MiB / 0B", 0, true},
 		{"1.5MiB / 77.3MiB", 81_054_924, true},
-		{"1.5MiB /", 0, false},          // empty tx half
-		{"1.5MiB 3.2GiB", 0, false},     // no separator
-		{"1.5MiB / 77.3 MB", 0, false},  // decimal units never appear in docker stats
+		// Live docker-26 shapes (node capture 2026-09-13): NetIO is decimal SI.
+		{"53.7MB / 1.46MB", 1_460_000, true},
+		{"454kB / 290kB", 290_000, true},
+		{"2.48MB / 44.8MB", 44_800_000, true},
+		{"1.5MiB /", 0, false},      // empty tx half
+		{"1.5MiB 3.2GiB", 0, false}, // no separator
 		{"", 0, false},
 	}
 	for _, c := range cases {

@@ -647,8 +647,11 @@ func splitNetIOTx(s string) (uint64, bool) {
 	return parseDockerSize(halves[1])
 }
 
-// parseDockerSize converts docker's human sizes ("77.3MiB", "1.5GiB", "512B")
-// to bytes.
+// parseDockerSize converts docker's human sizes to bytes. Two suffix families
+// are live on the node (docker 26.1.3, verified 2026-09-13): MemUsage renders
+// IEC ("77.3MiB", "1.5GiB") while NetIO renders decimal SI ("1.46MB", "454kB",
+// "20.7GB") -- the SI family silently parsed as 0 until a staging sample
+// cross-check caught it (launch-plus-plan-guardrails 5.3).
 func parseDockerSize(s string) (uint64, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -662,6 +665,14 @@ func parseDockerSize(s string) (uint64, bool) {
 		mult, s = 1024*1024, s[:len(s)-3]
 	case strings.HasSuffix(s, "KiB"):
 		mult, s = 1024, s[:len(s)-3]
+	case strings.HasSuffix(s, "TB"):
+		mult, s = 1000*1000*1000*1000, s[:len(s)-2]
+	case strings.HasSuffix(s, "GB"):
+		mult, s = 1000*1000*1000, s[:len(s)-2]
+	case strings.HasSuffix(s, "MB"):
+		mult, s = 1000*1000, s[:len(s)-2]
+	case strings.HasSuffix(s, "kB"):
+		mult, s = 1000, s[:len(s)-2]
 	case strings.HasSuffix(s, "B"):
 		s = s[:len(s)-1]
 	default:
