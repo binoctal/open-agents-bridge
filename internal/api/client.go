@@ -359,7 +359,12 @@ func (c *Client) ReportWatermark(ctx context.Context, w Watermark) error {
 type UsageSample struct {
 	CoolifyAppID string `json:"coolifyAppId"`
 	MemoryBytes  uint64 `json:"memoryBytes"`
-	TS           string `json:"ts"`
+	// Cumulative egress counter since container start (docker stats NetIO tx
+	// half; launch-plus-plan-guardrails D1). NOT a delta -- the API's hourly
+	// rollup derives per-hour deltas and guards counter resets. Zero when the
+	// stats line carried no parseable NetIO column.
+	TxBytes uint64 `json:"txBytes"`
+	TS      string `json:"ts"`
 }
 
 // ReportUsage posts a batch of per-container samples. The API resolves tenant

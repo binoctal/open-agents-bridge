@@ -592,20 +592,30 @@ func CollectUsageSamples(ctx context.Context, now time.Time) []api.UsageSample {
 		return nil
 	}
 	statsOut, err := exec.CommandContext(ctx, "docker", "stats", "--no-stream",
-		"--format", "{{.ID}}\t{{.MemUsage}}").Output()
+		"--format", "{{.ID}}\t{{.MemUsage}}\t{{.NetIO}}").Output()
 	if err != nil {
 		return nil
 	}
 	memByID := make(map[string]uint64)
+	txByID := make(map[string]uint64)
 	for _, line := range strings.Split(string(statsOut), "\n") {
-		fields := strings.SplitN(line, "\t", 2)
-		if len(fields) != 2 {
+		fields := strings.SplitN(line, "\t", 3)
+		if len(fields) < 2 {
 			continue
 		}
 		// MemUsage renders as "used / limit"; the used half is the reading.
 		used := strings.SplitN(fields[1], "/", 2)[0]
 		if b, ok := parseDockerSize(used); ok {
 			memByID[fields[0]] = b
+		}
+		// NetIO renders as "rx / tx" (launch-plus-plan-guardrails D1): the tx
+		// half after "/" is the cumulative egress counter since container
+		// start. Missing/unparseable column leaves 0 -- the rollup treats a
+		// zero-to-N jump as a fresh counter, which over-counts nothing.
+		if len(fields) == 3 {
+			if tx, ok := splitNetIOTx(fields[2]); ok {
+				txByID[fields[0]] = tx
+			}
 		}
 	}
 	ts := now.Format(time.RFC3339Nano)
@@ -619,11 +629,22 @@ func CollectUsageSamples(ctx context.Context, now time.Time) []api.UsageSample {
 			samples = append(samples, api.UsageSample{
 				CoolifyAppID: fields[1],
 				MemoryBytes:  mem,
+				TxBytes:      txByID[fields[0]],
 				TS:           ts,
 			})
 		}
 	}
 	return samples
+}
+
+// splitNetIOTx extracts the tx half of docker stats' NetIO column ("rx / tx",
+// e.g. "1.5MiB / 3.2GiB") as a byte count.
+func splitNetIOTx(s string) (uint64, bool) {
+	halves := strings.SplitN(s, "/", 2)
+	if len(halves) != 2 {
+		return 0, false
+	}
+	return parseDockerSize(halves[1])
 }
 
 // parseDockerSize converts docker's human sizes ("77.3MiB", "1.5GiB", "512B")
