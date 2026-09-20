@@ -208,12 +208,16 @@ const (
 	EventRuntimeFailed  = "runtime_failed"
 )
 
-// GetWork fetches the current work list.
+// GetWork fetches the current work list. agent_id keys the deployment and
+// runtime-preview halves to THIS node (multi-node scheduling): the API only
+// returns rows whose node_id matches. Older APIs ignore the parameter, so
+// the upgrade order is free.
 func (c *Client) GetWork(ctx context.Context) ([]WorkItem, error) {
 	var out struct {
 		Items []WorkItem `json:"items"`
 	}
-	if err := c.getJSON(ctx, "/internal/hosting-agent/work", &out); err != nil {
+	path := "/internal/hosting-agent/work?agent_id=" + url.QueryEscape(c.AgentID)
+	if err := c.getJSON(ctx, path, &out); err != nil {
 		return nil, err
 	}
 	return out.Items, nil
