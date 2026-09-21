@@ -1,6 +1,10 @@
 package updater
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -154,22 +158,23 @@ func CheckUpdate() (*UpdateResult, error) {
 	return result, nil
 }
 
-// GetAssetForPlatform returns the download URL for current platform
+// GetAssetForPlatform returns the download URL for current platform.
+// Release assets are archives named open-agents-bridge_<ver>_<goos>_<goarch>.tar.gz
+// (or .zip on Windows), so the platform token is matched against the archive
+// stem — not a bare binary suffix, which never matched any asset.
 func GetAssetForPlatform(release *Release) string {
-	suffix := fmt.Sprintf("%s_%s", runtime.GOOS, runtime.GOARCH)
-	if runtime.GOOS == "windows" {
-		suffix += ".exe"
-	}
+	token := fmt.Sprintf("_%s_%s.", runtime.GOOS, runtime.GOARCH)
 
 	for _, asset := range release.Assets {
-		if strings.Contains(asset.Name, suffix) {
+		if strings.Contains(asset.Name, token) {
 			return asset.DownloadURL
 		}
 	}
 	return ""
 }
 
-// DownloadUpdate downloads the new binary with progress
+// DownloadUpdate downloads the release archive and extracts the bridge
+// binary from it, returning the path of the extracted executable.
 func DownloadUpdate(url string) (string, error) {
 	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Get(url)
@@ -182,17 +187,86 @@ func DownloadUpdate(url string) (string, error) {
 		return "", fmt.Errorf("download returned %d", resp.StatusCode)
 	}
 
+	binaryName := "open-agents-bridge"
+	if runtime.GOOS == "windows" {
+		binaryName += ".exe"
+	}
+
+	switch {
+	case strings.HasSuffix(url, ".zip"):
+		return extractFromZip(resp.Body, binaryName)
+	default:
+		// goreleaser ships .tar.gz for non-Windows platforms
+		return extractFromTarGz(resp.Body, binaryName)
+	}
+}
+
+func extractFromTarGz(r io.Reader, binaryName string) (string, error) {
+	gzr, err := gzip.NewReader(r)
+	if err != nil {
+		return "", fmt.Errorf("read gzip: %w", err)
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return "", fmt.Errorf("binary %s not found in archive", binaryName)
+		}
+		if err != nil {
+			return "", fmt.Errorf("read tar: %w", err)
+		}
+		if filepath.Base(hdr.Name) != binaryName || hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		return writeTempExecutable(tr)
+	}
+}
+
+func extractFromZip(r io.Reader, binaryName string) (string, error) {
+	// archive/zip needs a ReaderAt; buffer the download first
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return "", err
+	}
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return "", fmt.Errorf("read zip: %w", err)
+	}
+	for _, f := range zr.File {
+		if filepath.Base(f.Name) != binaryName || f.FileInfo().IsDir() {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return "", err
+		}
+		path, werr := writeTempExecutable(rc)
+		rc.Close()
+		return path, werr
+	}
+	return "", fmt.Errorf("binary %s not found in archive", binaryName)
+}
+
+func writeTempExecutable(r io.Reader) (string, error) {
 	tmpFile, err := os.CreateTemp("", "open-agents-bridge-update-*")
 	if err != nil {
 		return "", err
 	}
-	defer tmpFile.Close()
-
-	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+	if _, err := io.Copy(tmpFile, r); err != nil {
+		tmpFile.Close()
 		os.Remove(tmpFile.Name())
 		return "", err
 	}
-
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpFile.Name())
+		return "", err
+	}
+	if err := os.Chmod(tmpFile.Name(), 0755); err != nil {
+		os.Remove(tmpFile.Name())
+		return "", err
+	}
 	return tmpFile.Name(), nil
 }
 
