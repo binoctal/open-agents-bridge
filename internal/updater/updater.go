@@ -203,23 +203,36 @@ func ApplyUpdate(newBinary string) error {
 		return err
 	}
 	currentPath, _ = filepath.Abs(currentPath)
+	return applyUpdateTo(currentPath, newBinary)
+}
+
+// applyUpdateTo swaps the binary at dst for newBinary.
+func applyUpdateTo(dst, newBinary string) error {
+	// Stage the new binary next to the target so the final rename never
+	// crosses a filesystem boundary (e.g. /tmp tmpfs vs ~/.local on another
+	// mount, where os.Rename fails with "invalid cross-device link").
+	stagePath, err := stageNextTo(dst, newBinary)
+	if err != nil {
+		return fmt.Errorf("stage failed: %w", err)
+	}
+	defer os.Remove(stagePath)
 
 	// Backup current binary
-	backupPath := currentPath + ".bak"
+	backupPath := dst + ".bak"
 	os.Remove(backupPath)
-	if err := os.Rename(currentPath, backupPath); err != nil {
+	if err := os.Rename(dst, backupPath); err != nil {
 		return fmt.Errorf("backup failed: %w", err)
 	}
 
-	// Move new binary
-	if err := os.Rename(newBinary, currentPath); err != nil {
+	// Move staged binary into place (same directory, same filesystem)
+	if err := os.Rename(stagePath, dst); err != nil {
 		// Restore backup on failure
-		os.Rename(backupPath, currentPath)
+		os.Rename(backupPath, dst)
 		return fmt.Errorf("replace failed: %w", err)
 	}
 
 	// Make executable
-	if err := os.Chmod(currentPath, 0755); err != nil {
+	if err := os.Chmod(dst, 0755); err != nil {
 		return fmt.Errorf("chmod failed: %w", err)
 	}
 
@@ -227,6 +240,37 @@ func ApplyUpdate(newBinary string) error {
 	os.Remove(backupPath)
 
 	return nil
+}
+
+// stageNextTo copies src into a temp file in dst's directory, marked
+// executable, so renaming it over dst stays on one filesystem.
+func stageNextTo(dst, src string) (string, error) {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return "", err
+	}
+	defer srcFile.Close()
+
+	stage, err := os.CreateTemp(filepath.Dir(dst), ".open-agents-bridge-stage-*")
+	if err != nil {
+		return "", err
+	}
+	stageName := stage.Name()
+
+	if _, err := io.Copy(stage, srcFile); err != nil {
+		stage.Close()
+		os.Remove(stageName)
+		return "", err
+	}
+	if err := stage.Close(); err != nil {
+		os.Remove(stageName)
+		return "", err
+	}
+	if err := os.Chmod(stageName, 0755); err != nil {
+		os.Remove(stageName)
+		return "", err
+	}
+	return stageName, nil
 }
 
 // ShouldCheck returns true if enough time has passed since last check
