@@ -229,6 +229,37 @@ func (s *replaySink) sendTaskAnswer(taskID, answer string) {
 	}
 }
 
+// sendPermissionResponse delivers the web client's approval, exactly as the
+// room would forward it after a user click (or a rule firing).
+func (s *replaySink) sendPermissionResponse(id interface{}, optionID string, approved bool) {
+	s.t.Helper()
+	msg := Message{
+		Type: "permission:response",
+		Payload: map[string]interface{}{
+			"id":       id,
+			"deviceId": "device-replay",
+			"approved": approved,
+			"optionId": optionID,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		s.t.Fatalf("marshal permission:response: %v", err)
+	}
+	s.mu.Lock()
+	conn := s.wsConn
+	s.mu.Unlock()
+	if conn == nil {
+		s.t.Fatal("sendPermissionResponse: bridge WS not connected yet")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		s.t.Fatalf("write permission:response: %v", err)
+	}
+}
+
 // sendHandshakeMismatch delivers the server's pairing verdict over the WS,
 // exactly as the real room would after evaluating a capability report.
 func (s *replaySink) sendHandshakeMismatch() {

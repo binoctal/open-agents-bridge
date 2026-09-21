@@ -1,12 +1,15 @@
 package session
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	configpkg "github.com/binoctal/open-agents-bridge/internal/config"
 	"github.com/binoctal/open-agents-bridge/internal/logger"
 	"github.com/binoctal/open-agents-bridge/internal/protocol"
 )
@@ -308,6 +311,45 @@ func (m *Manager) GetStats() map[string]int {
 	return stats
 }
 
+// claudeACPModeDir returns the isolated CLAUDE_CONFIG_DIR for one bridge
+// permission mode, creating its settings.json if absent or stale (idempotent).
+//
+// Forensics 2026-09-22 (fix-bridge-session-integrity, /tmp/oa-evidence/): the
+// ACP adapter derives permissionMode ONLY from a settings file
+// (permissions.defaultMode). CLAUDE_PERMISSION_MODE env is read by nobody,
+// and CLI-style args never reach the claude binary (they go to the adapter
+// process, which has no CLI parsing). Worse: without an isolated config dir
+// the adapter reads the HOST's ~/.claude/settings.json, leaking the host's
+// defaultMode/allow rules into a managed agent — a bridge running under a
+// host with defaultMode "auto" silently auto-approved everything. This
+// directory is the only channel that works.
+func claudeACPModeDir(permissionMode string) (string, error) {
+	mapped, known := map[string]string{
+		"default":      "default",
+		"accept-edits": "acceptEdits",
+		"accept-all":   "bypassPermissions",
+		"plan":         "plan",
+	}[permissionMode]
+	if !known {
+		// Unknown mode must still isolate: falling through to the host's
+		// settings is the leak this function exists to prevent.
+		mapped = "default"
+	}
+	dir := filepath.Join(configpkg.ConfigDir(), "claude-acp-config", mapped)
+	settings := []byte(fmt.Sprintf("{\"permissions\":{\"defaultMode\":%q}}\n", mapped))
+	settingsPath := filepath.Join(dir, "settings.json")
+	if existing, err := os.ReadFile(settingsPath); err == nil && bytes.Equal(existing, settings) {
+		return dir, nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create claude ACP config dir: %w", err)
+	}
+	if err := os.WriteFile(settingsPath, settings, 0o644); err != nil {
+		return "", fmt.Errorf("write claude ACP settings: %w", err)
+	}
+	return dir, nil
+}
+
 // applyPermissionMode configures the adapter based on permission mode
 func (m *Manager) applyPermissionMode(permissionMode, cliType string, config *protocol.AdapterConfig) {
 	logger.Debug("[%s] Applying permission mode: %s for CLI: %s", logger.ModSession, permissionMode, cliType)
@@ -317,12 +359,28 @@ func (m *Manager) applyPermissionMode(permissionMode, cliType string, config *pr
 		config.CustomEnv = make(map[string]string)
 	}
 
+	// claude ACP: see claudeACPModeDir — the settings file is the only working
+	// channel, and it must be set for EVERY mode (including default) or the
+	// host's own claude settings leak in.
+	if cliType == "claude" {
+		dir, err := claudeACPModeDir(permissionMode)
+		if err != nil {
+			// Deliberately not fatal: the session still runs, just with the
+			// adapter's own defaults instead of the requested mode.
+			logger.Warn("[%s] claude ACP permission isolation failed, mode %s may not apply: %v", logger.ModSession, permissionMode, err)
+			return
+		}
+		config.CustomEnv["CLAUDE_CONFIG_DIR"] = dir
+		return
+	}
+
 	switch permissionMode {
 	case "accept-all":
 		// Auto-accept all operations
 		switch cliType {
-		case "claude", "claude-pty":
-			config.CustomEnv["CLAUDE_PERMISSION_MODE"] = "accept-all"
+		case "claude-pty":
+			// PTY runs the real claude REPL: its CLI flags are honored (unlike
+			// the ACP adapter, which ignores args entirely).
 			config.Args = append(config.Args, "--dangerously-skip-permissions")
 		case "qwen":
 			config.CustomEnv["QWEN_PERMISSION_MODE"] = "accept-all"
@@ -338,8 +396,10 @@ func (m *Manager) applyPermissionMode(permissionMode, cliType string, config *pr
 	case "accept-edits":
 		// Auto-accept file edits only
 		switch cliType {
-		case "claude", "claude-pty":
-			config.CustomEnv["CLAUDE_PERMISSION_MODE"] = "accept-edits"
+		case "claude-pty":
+			// The REPL has no accept-edits flag; its settings file is the
+			// channel, but the PTY path deliberately stays minimal — edit
+			// approvals surface as interactive prompts instead.
 		case "qwen":
 			config.CustomEnv["QWEN_PERMISSION_MODE"] = "accept-edits"
 		case "goose":
@@ -355,8 +415,7 @@ func (m *Manager) applyPermissionMode(permissionMode, cliType string, config *pr
 	case "plan":
 		// Plan mode - show plan before execution
 		switch cliType {
-		case "claude", "claude-pty":
-			config.CustomEnv["CLAUDE_PERMISSION_MODE"] = "plan"
+		case "claude-pty":
 			config.Args = append(config.Args, "--plan")
 		case "qwen":
 			config.CustomEnv["QWEN_PERMISSION_MODE"] = "plan"

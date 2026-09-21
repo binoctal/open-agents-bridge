@@ -1,9 +1,13 @@
 package session
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	configpkg "github.com/binoctal/open-agents-bridge/internal/config"
 	"github.com/binoctal/open-agents-bridge/internal/protocol"
 )
 
@@ -368,6 +372,10 @@ func TestSession_MultiAgentMetadata(t *testing.T) {
 // --- applyPermissionMode (pure config mutation) ---------------------------
 
 func TestManager_applyPermissionMode(t *testing.T) {
+	// claudeACPModeDir writes under config.ConfigDir(), which follows HOME —
+	// redirect it so tests never touch the real user config.
+	t.Setenv("HOME", t.TempDir())
+
 	m := NewManager()
 	cases := []struct {
 		name  string
@@ -376,25 +384,71 @@ func TestManager_applyPermissionMode(t *testing.T) {
 		check func(*testing.T, *protocol.AdapterConfig)
 	}{
 		{
-			name: "claude accept-all sets env and skip flag",
+			// Forensics 2026-09-22: env vars and CLI args never reach the ACP
+			// adapter's permission logic — only an isolated CLAUDE_CONFIG_DIR
+			// with a settings.json does (and without it the HOST's own claude
+			// settings leak in, whatever the mode).
+			name: "claude accept-all isolates config dir with bypassPermissions",
 			mode: "accept-all",
 			cli:  "claude",
 			check: func(t *testing.T, c *protocol.AdapterConfig) {
-				if c.CustomEnv["CLAUDE_PERMISSION_MODE"] != "accept-all" {
-					t.Errorf("CLAUDE_PERMISSION_MODE = %q", c.CustomEnv["CLAUDE_PERMISSION_MODE"])
-				}
+				assertClaudeIsolation(t, c, "bypassPermissions")
+			},
+		},
+		{
+			name: "claude default isolates config dir too (host settings must not leak)",
+			mode: "default",
+			cli:  "claude",
+			check: func(t *testing.T, c *protocol.AdapterConfig) {
+				assertClaudeIsolation(t, c, "default")
+			},
+		},
+		{
+			name: "claude accept-edits maps to acceptEdits",
+			mode: "accept-edits",
+			cli:  "claude",
+			check: func(t *testing.T, c *protocol.AdapterConfig) {
+				assertClaudeIsolation(t, c, "acceptEdits")
+			},
+		},
+		{
+			name: "claude plan maps to plan",
+			mode: "plan",
+			cli:  "claude",
+			check: func(t *testing.T, c *protocol.AdapterConfig) {
+				assertClaudeIsolation(t, c, "plan")
+			},
+		},
+		{
+			name: "claude unknown mode falls back to default isolation",
+			mode: "yolo",
+			cli:  "claude",
+			check: func(t *testing.T, c *protocol.AdapterConfig) {
+				assertClaudeIsolation(t, c, "default")
+			},
+		},
+		{
+			// PTY runs the real REPL, so its CLI flags are honored (unlike the
+			// adapter). Only the dead env is gone.
+			name: "claude-pty accept-all keeps skip flag, drops dead env",
+			mode: "accept-all",
+			cli:  "claude-pty",
+			check: func(t *testing.T, c *protocol.AdapterConfig) {
 				if !contains(c.Args, "--dangerously-skip-permissions") {
 					t.Errorf("Args = %v, want skip-permissions flag", c.Args)
+				}
+				if _, ok := c.CustomEnv["CLAUDE_PERMISSION_MODE"]; ok {
+					t.Error("CLAUDE_PERMISSION_MODE is read by nobody — must not be set")
 				}
 			},
 		},
 		{
-			name: "claude-pty accept-all treated as claude",
-			mode: "accept-all",
+			name: "claude-pty plan keeps --plan flag",
+			mode: "plan",
 			cli:  "claude-pty",
 			check: func(t *testing.T, c *protocol.AdapterConfig) {
-				if c.CustomEnv["CLAUDE_PERMISSION_MODE"] != "accept-all" {
-					t.Errorf("CLAUDE_PERMISSION_MODE = %q", c.CustomEnv["CLAUDE_PERMISSION_MODE"])
+				if !contains(c.Args, "--plan") {
+					t.Errorf("Args = %v, want --plan", c.Args)
 				}
 			},
 		},
@@ -429,18 +483,15 @@ func TestManager_applyPermissionMode(t *testing.T) {
 			},
 		},
 		{
-			name: "default mode initializes CustomEnv but sets no flags",
+			name: "default mode on non-claude initializes CustomEnv, sets nothing",
 			mode: "default",
-			cli:  "claude",
+			cli:  "qwen",
 			check: func(t *testing.T, c *protocol.AdapterConfig) {
 				if c.CustomEnv == nil {
 					t.Error("CustomEnv should be initialized")
 				}
-				if _, ok := c.CustomEnv["CLAUDE_PERMISSION_MODE"]; ok {
-					t.Error("default mode should not set CLAUDE_PERMISSION_MODE")
-				}
-				if len(c.Args) != 0 {
-					t.Errorf("Args = %v, want empty", c.Args)
+				if len(c.CustomEnv) != 0 || len(c.Args) != 0 {
+					t.Errorf("CustomEnv = %v Args = %v, want both empty", c.CustomEnv, c.Args)
 				}
 			},
 		},
@@ -452,6 +503,75 @@ func TestManager_applyPermissionMode(t *testing.T) {
 			c.check(t, cfg)
 		})
 	}
+}
+
+// assertClaudeIsolation pins the only channel that actually configures the
+// ACP adapter: CLAUDE_CONFIG_DIR pointing at a settings.json carrying the
+// mapped defaultMode — with the dead env/args channels absent.
+func assertClaudeIsolation(t *testing.T, c *protocol.AdapterConfig, wantMode string) {
+	t.Helper()
+	dir := c.CustomEnv["CLAUDE_CONFIG_DIR"]
+	if dir == "" {
+		t.Fatal("CLAUDE_CONFIG_DIR not set — adapter would read the HOST's ~/.claude/settings.json")
+	}
+	want := filepath.Join(configpkg.ConfigDir(), "claude-acp-config", wantMode)
+	if dir != want {
+		t.Errorf("CLAUDE_CONFIG_DIR = %q, want %q", dir, want)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "settings.json"))
+	if err != nil {
+		t.Fatalf("read settings.json: %v", err)
+	}
+	var parsed struct {
+		Permissions struct {
+			DefaultMode string `json:"defaultMode"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("parse settings.json (%s): %v", data, err)
+	}
+	if parsed.Permissions.DefaultMode != wantMode {
+		t.Errorf("settings defaultMode = %q, want %q", parsed.Permissions.DefaultMode, wantMode)
+	}
+	if _, ok := c.CustomEnv["CLAUDE_PERMISSION_MODE"]; ok {
+		t.Error("CLAUDE_PERMISSION_MODE is read by nobody — must not be set")
+	}
+	if len(c.Args) != 0 {
+		t.Errorf("Args = %v, want empty (args never reach the claude CLI through the adapter)", c.Args)
+	}
+}
+
+// claudeACPModeDir must be idempotent: an identical settings.json is not
+// rewritten, and a stale one is.
+func TestClaudeACPModeDirIdempotent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	dir1, err := claudeACPModeDir("default")
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	settingsPath := filepath.Join(dir1, "settings.json")
+	before, err := os.Stat(settingsPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+
+	// Same mode again: file untouched (compare write size + mtime is flaky on
+	// coarse filesystems, so rewrite a marker instead).
+	if err := os.WriteFile(settingsPath+".probe", []byte("x"), 0o644); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	dir2, err := claudeACPModeDir("default")
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if dir2 != dir1 {
+		t.Errorf("dir changed between calls: %q vs %q", dir1, dir2)
+	}
+	if _, err := os.Stat(settingsPath + ".probe"); err != nil {
+		t.Error("sibling file was clobbered by the idempotent path")
+	}
+	_ = before
 }
 
 func contains(slice []string, want string) bool {

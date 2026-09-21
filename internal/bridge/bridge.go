@@ -1525,6 +1525,48 @@ func (b *Bridge) handleSessionResume(msg Message) {
 	sess := b.sessions.Get(sessionID)
 	if sess == nil {
 		b.logWarn("[%s] Session %s not found for resume", logger.ModSession, sessionID)
+		// Controlled recreate (fix-bridge-session-integrity defect B): the
+		// DO completes the resume payload with the session:start params, so a
+		// bridge that lost its registry can bring the session back in its
+		// original workDir instead of failing. Without params (DO restarted
+		// too) fail explicitly — never recreate blind into the bridge cwd.
+		cliType, _ := payload["cliType"].(string)
+		workDir, _ := payload["workDir"].(string)
+		permissionMode, _ := payload["permissionMode"].(string)
+		if workDir != "" {
+			if cliType == "" {
+				cliType = "claude"
+			}
+			recreated, err := b.sessions.CreateWithIDAndSize(cliType, workDir, sessionID, 120, 30, permissionMode)
+			if err != nil {
+				b.logError("[%s] Controlled recreate for resume %s failed: %v", logger.ModSession, sessionID, err)
+				b.sendMessage(Message{
+					Type: "session:resume:failed",
+					Payload: map[string]interface{}{
+						"sessionId": sessionID,
+						"reason":    "recreate_failed",
+						"message":   fmt.Sprintf("Failed to recreate session: %v", err),
+					},
+					Timestamp: time.Now().UnixMilli(),
+				})
+				return
+			}
+			b.logInfo("[%s] Session %s recreated for resume (workDir=%s)", logger.ModSession, sessionID, workDir)
+			b.sendMessage(Message{
+				Type: "session:resumed",
+				Payload: map[string]interface{}{
+					"sessionId":      recreated.ID,
+					"deviceId":       b.config.DeviceID,
+					"cliType":        recreated.CLIType,
+					"workDir":        recreated.WorkDir,
+					"permissionMode": recreated.PermissionMode,
+					"agentStatus":    "idle",
+					"recreated":      true,
+				},
+				Timestamp: time.Now().UnixMilli(),
+			})
+			return
+		}
 		b.sendMessage(Message{
 			Type: "session:resume:failed",
 			Payload: map[string]interface{}{
@@ -1751,8 +1793,24 @@ func (b *Bridge) handleSessionSend(msg Message) {
 			cliType = "claude"
 		}
 		workDir, _ := payload["workDir"].(string)
+		// Falling back to "." here used to land the agent in the bridge
+		// process cwd when the DO-side session:param completion missed too
+		// (bridge + DO restarted together). Refuse instead: a session recreated
+		// in the wrong directory is a silent data-integrity hazard, an error
+		// back to the web is recoverable.
 		if workDir == "" {
-			workDir = "."
+			b.logError("[%s] Cannot auto-create session %s: no workDir in payload (PARAM_MISSING)", logger.ModSession, sessionID)
+			b.sendMessage(Message{
+				Type: "session:error",
+				Payload: map[string]interface{}{
+					"sessionId": sessionID,
+					"deviceId":  b.config.DeviceID,
+					"error":     "session lost after bridge restart and no workDir provided for auto-recreate; please restart the session",
+					"code":      "PARAM_MISSING",
+				},
+				Timestamp: time.Now().UnixMilli(),
+			})
+			return
 		}
 		var err error
 		sess, err = b.sessions.CreateWithIDAndSize(cliType, workDir, sessionID, 120, 30, "")
