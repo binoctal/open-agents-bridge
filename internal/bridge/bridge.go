@@ -784,7 +784,9 @@ func (b *Bridge) readLoop() {
 				b.logInfo("[%s] WebSocket read error (closeCode=%d, lastActivity=%s, attempts=%d): %v",
 					logger.ModBridge, closeCode, lastActivity, b.reconnectStrategy.Attempts(), err)
 			}
-			b.stateManager.SetState(StateDisconnected, "read_error")
+			// reconnect() owns the disconnected-state transition (resetting the
+			// budget and announcing StateReconnecting) — a pre-set disconnected
+			// state here used to flash the wrong status to observers.
 			b.reconnect()
 			continue
 		}
@@ -2387,13 +2389,19 @@ func (b *Bridge) heartbeat() {
 			b.retryCachedCallbacks()
 
 			b.connMu.Lock()
-			if b.conn != nil {
+			connActive := b.conn != nil
+			if connActive {
 				b.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				b.conn.WriteMessage(websocket.PingMessage, nil)
 			}
 			b.connMu.Unlock()
-			// Update last_seen via API heartbeat
-			go b.updateLastSeen()
+			// Update last_seen via API heartbeat — only while the WS is up.
+			// Refreshing it during an outage kept the device reading "online"
+			// while the slow-retry window silently dropped messages
+			// (2026-09-21 e2e).
+			if connActive {
+				go b.updateLastSeen()
+			}
 		}
 	}
 }
@@ -2540,18 +2548,39 @@ func (b *Bridge) reconnect() {
 
 	// Clean up all sessions — they belong to the old connection and will
 	// be stale/zombie after reconnect. New messages will auto-create sessions.
+	activeSessions := 0
 	if count := b.sessions.Count(); count > 0 {
 		b.logInfo("[%s] Cleaning up %d stale session(s) before reconnect", logger.ModBridge, count)
 		b.staleSessionIDs = b.sessions.StopAll()
+		activeSessions = count
 	} else {
 		b.staleSessionIDs = nil
 	}
+
+	// The reconnect time budget must run from the disconnect moment, not from
+	// process start: a connection that stayed healthy for hours used to exhaust
+	// the 10-minute budget on its first read error and drop straight into the
+	// 5-minute slow-retry window (2026-09-21 e2e). Resetting here (the single
+	// entry point for every disconnect) gives every outage a fresh window.
+	b.reconnectStrategy.ResetBudget()
+
+	b.stateManager.SetState(StateReconnecting, "initiating_reconnect")
+
+	// One alert per disconnect cycle. Successful restore afterwards must not
+	// look like an outage, so this lives at the disconnect, not in the restore
+	// path where it used to fire spuriously after every reconnect.
+	alert.WebSocketDisconnected("connection lost")
+
+	b.logInfo("[%s] Reconnecting (attempt %d), active sessions before cleanup: %d",
+		logger.ModBridge, b.reconnectStrategy.Attempts()+1, activeSessions)
+
+	// The actual reconnection happens in readLoop with exponential backoff
 }
 
 // sendSessionRestore fetches recent sessions from the API and pushes them
 // to the frontend so it can display historical sessions after bridge restart.
 func (b *Bridge) sendSessionRestore() {
-	sessions, err := b.apiClient.ListSessions(b.config.DeviceID, 20)
+	sessions, err := b.apiClient.ListSessions(20)
 	if err != nil {
 		b.logWarn("[%s] Failed to fetch session list for restore: %v", logger.ModSession, err)
 		return
@@ -2570,18 +2599,6 @@ func (b *Bridge) sendSessionRestore() {
 		},
 		Timestamp: time.Now().UnixMilli(),
 	})
-
-	// Reset reconnect time budget so we get a fresh 10-minute window
-	b.reconnectStrategy.ResetBudget()
-
-	b.stateManager.SetState(StateReconnecting, "initiating_reconnect")
-	alert.WebSocketDisconnected("connection lost")
-
-	activeSessions := b.sessions.ActiveCount()
-	b.logInfo("[%s] Reconnecting (attempt %d), active sessions: %d",
-		logger.ModBridge, b.reconnectStrategy.Attempts()+1, activeSessions)
-
-	// The actual reconnection will happen in readLoop with exponential backoff
 }
 
 // notifyStaleSessionsStopped sends session:stopped for sessions that were

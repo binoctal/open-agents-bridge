@@ -256,8 +256,13 @@ type SessionInfo struct {
 	EndedAt         int64  `json:"endedAt,omitempty"`
 }
 
-func (c *Client) ListSessions(deviceID string, limit int) ([]SessionInfo, error) {
-	path := fmt.Sprintf("/api/sessions?deviceId=%s&limit=%d&status=all", deviceID, limit)
+// ListSessions fetches the device's recent sessions for restore-on-reconnect.
+// It uses the device-token-scoped /api/bridge/sessions endpoint: the old
+// /api/sessions path is user-JWT authenticated and answered 401 "Invalid
+// token" for every restore after a reconnect (2026-09-21 e2e). The device
+// identity comes from the token itself, not from a query parameter.
+func (c *Client) ListSessions(limit int) ([]SessionInfo, error) {
+	path := fmt.Sprintf("/api/bridge/sessions?limit=%d", limit)
 
 	data, err := c.request("GET", path, nil)
 	if err != nil {

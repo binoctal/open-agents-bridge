@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/binoctal/open-agents-bridge/internal/config"
+	"github.com/binoctal/open-agents-bridge/internal/reconnect"
 	"github.com/binoctal/open-agents-bridge/internal/session"
 )
 
@@ -25,12 +26,14 @@ func newHeartbeatBridge(t *testing.T, status int) (*Bridge, *httptest.Server) {
 	b := &Bridge{
 		config: &config.Config{
 			// updateLastSeen derives the API base from the WS URL (ws->http).
-			ServerURL:    "ws" + strings.TrimPrefix(srv.URL, "http"),
-			DeviceID:     "device-hb",
-			DeviceToken:  "token-hb",
+			ServerURL:   "ws" + strings.TrimPrefix(srv.URL, "http"),
+			DeviceID:    "device-hb",
+			DeviceToken: "token-hb",
 		},
-		sessions:   session.NewManager(),
-		httpClient: &http.Client{},
+		sessions:          session.NewManager(),
+		httpClient:        &http.Client{},
+		reconnectStrategy: reconnect.NewStrategy(),
+		stateManager:      NewStateManager(),
 	}
 	return b, srv
 }

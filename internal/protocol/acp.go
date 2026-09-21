@@ -635,6 +635,34 @@ func (a *ACPAdapter) readMessages() {
 	}
 }
 
+// isCliProgressLog reports whether a stderr line is a CLI's structured
+// progress/probe log rather than an error. Known shapes (observed from the
+// Kiri CLI, 2026-09-21 e2e):
+//
+//	[session/create] sessionId=… phase=sdk-initialize durationMs=37 totalMs=38
+//	[session/query] sessionId=… resume=none apiType=native baseUrl=native
+//	[authStatus] session account carries no identity signal; keeping probe
+//
+// These used to fall through to the MessageTypeError emit, so a healthy
+// session creation showed up in the Web UI as a burst of fake session:error
+// events. Pure function so the suppression contract is unit-testable.
+func isCliProgressLog(line string) bool {
+	if strings.HasPrefix(line, "[authStatus] ") {
+		return true
+	}
+	for _, prefix := range []string{"[session/create] ", "[session/query] "} {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		for _, field := range []string{"phase=", "durationMs=", "totalMs=", "resume=", "apiType=", "sessionId="} {
+			if strings.Contains(line, field) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // readErrors reads stderr and only forwards actionable errors.
 // CLI debug output (object dumps, stack traces) is logged locally but not sent to the Web UI.
 func (a *ACPAdapter) readErrors() {
@@ -647,6 +675,13 @@ func (a *ACPAdapter) readErrors() {
 
 		// Skip informational hook messages that are not real errors
 		if strings.HasPrefix(line, "[PreToolUseHook]") || strings.HasPrefix(line, "[PostToolUseHook]") {
+			continue
+		}
+
+		// Skip CLI structured progress logs (see isCliProgressLog) — progress
+		// is not an error, and forwarding it painted healthy sessions red.
+		if isCliProgressLog(line) {
+			logger.Debug("[%s] stderr progress (suppressed): %s", logger.ModACP, line)
 			continue
 		}
 
