@@ -26,6 +26,22 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 		permissionMode = "default"
 	}
 
+	// Expand `~`/`~/...` to the device home directory before the path reaches
+	// os/exec: cmd.Dir would otherwise chdir into a literal "~" directory and
+	// surface as a misleading "fork/exec <cmd>: no such file or directory".
+	// This is the single choke point for every creation call site (bridge
+	// session:start, auto-recreate, resume-with-context, tasks).
+	if workDir == "" {
+		workDir = "."
+	}
+	workDir, err := ExpandTilde(workDir)
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve workDir %q home directory: %w", workDir, err)
+	}
+	if _, err := os.Stat(workDir); err != nil {
+		return nil, fmt.Errorf("workDir does not exist: %s", workDir)
+	}
+
 	// --- Phase 1: map operations under lock (fast) ---
 	m.mu.Lock()
 

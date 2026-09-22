@@ -1486,6 +1486,14 @@ func (b *Bridge) handleSessionStart(msg Message) {
 	if workDir == "" {
 		workDir = "."
 	}
+	// Expand at the entry so the expanded path flows into session:started,
+	// ReportSessionToAPI and the session store consistently (the manager's
+	// CreateWithIDAndSize applies the same expansion as a choke point).
+	workDir, err := session.ExpandTilde(workDir)
+	if err != nil {
+		b.logError("[%s] Cannot expand workDir %q: %v", logger.ModSession, workDir, err)
+		return
+	}
 
 	sess, err := b.sessions.CreateWithIDAndSize(cliType, workDir, sessionID, cols, rows, permissionMode)
 	if err != nil {
@@ -1663,6 +1671,7 @@ func (b *Bridge) handleResumeWithContext(msg Message) {
 	if workDir == "" {
 		workDir = "."
 	}
+	workDir, _ = session.ExpandTilde(workDir)
 
 	// Fetch historical messages
 	var messageCount int
@@ -1835,6 +1844,7 @@ func (b *Bridge) handleSessionSend(msg Message) {
 			})
 			return
 		}
+		workDir, _ = session.ExpandTilde(workDir)
 		var err error
 		sess, err = b.sessions.CreateWithIDAndSize(cliType, workDir, sessionID, 120, 30, "")
 		if err != nil {
@@ -2946,6 +2956,9 @@ func (b *Bridge) syncRulesFromAPI() {
 
 // ReportSessionToAPI reports session status to API
 func (b *Bridge) ReportSessionToAPI(sessionID, cliType, workDir, status, protocol string) {
+	if b.apiClient == nil {
+		return
+	}
 	err := b.apiClient.ReportSession(api.SessionReport{
 		SessionID: sessionID,
 		CLIType:   cliType,
