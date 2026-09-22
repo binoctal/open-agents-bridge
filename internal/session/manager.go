@@ -85,6 +85,12 @@ type Session struct {
 
 	// Resume context: prompt prefix injected on first user message
 	ResumeContext string
+
+	// connecting is true while CreateWithIDAndSize is still running
+	// Connect() — the session is registered in the map early, so its
+	// protocol is not connected YET. Reconnect-path cleanup must not
+	// mistake it for a dead session. Guarded by Manager.mu.
+	connecting bool
 }
 
 func NewManager() *Manager {
@@ -576,6 +582,36 @@ func (m *Manager) StopAll() []string {
 		}
 	}
 	m.sessions = make(map[string]*Session)
+	return ids
+}
+
+// StopDead terminates only sessions that can no longer run — no protocol, or
+// a disconnected adapter — and returns their IDs. Live sessions stay
+// registered: a lost WebSocket only breaks the forwarding channel, not the
+// local CLI processes, so running task sessions keep producing output after
+// the reconnect (2026-09-22 prod: the unconditional StopAll on reconnect
+// killed running task sessions and zombied platform tasks until stuck
+// recovery re-dispatched). Sessions still mid-creation (connecting) are left
+// alone — their protocol is not connected yet. StopAll remains the
+// process-shutdown path.
+func (m *Manager) StopDead() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	ids := make([]string, 0, len(m.sessions))
+	for id, sess := range m.sessions {
+		if sess.connecting {
+			continue
+		}
+		if sess.Protocol != nil && sess.Protocol.IsConnected() {
+			continue
+		}
+		ids = append(ids, id)
+		if sess.Protocol != nil {
+			sess.Protocol.Disconnect()
+		}
+		delete(m.sessions, id)
+	}
 	return ids
 }
 

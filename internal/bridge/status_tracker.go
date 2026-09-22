@@ -152,8 +152,12 @@ func (b *Bridge) statusTrackerFor(sessionID string) *statusTracker {
 
 // removeStatusTracker drops a session's tracker. Registered as the session
 // manager's removed-callback so every delete path (stop, replace, idle
-// cleanup, create-failure rollback) cleans up — the map must not leak.
+// cleanup, create-failure rollback) cleans up — the map must not leak. The
+// same hook cancels the task-idle watchdog: the session is gone, so its
+// exit already reported whatever result it had.
 func (b *Bridge) removeStatusTracker(sessionID string) {
+	b.cancelTaskWatchdog(sessionID)
+
 	b.statusTrackersMu.Lock()
 	defer b.statusTrackersMu.Unlock()
 	delete(b.statusTrackers, sessionID)

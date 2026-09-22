@@ -166,6 +166,19 @@ type Bridge struct {
 	taskMeta   map[string]*taskMeta
 	taskMetaMu sync.RWMutex
 
+	// Task-idle watchdogs (taskId -> timer): a task session whose prompt
+	// went out but that produces zero protocol activity within the window
+	// is a zombie turn — seen in prod 2026-09-22 (session created, CLI
+	// process alive at 0.3% CPU, no session/update for 9+ minutes, mission
+	// never finished). The watchdog stops the session with a non-zero exit
+	// so the existing exit-callback path reports task_error and the
+	// orchestrator retries in minutes instead of waiting for the execution
+	// timeout. Armed only for task sessions in launchTaskSession; every
+	// protocol message resets it, the session exit cancels it.
+	taskWatchdogs   map[string]*time.Timer
+	taskWatchdogMu  sync.Mutex
+	taskIdleTimeout time.Duration
+
 	// Message queue for ordered processing without blocking readLoop
 	messageQueue chan Message
 
@@ -289,6 +302,12 @@ func New(cfg *config.Config) (*Bridge, error) {
 		lineBoundary:      make(map[string]bool),
 		sessionDisp:       make(map[string]chan protocol.Message),
 		taskMeta:          make(map[string]*taskMeta),
+		taskWatchdogs:     make(map[string]*time.Timer),
+		// Watchdog window from TASK_IDLE_TIMEOUT (default 5m — below the
+		// platform's 10m stuck threshold so the bridge fires first and the
+		// re-dispatch lands on a healthy generation). armTaskWatchdog is a
+		// no-op at zero, which tests can set for determinism.
+		taskIdleTimeout: taskIdleTimeoutFromEnv(),
 		previewInFlight:   make(map[string]bool),
 		reconnectStrategy: reconnect.NewStrategy(),
 		stateManager:      NewStateManager(),
@@ -861,6 +880,10 @@ func (b *Bridge) messageWorker() {
 // bare goroutine — order is only best-effort for a session producing 256+
 // unprocessed messages, which is already pathological.
 func (b *Bridge) dispatchSessionOutput(sessionID string, msg protocol.Message) {
+	// Any protocol activity proves the turn is alive — push the task-idle
+	// watchdog forward (no-op for sessions without one).
+	b.resetTaskWatchdog(sessionID)
+
 	b.sessionDispMu.Lock()
 	ch, ok := b.sessionDisp[sessionID]
 	if !ok {
@@ -2604,13 +2627,19 @@ func (b *Bridge) reconnect() {
 	}
 	b.connMu.Unlock()
 
-	// Clean up all sessions — they belong to the old connection and will
-	// be stale/zombie after reconnect. New messages will auto-create sessions.
-	activeSessions := 0
-	if count := b.sessions.Count(); count > 0 {
-		b.logInfo("[%s] Cleaning up %d stale session(s) before reconnect", logger.ModBridge, count)
-		b.staleSessionIDs = b.sessions.StopAll()
-		activeSessions = count
+	// Clean up only sessions that cannot survive the reconnect — those whose
+	// local process/protocol already died. Live sessions stay registered: a
+	// lost WebSocket breaks the forwarding channel, not the local CLI
+	// processes, so running task sessions keep working and their output
+	// resumes once the connection returns. The previous unconditional
+	// StopAll killed running task sessions here, zombied the platform tasks
+	// until stuck recovery re-dispatched, and the re-dispatch could idle
+	// forever (2026-09-22 prod probe, mission2).
+	activeSessions := b.sessions.Count()
+	deadIDs := b.sessions.StopDead()
+	if len(deadIDs) > 0 {
+		b.logInfo("[%s] Cleaning up %d dead session(s) before reconnect (%d live session(s) kept)", logger.ModBridge, len(deadIDs), activeSessions-len(deadIDs))
+		b.staleSessionIDs = deadIDs
 	} else {
 		b.staleSessionIDs = nil
 	}
@@ -3103,6 +3132,81 @@ func isLiveTaskSession(sess *session.Session) bool {
 	return sess != nil && sess.Status == "active" && sess.Protocol != nil && sess.Protocol.IsConnected()
 }
 
+// taskIdleTimeoutFromEnv returns the task-idle watchdog window. Default 5
+// minutes; TASK_IDLE_TIMEOUT accepts a Go duration ("90s", "2m", ...).
+func taskIdleTimeoutFromEnv() time.Duration {
+	d := 5 * time.Minute
+	if v := os.Getenv("TASK_IDLE_TIMEOUT"); v != "" {
+		if parsed, err := time.ParseDuration(v); err == nil && parsed > 0 {
+			d = parsed
+		}
+	}
+	return d
+}
+
+// armTaskWatchdog starts (or restarts) the idle watchdog for a task session
+// right after its prompt went out. No-op when the timeout is zero.
+func (b *Bridge) armTaskWatchdog(taskId string) {
+	if b.taskIdleTimeout <= 0 {
+		return
+	}
+	b.taskWatchdogMu.Lock()
+	defer b.taskWatchdogMu.Unlock()
+	if t, ok := b.taskWatchdogs[taskId]; ok {
+		t.Stop()
+	}
+	b.taskWatchdogs[taskId] = time.AfterFunc(b.taskIdleTimeout, func() { b.fireTaskWatchdog(taskId) })
+}
+
+// resetTaskWatchdog pushes the idle window forward on observed protocol
+// activity. Unknown IDs are ignored — interactive sessions never arm one.
+func (b *Bridge) resetTaskWatchdog(sessionID string) {
+	b.taskWatchdogMu.Lock()
+	defer b.taskWatchdogMu.Unlock()
+	if t, ok := b.taskWatchdogs[sessionID]; ok {
+		t.Reset(b.taskIdleTimeout)
+	}
+}
+
+// cancelTaskWatchdog drops the watchdog for good — the session ended.
+func (b *Bridge) cancelTaskWatchdog(sessionID string) {
+	b.taskWatchdogMu.Lock()
+	defer b.taskWatchdogMu.Unlock()
+	if t, ok := b.taskWatchdogs[sessionID]; ok {
+		t.Stop()
+		delete(b.taskWatchdogs, sessionID)
+	}
+}
+
+// fireTaskWatchdog handles a task session that produced zero protocol
+// activity since its prompt: stop it with a non-zero exit so the exit
+// callback reports workflow:task_error and the orchestrator re-dispatches
+// within minutes. The stop also frees a pool slot (capacity callback), so a
+// replacement dispatch is not blocked behind the zombie.
+func (b *Bridge) fireTaskWatchdog(taskId string) {
+	b.cancelTaskWatchdog(taskId)
+
+	sess := b.sessions.Get(taskId)
+	if sess == nil {
+		// Already exited — its own exit path reported the result.
+		return
+	}
+
+	b.taskMetaMu.RLock()
+	meta := b.taskMeta[taskId]
+	b.taskMetaMu.RUnlock()
+
+	b.logWarn("[%s] Task idle watchdog fired for %s: no protocol activity in %v after prompt, stopping session (cli=%s)", logger.ModWorkflow, taskId, b.taskIdleTimeout, sess.CLIType)
+	if meta != nil {
+		b.logWarn("[%s] Watchdog context: job=%s attempt=%d workDir=%s", logger.ModWorkflow, meta.JobID, meta.Attempt, meta.WorkDir)
+	}
+
+	// Non-zero exit routes through handleSessionExit → SendTaskError.
+	if err := b.sessions.StopWithExitCode(taskId, 1); err != nil {
+		b.logWarn("[%s] Watchdog stop failed for %s: %v", logger.ModWorkflow, taskId, err)
+	}
+}
+
 // handleWorkflowTaskAssign handles task assignment from Orchestrator
 func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 	payload, ok := msg.Payload.(map[string]interface{})
@@ -3289,14 +3393,11 @@ func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, row
 	// `running` forever (caught by the G17 replay suite under -race).
 	sess.SetMultiAgentMetadata(jobId, taskId)
 
-	// Send the prompt to the CLI agent
-	if err := sess.Send(prompt); err != nil {
-		b.logDebug("[%s] Failed to send prompt for task %s: %v", logger.ModWorkflow, taskId, err)
-	} else {
-		b.notePromptSent(sess.ID, sess.GetProtocolName())
-	}
-
-	// Store task meta for worktree handling on exit
+	// Store task meta before the prompt too: a prompt-send failure below
+	// stops the session, and handleSessionExit only reports a task result
+	// when task meta exists — without this ordering a failed send would
+	// stop the session silently and park the task until the execution
+	// timeout.
 	isWorktree := workDir != "."
 	b.taskMetaMu.Lock()
 	b.taskMeta[taskId] = &taskMeta{
@@ -3308,6 +3409,25 @@ func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, row
 		Attempt:  attempt,
 	}
 	b.taskMetaMu.Unlock()
+
+	// Send the prompt to the CLI agent
+	if err := sess.Send(prompt); err != nil {
+		// The prompt never reached the CLI: the session cannot make
+		// progress. Previously this only debug-logged and the task sat
+		// parked for the 30-minute execution timeout (2026-09-22 prod:
+		// mission2 t1). Stop with a non-zero exit so the exit-callback
+		// path reports task_error and the orchestrator retries in
+		// seconds.
+		b.logWarn("[%s] Failed to send prompt for task %s: %v; stopping session to trigger retry", logger.ModWorkflow, taskId, err)
+		if err := b.sessions.StopWithExitCode(taskId, 1); err != nil {
+			b.logWarn("[%s] Stop after failed prompt send failed for %s: %v", logger.ModWorkflow, taskId, err)
+		}
+		return
+	}
+	b.notePromptSent(sess.ID, sess.GetProtocolName())
+	// Idle watchdog: if the CLI never starts the turn, fail fast instead
+	// of waiting for the platform-side timeout.
+	b.armTaskWatchdog(taskId)
 }
 
 // drainTaskQueue starts queued tasks as pool capacity frees. Without it the

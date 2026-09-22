@@ -84,6 +84,7 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 		Protocol:       protocolMgr,
 		CreatedAt:      time.Now(),
 		ioLogger:       m.ioLogger,
+		connecting:     true,
 	}
 
 	logger.Debug("[%s] Setting up message callback for session %s", logger.ModSession, sessionID)
@@ -180,6 +181,14 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 
 	sess.Config = config
 	sess.LastActiveAt = time.Now()
+
+	// Connect finished — the session is now live for cleanup purposes
+	// (StopDead skips connecting sessions). The Connect-failure paths above
+	// delete the session outright, so they never leave a connecting flag
+	// behind.
+	m.mu.Lock()
+	sess.connecting = false
+	m.mu.Unlock()
 
 	logger.Info("[%s] Session %s connected using protocol: %s", logger.ModSession, sessionID, protocolMgr.GetProtocolName())
 	logger.Debug("[%s] Config stored for reconnection capability", logger.ModSession)
