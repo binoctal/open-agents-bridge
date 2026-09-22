@@ -1502,7 +1502,12 @@ func (b *Bridge) handleSessionStart(msg Message) {
 		b.sendMessage(Message{
 			Type: "session:error",
 			Payload: map[string]interface{}{
-				"error": err.Error(),
+				// sessionId + code let the web map this to a translated
+				// message (the raw error alone is unactionable for users).
+				"sessionId": sessionID,
+				"deviceId":  b.config.DeviceID,
+				"error":     err.Error(),
+				"code":      "SESSION_START_FAILED",
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
