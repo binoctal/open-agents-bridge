@@ -194,8 +194,13 @@ type Bridge struct {
 	slowRetry atomic.Bool
 
 	// Message batching (Scheme 1: merge small content chunks)
-	batchMu    sync.Mutex
-	batchBuf   map[string]*contentBatch // sessionID → pending chunks
+	batchMu sync.Mutex
+	// batchBuf keys on sessionID+msgType: a single batch carries ONE message
+	// type. Keying on sessionID alone merged interleaved thought and message
+	// chunks into one flush labelled with the first type, so an agent reply
+	// streamed right after a thought arrived as chat:thought with no
+	// chat:response at all — the chat bubble stayed empty (staging 2026-09-23).
+	batchBuf   map[string]*contentBatch // sessionID\x00msgType → pending chunks
 	batchTimer *time.Timer
 	batchWait  sync.WaitGroup // wait for flush on shutdown
 
@@ -286,28 +291,28 @@ func New(cfg *config.Config) (*Bridge, error) {
 	}
 
 	b := &Bridge{
-		config:            cfg,
-		sessions:          sessionMgr,
-		permHandler:       handler,
-		permServer:        permission.NewServer(handler),
-		store:             store,
-		rulesEngine:       rules.NewEngine(cfg.Rules),
-		apiClient:         api.NewClient(cfg),
-		done:              make(chan struct{}),
-		scanner:           scanner.New(),
-		loopDetectors:     make(map[string]*loopdetect.Detector),
-		statusTrackers:    make(map[string]*statusTracker),
-		permSessionMap:    make(map[string]string),
-		pendingQuestions:  make(map[string]chan string),
-		lineBoundary:      make(map[string]bool),
-		sessionDisp:       make(map[string]chan protocol.Message),
-		taskMeta:          make(map[string]*taskMeta),
-		taskWatchdogs:     make(map[string]*time.Timer),
+		config:           cfg,
+		sessions:         sessionMgr,
+		permHandler:      handler,
+		permServer:       permission.NewServer(handler),
+		store:            store,
+		rulesEngine:      rules.NewEngine(cfg.Rules),
+		apiClient:        api.NewClient(cfg),
+		done:             make(chan struct{}),
+		scanner:          scanner.New(),
+		loopDetectors:    make(map[string]*loopdetect.Detector),
+		statusTrackers:   make(map[string]*statusTracker),
+		permSessionMap:   make(map[string]string),
+		pendingQuestions: make(map[string]chan string),
+		lineBoundary:     make(map[string]bool),
+		sessionDisp:      make(map[string]chan protocol.Message),
+		taskMeta:         make(map[string]*taskMeta),
+		taskWatchdogs:    make(map[string]*time.Timer),
 		// Watchdog window from TASK_IDLE_TIMEOUT (default 5m — below the
 		// platform's 10m stuck threshold so the bridge fires first and the
 		// re-dispatch lands on a healthy generation). armTaskWatchdog is a
 		// no-op at zero, which tests can set for determinism.
-		taskIdleTimeout: taskIdleTimeoutFromEnv(),
+		taskIdleTimeout:   taskIdleTimeoutFromEnv(),
 		previewInFlight:   make(map[string]bool),
 		reconnectStrategy: reconnect.NewStrategy(),
 		stateManager:      NewStateManager(),
@@ -2744,7 +2749,9 @@ func (b *Bridge) batchContent(sessionID, protocolName, content string, msgType p
 	b.batchMu.Lock()
 	defer b.batchMu.Unlock()
 
-	key := sessionID
+	// Key includes the message type: thought and content chunks of the same
+	// turn must never share a batch (see the batchBuf field comment).
+	key := sessionID + "\x00" + string(msgType)
 	batch, ok := b.batchBuf[key]
 	if !ok {
 		batch = &contentBatch{sessionID: sessionID, protocolName: protocolName, msgType: msgType}
@@ -2771,7 +2778,19 @@ func (b *Bridge) flushBatches() {
 	b.batchMu.Lock()
 	defer b.batchMu.Unlock()
 	b.doFlushLocked()
-	b.batchTimer = nil
+	// Re-arm while any batch still holds a remainder. The old code nilled the
+	// timer unconditionally, so a remainder left by markdown-splitting sat in
+	// batchBuf forever — until an unrelated session created a fresh batch and
+	// restarted the timer, at which point the stale content surfaced as a
+	// chat frame mid-conversation of that OTHER session (staging 2026-09-23:
+	// a finished session's reply tail appeared six minutes later under the
+	// new session's activity).
+	if len(b.batchBuf) > 0 {
+		b.batchWait.Add(1)
+		b.batchTimer = time.AfterFunc(batchFlushInterval, b.flushBatches)
+	} else {
+		b.batchTimer = nil
+	}
 	b.batchWait.Done()
 }
 
