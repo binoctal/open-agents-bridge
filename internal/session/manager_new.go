@@ -152,6 +152,9 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 		Args:    args,
 		Cols:    cols,
 		Rows:    rows,
+		// The ACP adapter reads this to gate terminal commands on user
+		// approval (modes without explicit auto-approval; see acp.go).
+		PermissionMode: permissionMode,
 	}
 	if cliType == "claude" {
 		config.CustomEnv = map[string]string{"CLAUDECODE": ""}

@@ -40,6 +40,13 @@ const defaultInitTimeout = 30 * time.Second
 // workflow task idle watchdog budget.
 const turnIdleTimeout = 5 * time.Minute
 
+// defaultPermissionPromptTimeout bounds how long a gated terminal command
+// waits for the user's approval. It must stay BELOW turnIdleTimeout: the
+// rejection reply itself is wire traffic that resets the idle watchdog, so a
+// timed-out prompt ends the turn cleanly (the agent sees the rejection and
+// reports it) instead of tripping TURN_IDLE_TIMEOUT.
+const defaultPermissionPromptTimeout = 4 * time.Minute
+
 // ACPAdapter implements the Agent Client Protocol (ACP)
 type ACPAdapter struct {
 	cmd        *exec.Cmd
@@ -86,6 +93,20 @@ type ACPAdapter struct {
 	// the final reply never arrived, every later prompt timed out quietly).
 	lastPromptID atomic.Value // string; "" when no prompt is in flight
 	lastActivity atomic.Int64 // unix nano of last frame sent or received
+	// permMode is the session's bridge-level permission mode, frozen at
+	// Connect. Modes without explicit auto-approval gate terminal/create
+	// commands on a user permission round-trip — the ACP agent delegates
+	// shell execution to us (terminal/create), so the SDK's own
+	// defaultMode/allow rules never see these commands and without this gate
+	// a "default" session would run arbitrary shell with zero approval
+	// (staging forensics 2026-09-23: `uname -a` in default mode executed via
+	// Terminal tool with no permission:request ever sent).
+	permMode string
+	// permPromptTimeout overrides defaultPermissionPromptTimeout (tests).
+	permPromptTimeout time.Duration
+	// pendingPerms holds terminal commands waiting on a permission answer,
+	// keyed by terminalID (which doubles as the permission request id).
+	pendingPerms map[string]*pendingTerminal
 	// Replay recording (off by default): when non-nil, raw wire frames are
 	// mirrored to a script file at the stdio boundary. A nil recorder makes
 	// every hook a no-op, so the production path pays nothing. recorderMu
@@ -99,12 +120,23 @@ type ACPAdapter struct {
 // NewACPAdapter creates a new ACP adapter
 func NewACPAdapter() *ACPAdapter {
 	a := &ACPAdapter{
-		terminals:  make(map[string]*terminalState),
-		initDone:   make(chan struct{}),
-		procExited: make(chan struct{}),
+		terminals:    make(map[string]*terminalState),
+		pendingPerms: make(map[string]*pendingTerminal),
+		initDone:     make(chan struct{}),
+		procExited:   make(chan struct{}),
+		permMode:     "default",
 	}
 	a.procExitCode.Store(-1)
 	return a
+}
+
+// pendingTerminal is a terminal command parked until the user answers its
+// permission request.
+type pendingTerminal struct {
+	command string
+	env     []string
+	limit   int
+	timer   *time.Timer
 }
 
 // SetInitTimeout overrides how long Connect waits for the initialize response.
@@ -176,6 +208,9 @@ func (a *ACPAdapter) Connect(config AdapterConfig) error {
 
 	// Store work directory for session/new
 	a.workDir = config.WorkDir
+	// Freeze the permission mode before any goroutine starts: terminal
+	// gating (handleTerminalCreate) reads it from the read-loop goroutine.
+	a.permMode = config.PermissionMode
 
 	// Start CLI process in its own process group so we can kill
 	// the entire tree (npx → sh → node) on disconnect
@@ -300,6 +335,16 @@ func (a *ACPAdapter) disconnectLocked() {
 	}
 
 	a.connected.Store(false)
+
+	// Drop gated terminal commands still waiting on an answer: the agent is
+	// going away, so neither approval nor rejection would ever reach a live
+	// turn. Timers must stop or they fire into a dead adapter.
+	a.terminalMu.Lock()
+	for id, pt := range a.pendingPerms {
+		pt.timer.Stop()
+		delete(a.pendingPerms, id)
+	}
+	a.terminalMu.Unlock()
 
 	if a.stdin != nil {
 		a.stdin.Close()
@@ -429,6 +474,15 @@ ready:
 		perm, ok := msg.Content.(PermissionResponse)
 		if !ok {
 			return fmt.Errorf("invalid permission response type")
+		}
+
+		// A gated terminal command's approval: the id names the pending
+		// terminal, not a JSON-RPC request the agent made. Resolve it and
+		// skip the wire reply — the agent never asked.
+		if idStr, isStr := perm.ID.(string); isStr {
+			if a.resolvePendingTerminal(idStr, optionApproves(perm.OptionID), "") {
+				return nil
+			}
 		}
 
 		// ACP expects the response in this format:
@@ -1234,8 +1288,110 @@ func (a *ACPAdapter) handleTerminalCreate(msg map[string]interface{}) {
 	}
 	a.sendJSONRPC(response)
 
+	// Gate on user approval unless the session's mode explicitly
+	// auto-approves. The ACP agent delegates shell execution to us, so the
+	// SDK's own permission flow never fires for these commands — without
+	// this gate every mode (including "default") would execute shell
+	// silently. accept-edits/accept-all opt out: workflow task sessions run
+	// accept-edits and have no human to answer the prompt.
+	if a.permMode != "accept-edits" && a.permMode != "accept-all" {
+		a.gateTerminalOnPermission(terminalID, command, env, outputByteLimit)
+		return
+	}
+
 	// Execute the command in background
 	go a.executeTerminalCommand(terminalID, command, env, outputByteLimit)
+}
+
+// gateTerminalOnPermission parks a terminal command behind a permission
+// request. The terminalID doubles as the permission request id: the web
+// client's answer comes back through SendMessage (MessageTypePermission)
+// carrying that id, and resolvePendingTerminal then executes or rejects the
+// command. Until then the terminal state stays not-done, so the agent's
+// terminal/wait_for_exit / output requests (already async) simply wait.
+func (a *ACPAdapter) gateTerminalOnPermission(terminalID, command string, env []string, outputLimit int) {
+	timeout := a.permPromptTimeout
+	if timeout <= 0 {
+		timeout = defaultPermissionPromptTimeout
+	}
+
+	risk := "medium"
+	if containsDangerousCommand(command) {
+		risk = "high"
+	}
+
+	pt := &pendingTerminal{command: command, env: env, limit: outputLimit}
+	pt.timer = time.AfterFunc(timeout, func() {
+		a.resolvePendingTerminal(terminalID, false, "permission request timed out")
+	})
+
+	a.terminalMu.Lock()
+	a.pendingPerms[terminalID] = pt
+	a.terminalMu.Unlock()
+
+	logger.Info("[%s] Terminal command gated on permission (mode %s): %s", logger.ModACP, a.permMode, command)
+
+	a.emitMessage(Message{
+		Type: MessageTypePermission,
+		Content: PermissionRequest{
+			ID:          terminalID,
+			ToolName:    "execute_bash",
+			ToolInput:   map[string]interface{}{"command": command},
+			Description: "Execute command: " + command,
+			Risk:        risk,
+			// Option ids the web UI echoes back verbatim as optionId
+			// (PermissionQueue renders one button per option).
+			Options: []string{"allow_once", "reject_once"},
+		},
+		Meta: map[string]interface{}{
+			"protocol": "acp",
+		},
+	})
+}
+
+// optionApproves maps an ACP option id to an approval verdict. The web
+// client echoes back the option it rendered (allow_once / reject_once, or
+// the agent's own allow_* / reject_* vocabulary); anything that names an
+// allow/approve outcome approves, everything else rejects.
+func optionApproves(optionID string) bool {
+	o := strings.ToLower(optionID)
+	return strings.Contains(o, "allow") || strings.Contains(o, "approve")
+}
+
+// resolvePendingTerminal acts on a permission answer (or timeout) for a
+// gated terminal command. Returns false when id names no pending terminal,
+// so unrelated permission responses fall through to the agent JSON-RPC path.
+func (a *ACPAdapter) resolvePendingTerminal(id string, approved bool, reason string) bool {
+	a.terminalMu.Lock()
+	pt, ok := a.pendingPerms[id]
+	if ok {
+		delete(a.pendingPerms, id)
+		pt.timer.Stop()
+	}
+	state, stateOK := a.terminals[id]
+	a.terminalMu.Unlock()
+
+	if !ok {
+		return false
+	}
+
+	if approved {
+		go a.executeTerminalCommand(id, pt.command, pt.env, pt.limit)
+		return true
+	}
+
+	detail := "Command rejected by user"
+	if reason != "" {
+		detail = "Command rejected: " + reason
+	}
+	logger.Info("[%s] Terminal command rejected: %s", logger.ModACP, pt.command)
+	if stateOK {
+		state.output = detail
+		state.exitCode = 126 // command not executable (permission)
+		state.done = true
+		close(state.doneChan)
+	}
+	return true
 }
 
 // executeTerminalCommand runs a command and stores the result

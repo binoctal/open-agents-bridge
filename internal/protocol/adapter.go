@@ -37,4 +37,9 @@ type AdapterConfig struct {
 	CustomArgs    []string
 	CustomEnv     map[string]string
 	ForceProtocol string // "pty" to force PTY, empty for auto-detect
+	// PermissionMode is the session's bridge-level permission mode
+	// ("default", "accept-edits", "accept-all", "plan"). The ACP adapter
+	// gates terminal commands on user approval for every mode that does not
+	// explicitly auto-approve (see acp.go handleTerminalCreate).
+	PermissionMode string
 }
