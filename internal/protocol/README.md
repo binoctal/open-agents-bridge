@@ -80,7 +80,6 @@ Manager 会自动尝试以下顺序：
 
 #### PTY 协议（兜底）
 
-- Kiro CLI
 - Cline
 - Codex
 - 所有其他 CLI 工具

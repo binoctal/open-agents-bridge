@@ -11,7 +11,6 @@ func TestAdapterGet(t *testing.T) {
 		name    string
 		wantErr bool
 	}{
-		{"kiro", false},
 		{"cline", false},
 		{"claude", false},
 		{"codex", false},
@@ -41,12 +40,12 @@ func TestAdapterGet(t *testing.T) {
 func TestAdapterList(t *testing.T) {
 	names := adapter.List()
 
-	if len(names) < 5 {
-		t.Errorf("Expected at least 5 adapters, got %d", len(names))
+	if len(names) < 4 {
+		t.Errorf("Expected at least 4 adapters, got %d", len(names))
 	}
 
 	// Check required adapters exist
-	required := map[string]bool{"kiro": false, "cline": false, "claude": false, "codex": false, "gemini": false}
+	required := map[string]bool{"cline": false, "claude": false, "codex": false, "gemini": false}
 	for _, name := range names {
 		required[name] = true
 	}

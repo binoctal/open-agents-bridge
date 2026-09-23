@@ -1,39 +1,8 @@
 # CLI Integration Methods
 
-Open Agents Bridge supports three methods for integrating with CLI tools:
+Open Agents Bridge supports two methods for integrating with CLI tools:
 
-## 1. Wrapper Script (Universal)
-
-**Best for**: Any CLI tool without modification
-
-**How it works**:
-- Intercepts CLI commands before execution
-- Sends permission requests via Unix socket
-- Waits for approval before executing
-
-**Setup**:
-```bash
-cd bridge/scripts
-./install-kiro-wrapper.sh
-```
-
-**Usage**:
-```bash
-kiro-cli chat "your prompt"  # Automatically intercepted
-```
-
-**Pros**:
-- ✅ Works with any CLI
-- ✅ No source code modification needed
-- ✅ Simple to install
-
-**Cons**:
-- ⚠️ Command-level interception only
-- ⚠️ Limited visibility into tool calls
-
----
-
-## 2. Hook/Plugin (Event-based)
+## 1. Hook/Plugin (Event-based)
 
 **Best for**: CLIs that support hooks/plugins (like Claude CLI)
 
@@ -48,7 +17,7 @@ kiro-cli chat "your prompt"  # Automatically intercepted
 # CLI configured with hook settings
 ```
 
-**Configuration** (`~/.kiro/hooks.json`):
+**Configuration** (`~/.claude/hooks.json`):
 ```json
 {
   "hooks": {
@@ -85,7 +54,7 @@ kiro-cli chat "your prompt"  # Automatically intercepted
 
 ---
 
-## 3. ACP Protocol (Standard)
+## 2. ACP Protocol (Standard)
 
 **Best for**: CLIs built with ACP support
 
@@ -146,14 +115,13 @@ kiro-cli chat "your prompt"  # Automatically intercepted
 
 ## Comparison
 
-| Feature | Wrapper | Hook | ACP |
-|---------|---------|------|-----|
-| **No source modification** | ✅ | ✅ | ❌ |
-| **Works with any CLI** | ✅ | ❌ | ❌ |
-| **Event visibility** | ⚠️ Limited | ✅ Full | ✅ Full |
-| **Bidirectional control** | ❌ | ⚠️ Limited | ✅ Full |
-| **Setup complexity** | Low | Medium | Low |
-| **Performance** | Good | Good | Excellent |
+| Feature | Hook | ACP |
+|---------|------|-----|
+| **No source modification** | ✅ | ❌ |
+| **Event visibility** | ✅ Full | ✅ Full |
+| **Bidirectional control** | ⚠️ Limited | ✅ Full |
+| **Setup complexity** | Medium | Low |
+| **Performance** | Good | Excellent |
 
 ---
 
@@ -163,18 +131,11 @@ Bridge automatically selects the best method:
 
 1. **Check for ACP support** → Use ACP
 2. **Check for hook support** → Use Hooks
-3. **Fallback** → Use Wrapper
 
 **Configuration** (`~/.open-agents/config.json`):
 ```json
 {
   "clis": {
-    "kiro": {
-      "command": "kiro-cli",
-      "supportsACP": false,
-      "supportsHooks": false,
-      "adapter": "wrapper"
-    },
     "claude": {
       "command": "claude",
       "supportsHooks": true,
@@ -231,9 +192,6 @@ See `bridge/docs/ACP_SPEC.md` for full specification.
 ## Testing
 
 ```bash
-# Test wrapper
-kiro-cli chat "test"
-
 # Test hooks
 claude --settings ~/.open-agents/hooks.json
 
@@ -244,10 +202,6 @@ claude --settings ~/.open-agents/hooks.json
 ---
 
 ## Troubleshooting
-
-### Wrapper not working
-- Check if wrapper is in PATH
-- Verify Unix socket exists: `ls /tmp/open-agents.sock`
 
 ### Hooks not firing
 - Check hook server port: `netstat -an | grep <PORT>`

@@ -44,7 +44,6 @@ type Adapter interface {
 
 // Registry of available adapters
 var registry = map[string]func() Adapter{
-	"kiro":   func() Adapter { return NewKiroAdapter() },
 	"cline":  func() Adapter { return NewClineAdapter() },
 	"claude": func() Adapter { return NewClaudeAdapter() },
 	"codex":  func() Adapter { return NewCodexAdapter() },

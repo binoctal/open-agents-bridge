@@ -1486,7 +1486,7 @@ func (b *Bridge) handleSessionStart(msg Message) {
 	b.logDebug("[%s] sessionID=%s, cliType=%s, workDir=%s, cols=%d, rows=%d, permissionMode=%s", logger.ModSession, sessionID, cliType, workDir, cols, rows, permissionMode)
 
 	if cliType == "" {
-		cliType = "kiro" // default
+		cliType = "claude" // default
 	}
 	if workDir == "" {
 		workDir = "."
@@ -1676,7 +1676,7 @@ func (b *Bridge) handleResumeWithContext(msg Message) {
 	}
 
 	if cliType == "" {
-		cliType = "kiro"
+		cliType = "claude"
 	}
 	if workDir == "" {
 		workDir = "."
@@ -2358,7 +2358,7 @@ func (b *Bridge) handleChatSend(msg Message) {
 	sess := b.sessions.Get(sessionID)
 	if sess == nil {
 		var err error
-		sess, err = b.sessions.Create("kiro", ".")
+		sess, err = b.sessions.Create("claude", ".")
 		if err != nil {
 			b.logError("[%s] Failed to create session: %v", logger.ModSession, err)
 			return

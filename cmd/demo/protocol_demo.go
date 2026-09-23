@@ -206,7 +206,7 @@ func main() {
 	userID := flag.String("user-id", "", "User ID")
 	deviceToken := flag.String("token", "", "Device token")
 	workDir := flag.String("workdir", ".", "Working directory")
-	cliType := flag.String("cli", "claude", "CLI type (claude, kiro, cline, codex, gemini)")
+	cliType := flag.String("cli", "claude", "CLI type (claude, cline, codex, gemini)")
 	headless := flag.Bool("headless", false, "Run without Web UI forwarding")
 	flag.Parse()
 

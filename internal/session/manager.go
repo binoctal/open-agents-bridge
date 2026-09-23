@@ -462,8 +462,6 @@ func (m *Manager) getCLICommand(cliType string) (string, []string, error) {
 		// profile exits non-zero with that same fix-it hint, which fails loud
 		// up the session error channel — no detection probe needed here.
 		return "dsh", []string{"--profile", "acp"}, nil
-	case "kiro":
-		return "kiro", []string{"chat"}, nil
 	case "cline":
 		return "cline", nil, nil
 	case "codex":

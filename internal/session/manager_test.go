@@ -598,7 +598,6 @@ func TestManager_getCLICommand(t *testing.T) {
 		{"goose", "goose", "acp"},
 		{"gemini", "gemini-cli", "--acp"},
 		{"dsh", "dsh", "--profile"},
-		{"kiro", "kiro", "chat"},
 		{"cline", "cline", ""},
 		{"codex", "codex", ""},
 		{"aider", "aider", "--no-auto-commits"},

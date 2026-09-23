@@ -43,7 +43,7 @@ func main() {
 		Type: "session:start",
 		Payload: map[string]interface{}{
 			"deviceId": cfg.DeviceID,
-			"cliType":  "kiro",
+			"cliType":  "claude",
 			"workDir":  ".",
 			"command":  "chat \"Hello, what's 2+2?\"",
 		},

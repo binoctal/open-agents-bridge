@@ -6,7 +6,7 @@
 
 ## 功能
 
-- 连接 AI CLI：Claude Code、Gemini CLI、Goose、Cline、Codex、Kiro
+- 连接 AI CLI：Claude Code、Gemini CLI、Goose、Cline、Codex
 - WebSocket 实时通信
 - 端到端加密
 - 权限请求转发
@@ -99,7 +99,6 @@ open-agents-bridge service uninstall # 卸载服务
     "cline": true,
     "codex": true,
     "gemini": true,
-    "kiro": true
   }
 }
 ```
@@ -113,7 +112,6 @@ open-agents-bridge service uninstall # 卸载服务
 | Goose | 支持 |
 | Cline | 支持 |
 | Codex | 支持 |
-| Kiro | 支持 |
 
 ## 开发
 

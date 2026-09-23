@@ -6,7 +6,7 @@ Local Bridge CLI that connects AI coding tools with the OpenAgents cloud platfor
 
 ## Features
 
-- Connect AI CLIs: Claude Code, Gemini CLI, Goose, Cline, Codex, Kiro
+- Connect AI CLIs: Claude Code, Gemini CLI, Goose, Cline, Codex
 - Real-time WebSocket communication
 - End-to-end encryption
 - Permission request forwarding
@@ -99,7 +99,6 @@ Config files are stored in `~/.open-agents-bridge/`:
     "cline": true,
     "codex": true,
     "gemini": true,
-    "kiro": true
   }
 }
 ```
@@ -113,7 +112,6 @@ Config files are stored in `~/.open-agents-bridge/`:
 | Goose | Supported |
 | Cline | Supported |
 | Codex | Supported |
-| Kiro | Supported |
 
 ## Development
 

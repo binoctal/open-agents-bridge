@@ -18,7 +18,6 @@ var cliDetectMap = map[string]string{
 	"gemini":     "gemini-cli",
 	"opencode":   "opencode",
 	"dsh":        "dsh", // DeepSeek Harness; ACP server needs one-time `dsh plugin --profile acp add @deepseek-ai/dsh-acp`
-	"kiro":       "kiro",
 	"cline":      "cline",
 	"codex":      "codex",
 	"aider":      "aider",
@@ -72,7 +71,6 @@ func DefaultFallbackChain() []ModelFallback {
 	return []ModelFallback{
 		{CLIType: "claude", Fallback: "codex", OnError: "any"},
 		{CLIType: "claude-pty", Fallback: "aider", OnError: "any"},
-		{CLIType: "kiro", Fallback: "claude", OnError: "any"},
 		{CLIType: "codex", Fallback: "claude", OnError: "any"},
 		{CLIType: "gemini", Fallback: "claude", OnError: "any"},
 		{CLIType: "opencode", Fallback: "claude", OnError: "any"},
