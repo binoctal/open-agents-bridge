@@ -35,6 +35,11 @@ type terminalState struct {
 // for a CLI that cannot speak ACP.
 const defaultInitTimeout = 30 * time.Second
 
+// turnIdleTimeout is how long a turn may go without any protocol traffic
+// (either direction) before the watchdog declares it stalled. Matches the
+// workflow task idle watchdog budget.
+const turnIdleTimeout = 5 * time.Minute
+
 // ACPAdapter implements the Agent Client Protocol (ACP)
 type ACPAdapter struct {
 	cmd        *exec.Cmd
@@ -72,6 +77,15 @@ type ACPAdapter struct {
 	// Agent health tracking
 	consecutiveErrors atomic.Int32
 	isProcessing      atomic.Bool // true while waiting for session/prompt response
+	// Turn bookkeeping. lastPromptID ties prompt responses back to the request
+	// that started the turn: matching by id (not by result shape) keeps
+	// isProcessing from latching when an agent replies without a stopReason
+	// field. lastActivity feeds the turn idle watchdog — a turn with no wire
+	// traffic for turnIdleTimeout is reported and unblocked instead of
+	// wedging the session silently (staging 2026-09-23: tool completed but
+	// the final reply never arrived, every later prompt timed out quietly).
+	lastPromptID atomic.Value // string; "" when no prompt is in flight
+	lastActivity atomic.Int64 // unix nano of last frame sent or received
 	// Replay recording (off by default): when non-nil, raw wire frames are
 	// mirrored to a script file at the stdio boundary. A nil recorder makes
 	// every hook a no-op, so the production path pays nothing. recorderMu
@@ -232,6 +246,9 @@ func (a *ACPAdapter) Connect(config AdapterConfig) error {
 	// Monitor process exit
 	go a.monitorProcess()
 
+	// Report turns that stall with no wire traffic (exits when disconnected)
+	go a.turnWatchdog()
+
 	// Send initialize request
 	if err := a.initialize(); err != nil {
 		// We hold a.mu here; calling Disconnect() would re-lock and deadlock
@@ -387,10 +404,12 @@ ready:
 		a.inputTokens.Add(tokens)
 
 		// ACP session/prompt expects prompt as an array of content objects
+		promptID := a.nextRequestID()
 		a.isProcessing.Store(true)
+		a.lastPromptID.Store(promptID)
 		req := map[string]interface{}{
 			"jsonrpc": "2.0",
-			"id":      a.nextRequestID(),
+			"id":      promptID,
 			"method":  "session/prompt",
 			"params": map[string]interface{}{
 				"sessionId": a.sessionID,
@@ -722,6 +741,8 @@ func (a *ACPAdapter) readErrors() {
 
 // handleMessage processes incoming JSON-RPC messages
 func (a *ACPAdapter) handleMessage(msg map[string]interface{}) {
+	a.lastActivity.Store(time.Now().UnixNano())
+
 	method, _ := msg["method"].(string)
 
 	switch method {
@@ -1314,20 +1335,26 @@ func (a *ACPAdapter) handleTerminalWaitForExit(msg map[string]interface{}) {
 		return
 	}
 
-	// Wait for command to complete
-	<-state.doneChan
+	// Wait for command to complete OFF the read loop: readMessages handles
+	// frames serially, so a blocking wait here starves every later frame —
+	// including the session/prompt response that ends the turn (staging
+	// 2026-09-23 wedge: a hung command froze the whole ACP channel while the
+	// CLI sat idle). The response carries reqID, so replying asynchronously
+	// is protocol-safe.
+	go func() {
+		<-state.doneChan
 
-	// Send response with exit status
-	response := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      reqID,
-		"result": map[string]interface{}{
-			"exitStatus": map[string]interface{}{
-				"exitCode": state.exitCode,
+		response := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      reqID,
+			"result": map[string]interface{}{
+				"exitStatus": map[string]interface{}{
+					"exitCode": state.exitCode,
+				},
 			},
-		},
-	}
-	a.sendJSONRPC(response)
+		}
+		a.sendJSONRPC(response)
+	}()
 }
 
 // handleTerminalOutputRequest handles terminal/output requests from agent
@@ -1364,24 +1391,26 @@ func (a *ACPAdapter) handleTerminalOutputRequest(msg map[string]interface{}) {
 		return
 	}
 
-	// Wait for command to complete if not done
-	if !state.done {
-		<-state.doneChan
-	}
+	// Wait for command to complete if not done — off the read loop for the
+	// same reason as handleTerminalWaitForExit (see comment there).
+	go func() {
+		if !state.done {
+			<-state.doneChan
+		}
 
-	// Send response with output
-	response := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      reqID,
-		"result": map[string]interface{}{
-			"output":    state.output,
-			"truncated": state.truncated,
-			"exitStatus": map[string]interface{}{
-				"exitCode": state.exitCode,
+		response := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      reqID,
+			"result": map[string]interface{}{
+				"output":    state.output,
+				"truncated": state.truncated,
+				"exitStatus": map[string]interface{}{
+					"exitCode": state.exitCode,
+				},
 			},
-		},
-	}
-	a.sendJSONRPC(response)
+		}
+		a.sendJSONRPC(response)
+	}()
 }
 
 // handleTerminalRelease handles terminal/release requests - releases terminal resources
@@ -1417,6 +1446,16 @@ func (a *ACPAdapter) handleTerminalRelease(msg map[string]interface{}) {
 func (a *ACPAdapter) handleResponse(msg map[string]interface{}) {
 	result, _ := msg["result"].(map[string]interface{})
 
+	// A response to our in-flight session/prompt: matched by request id, not
+	// by result shape. Matching on the stopReason field alone meant an agent
+	// reply without it (or with an unrecognized value) left isProcessing
+	// latched true — every later prompt then timed out waiting in SendMessage.
+	if id, _ := msg["id"].(string); id != "" && id == a.promptIDInFlight() {
+		a.lastPromptID.Store("")
+		a.handlePromptResult(result)
+		return
+	}
+
 	// Handle session/new response (contains sessionId)
 	if sessionID, ok := result["sessionId"].(string); ok {
 		a.sessionID = sessionID
@@ -1450,67 +1489,82 @@ func (a *ACPAdapter) handleResponse(msg map[string]interface{}) {
 		return
 	}
 
-	// Handle session/prompt response (contains stopReason)
-	if stopReason, ok := result["stopReason"].(string); ok {
-		logger.Debug("[%s] Prompt response received, stopReason: %s", logger.ModACP, stopReason)
+	// Handle session/prompt response (contains stopReason) — legacy path for
+	// responses whose id did not match the in-flight prompt (e.g. a replay
+	// fixture that replays the recorded id on a later turn, or an agent that
+	// answers with its own id). The id-matched branch above returns before
+	// reaching here, so a matching reply is never processed twice.
+	if stopReason, ok := result["stopReason"].(string); ok && stopReason != "" {
+		a.lastPromptID.Store("")
+		a.handlePromptResult(result)
+	}
+}
 
-		switch stopReason {
-		case "end_turn", "max_tokens", "max_turn_requests":
-			a.consecutiveErrors.Store(0)
-			a.isProcessing.Store(false) // turn complete, agent is idle
-			a.emitMessage(Message{
-				Type:    MessageTypeStatus,
-				Content: StatusIdle,
-				Meta: map[string]interface{}{
-					"protocol":   "acp",
-					"stopReason": stopReason,
-				},
-			})
+// handlePromptResult processes the response to our session/prompt request.
+// stopReason is optional: a reply without it (or with a value we don't know)
+// still ends the turn — the agent answered, whatever shape the answer took.
+func (a *ACPAdapter) handlePromptResult(result map[string]interface{}) {
+	stopReason, _ := result["stopReason"].(string)
 
-			inputTokens := a.inputTokens.Load()
-			outputTokens := a.outputTokens.Load()
-			a.emitMessage(Message{
-				Type: MessageTypeUsage,
-				Content: UsageStats{
-					InputTokens:   int(inputTokens),
-					OutputTokens:  int(outputTokens),
-					CacheCreation: 0,
-					CacheRead:     0,
-					ContextSize:   int(inputTokens + outputTokens),
-				},
-				Meta: map[string]interface{}{
-					"protocol":   "acp",
-					"stopReason": stopReason,
-				},
-			})
+	switch stopReason {
+	case "refusal":
+		a.isProcessing.Store(false)
+		a.emitMessage(Message{
+			Type:    MessageTypeError,
+			Content: "Agent refused to continue",
+			Meta: map[string]interface{}{
+				"protocol":   "acp",
+				"stopReason": "refusal",
+			},
+		})
 
-		case "cancelled":
-			a.isProcessing.Store(false)
-			a.emitMessage(Message{
-				Type:    MessageTypeStatus,
-				Content: StatusIdle,
-				Meta: map[string]interface{}{
-					"protocol":   "acp",
-					"stopReason": "cancelled",
-				},
-			})
-
-		case "refusal":
-			a.isProcessing.Store(false)
-			a.emitMessage(Message{
-				Type:    MessageTypeError,
-				Content: "Agent refused to continue",
-				Meta: map[string]interface{}{
-					"protocol":   "acp",
-					"stopReason": "refusal",
-				},
-			})
+	default:
+		// end_turn, max_tokens, max_turn_requests, cancelled, unknown or
+		// missing — all mean the turn is over and the agent is idle.
+		a.consecutiveErrors.Store(0)
+		a.isProcessing.Store(false)
+		if stopReason == "" {
+			stopReason = "end_turn"
 		}
+		logger.Debug("[%s] Prompt response received, stopReason: %s", logger.ModACP, stopReason)
+		a.emitMessage(Message{
+			Type:    MessageTypeStatus,
+			Content: StatusIdle,
+			Meta: map[string]interface{}{
+				"protocol":   "acp",
+				"stopReason": stopReason,
+			},
+		})
+
+		inputTokens := a.inputTokens.Load()
+		outputTokens := a.outputTokens.Load()
+		a.emitMessage(Message{
+			Type: MessageTypeUsage,
+			Content: UsageStats{
+				InputTokens:   int(inputTokens),
+				OutputTokens:  int(outputTokens),
+				CacheCreation: 0,
+				CacheRead:     0,
+				ContextSize:   int(inputTokens + outputTokens),
+			},
+			Meta: map[string]interface{}{
+				"protocol":   "acp",
+				"stopReason": stopReason,
+			},
+		})
 	}
 }
 
 // handleError processes JSON-RPC errors
 func (a *ACPAdapter) handleError(msg map[string]interface{}) {
+	// An error reply to our in-flight prompt still answers the request:
+	// without this the turn never ends and SendMessage times out every
+	// later prompt waiting for the agent to go idle.
+	if id, _ := msg["id"].(string); id != "" && id == a.promptIDInFlight() {
+		a.lastPromptID.Store("")
+		a.isProcessing.Store(false)
+	}
+
 	errObj, _ := msg["error"].(map[string]interface{})
 	code, _ := errObj["code"].(float64)
 	message, _ := errObj["message"].(string)
@@ -1549,6 +1603,51 @@ func (a *ACPAdapter) emitMessage(msg Message) {
 	}
 }
 
+// promptIDInFlight returns the request id of the pending session/prompt, or
+// "" when the agent is idle.
+func (a *ACPAdapter) promptIDInFlight() string {
+	if v, ok := a.lastPromptID.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// turnWatchdog reports and unblocks turns that stall with zero wire traffic.
+// A dead agent (or one that lost the prompt response) used to leave
+// isProcessing latched forever: the session looked alive, but every later
+// prompt timed out in SendMessage with nothing but a Debug log on the bridge.
+// The watchdog surfaces that state as an error and clears the latch so the
+// next prompt gets a real chance (and a fresh watchdog window).
+func (a *ACPAdapter) turnWatchdog() {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		if !a.connected.Load() {
+			return
+		}
+		if !a.isProcessing.Load() {
+			continue
+		}
+		idle := time.Since(time.Unix(0, a.lastActivity.Load()))
+		if idle <= turnIdleTimeout {
+			continue
+		}
+		logger.Warn("[%s] Turn idle watchdog fired: no protocol activity in %s while prompt %q is in flight; unblocking and reporting",
+			logger.ModACP, idle.Round(time.Second), a.promptIDInFlight())
+		a.isProcessing.Store(false)
+		a.lastPromptID.Store("")
+		a.emitMessage(Message{
+			Type: MessageTypeError,
+			Content: fmt.Sprintf("agent turn stalled: no protocol activity for %s; if the session stays unresponsive, stop and restart it",
+				idle.Round(time.Second)),
+			Meta: map[string]interface{}{
+				"protocol": "acp",
+				"code":     "TURN_IDLE_TIMEOUT",
+			},
+		})
+	}
+}
+
 // sendJSONRPC sends a JSON-RPC message
 func (a *ACPAdapter) sendJSONRPC(msg interface{}) error {
 	data, err := json.Marshal(msg)
@@ -1559,6 +1658,7 @@ func (a *ACPAdapter) sendJSONRPC(msg interface{}) error {
 	if _, err := a.stdin.Write(append(data, '\n')); err != nil {
 		return err
 	}
+	a.lastActivity.Store(time.Now().UnixNano())
 	// Record after a successful write: the script must contain exactly the
 	// bytes that reached the CLI's stdin (replay plays them back verbatim).
 	a.recordFrame(replay.DirectionIn, json.RawMessage(data))

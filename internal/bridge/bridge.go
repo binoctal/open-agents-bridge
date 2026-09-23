@@ -2361,7 +2361,20 @@ func (b *Bridge) handleChatSend(msg Message) {
 	}
 
 	if err := sess.Send(content); err != nil {
-		b.logDebug("[%s] Failed to send to CLI: %v", logger.ModSession, err)
+		// "Debug only" here made a wedged turn invisible: prompts queued
+		// behind it time out in the protocol layer (60s wait for the agent
+		// to go idle) and the user sees pure silence. Surface it like
+		// handleSessionSend does.
+		b.logWarn("[%s] Failed to send to CLI: %v", logger.ModSession, err)
+		b.sendMessage(Message{
+			Type: "session:error",
+			Payload: map[string]interface{}{
+				"sessionId": sessionID,
+				"deviceId":  b.config.DeviceID,
+				"error":     fmt.Sprintf("Failed to send message: %v", err),
+			},
+			Timestamp: time.Now().UnixMilli(),
+		})
 	}
 }
 
