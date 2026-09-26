@@ -501,11 +501,14 @@ ready:
 		return a.sendJSONRPC(req)
 
 	case MessageTypeCancel:
-		// Cancel/interrupt current operation
-
-		req := map[string]interface{}{
+		// Cancel/interrupt current operation. The ACP spec defines
+		// session/cancel as a NOTIFICATION: it must carry no "id". Agents
+		// like claude-agent-acp register it via onNotification only, so a
+		// request form gets -32601 "Method not found" and the cancel is
+		// silently dropped — the turn keeps running until the idle
+		// watchdog reports it.
+		notification := map[string]interface{}{
 			"jsonrpc": "2.0",
-			"id":      a.nextRequestID(),
 			"method":  "session/cancel",
 			"params": map[string]interface{}{
 				"sessionId": a.sessionID,
@@ -513,7 +516,7 @@ ready:
 			},
 		}
 
-		return a.sendJSONRPC(req)
+		return a.sendJSONRPC(notification)
 	}
 
 	return nil
