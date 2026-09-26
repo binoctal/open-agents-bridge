@@ -1674,6 +1674,7 @@ func (a *ACPAdapter) handlePromptResult(result map[string]interface{}) {
 			Meta: map[string]interface{}{
 				"protocol":   "acp",
 				"stopReason": "refusal",
+				"kind":       "diagnostic",
 			},
 		})
 
@@ -1802,6 +1803,7 @@ func (a *ACPAdapter) turnWatchdog() {
 			Meta: map[string]interface{}{
 				"protocol": "acp",
 				"code":     "TURN_IDLE_TIMEOUT",
+				"kind":     "diagnostic",
 			},
 		})
 	}

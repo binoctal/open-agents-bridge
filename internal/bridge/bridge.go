@@ -1203,14 +1203,21 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 			b.logInfo("[%s] Non-fatal error on session %s, skipping fallback (protocol still connected)", logger.ModSession, sessionID)
 		}
 
+		errorPayload := map[string]interface{}{
+			"sessionId": sessionID,
+			"deviceId":  b.config.DeviceID,
+			"error":     msg.Content,
+			"protocol":  protocolName,
+		}
+		// Adapter-tagged kind (e.g. "diagnostic" on watchdog/refusal
+		// messages) rides along so the web client can tier it without
+		// sniffing the error text.
+		if kind, ok := msg.Meta["kind"].(string); ok {
+			errorPayload["kind"] = kind
+		}
 		b.sendMessage(Message{
-			Type: "session:error",
-			Payload: map[string]interface{}{
-				"sessionId": sessionID,
-				"deviceId":  b.config.DeviceID,
-				"error":     msg.Content,
-				"protocol":  protocolName,
-			},
+			Type:    "session:error",
+			Payload: errorPayload,
 			Timestamp: time.Now().UnixMilli(),
 		})
 
