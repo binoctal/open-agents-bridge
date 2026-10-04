@@ -165,6 +165,23 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 	}
 	m.applyPermissionMode(permissionMode, cliType, &config)
 
+	// engine-explicit-auth: judge the isolated config dir's OAuth credentials
+	// at creation time (a dead file is removed here). Never blocking — the
+	// verdict rides out as an auth_required pre-warning while the session
+	// starts normally, because the first two identity tiers (project settings
+	// env, bridge-injected env) may make the stale credentials irrelevant.
+	if cliType == "claude" {
+		if dir, err := claudeACPModeDir(permissionMode); err == nil {
+			if h := CheckCredentialHealth(dir, time.Now()); h != CredentialMissing {
+				if m.credentialHealthCallback != nil {
+					m.credentialHealthCallback(sess.ID, h)
+				}
+			}
+		} else {
+			logger.Warn("[%s] credential health check skipped, mode dir unavailable: %v", logger.ModSession, err)
+		}
+	}
+
 	// Replay recording (G17): when enabled, hand the protocol manager a
 	// per-session recorder before Connect so the ACP adapter mirrors raw
 	// wire frames to <replayDir>/<sessionID>.jsonl. Creation failure is

@@ -183,6 +183,11 @@ func loadFile() (*fileConfig, error) {
 		return nil, err
 	}
 
+	// engine-explicit-auth (D5): the file carries envVars that may hold
+	// credentials; tighten legacy copies that predate the 0600 write policy.
+	// Best-effort — a chmod failure never blocks startup.
+	_ = os.Chmod(ConfigPath(), 0600)
+
 	// Detect format: check if "devices" key exists
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {

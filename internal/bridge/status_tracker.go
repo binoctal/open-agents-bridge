@@ -6,6 +6,7 @@ import (
 
 	"github.com/binoctal/open-agents-bridge/internal/logger"
 	"github.com/binoctal/open-agents-bridge/internal/protocol"
+	"github.com/binoctal/open-agents-bridge/internal/session"
 )
 
 // G18: the AgentStatus vocabulary already existed on the wire and in the web
@@ -25,11 +26,21 @@ const statusDwell = time.Second
 
 // activeStatusRank orders the active states along the "progress" axis.
 // Higher rank = further along a turn. Backward moves (lower rank) are subject
-// to the dwell throttle; permission_pending and idle are always immediate.
+// to the dwell throttle.
 var activeStatusRank = map[protocol.AgentStatus]int{
 	protocol.StatusThinking:      1,
 	protocol.StatusStreaming:     2,
 	protocol.StatusToolExecuting: 3,
+}
+
+// immediateStatuses bypass both throttle paths in transition: they are not
+// turn-progress states, so flap/straggler logic does not apply.
+// auth_required joins permission_pending and idle (engine-explicit-auth): a
+// credential verdict must surface immediately, never dwell-throttled.
+var immediateStatuses = map[protocol.AgentStatus]bool{
+	protocol.StatusPermissionPending: true,
+	protocol.StatusAuthRequired:      true,
+	protocol.StatusIdle:              true,
 }
 
 // statusTracker is per-session state deriving AgentStatus transitions.
@@ -75,7 +86,7 @@ func (t *statusTracker) transition(next protocol.AgentStatus, force bool) (proto
 	if t.hasReported && next == t.reported {
 		return t.reported, false
 	}
-	if t.hasReported && !force {
+	if t.hasReported && !force && !immediateStatuses[next] {
 		_, nextActive := activeStatusRank[next]
 		// A backward move within the active states inside the dwell window
 		// is a flap — keep showing the more advanced state.
@@ -118,6 +129,15 @@ func statusFromMessage(msg protocol.Message) (protocol.AgentStatus, bool) {
 	case protocol.MessageTypeStatus:
 		if s, ok := msg.Content.(protocol.AgentStatus); ok {
 			return s, true
+		}
+		return "", false
+	case protocol.MessageTypeError:
+		// engine-explicit-auth: an auth-class engine error (401 OAuth
+		// failure, sniffed via classifyAuthError) derives auth_required so
+		// the web can render fix guidance. Any other error text implies no
+		// status at all.
+		if authErrorCodeOf(msg) != "" {
+			return protocol.StatusAuthRequired, true
 		}
 		return "", false
 	}
@@ -167,7 +187,7 @@ func (b *Bridge) removeStatusTracker(sessionID string) {
 // session's tracker and broadcasts agent:status on a real transition.
 func (b *Bridge) observeSessionStatus(sessionID, protocolName string, msg protocol.Message) {
 	if s, changed := b.statusTrackerFor(sessionID).observe(msg); changed {
-		b.sendStatus(sessionID, protocolName, s, "")
+		b.sendStatus(sessionID, protocolName, s, "", authErrorCodeOf(msg))
 	}
 }
 
@@ -175,33 +195,72 @@ func (b *Bridge) observeSessionStatus(sessionID, protocolName string, msg protoc
 // to the CLI. This is the server-side fact the web used to fake locally.
 func (b *Bridge) notePromptSent(sessionID, protocolName string) {
 	if s, changed := b.statusTrackerFor(sessionID).observePrompt(); changed {
-		b.sendStatus(sessionID, protocolName, s, "")
+		b.sendStatus(sessionID, protocolName, s, "", "")
 	}
 }
 
 // sendStatusLabel forwards a label-class update: the status field stays a
 // valid enum value (the tracker's current one) and the label rides in detail.
 func (b *Bridge) sendStatusLabel(sessionID, protocolName, label string) {
-	b.sendStatus(sessionID, protocolName, b.statusTrackerFor(sessionID).current(), label)
+	b.sendStatus(sessionID, protocolName, b.statusTrackerFor(sessionID).current(), label, "")
+}
+
+// handleCredentialHealth maps the creation-time credential verdict (D3) to an
+// auth_required pre-warning via credentialHealthDetail.
+func (b *Bridge) handleCredentialHealth(sessionID string, h session.CredentialHealth) {
+	detail, emit := credentialHealthDetail(h)
+	if !emit {
+		return
+	}
+	// "acp" is the claude engine's protocol; the check runs pre-Connect when
+	// the session's protocol manager may not answer its name yet.
+	b.sendStatus(sessionID, "acp", protocol.StatusAuthRequired, detail, errorCodeAuthExpired)
+}
+
+// credentialHealthDetail maps a health verdict to its report detail. Dead and
+// ExpiringSoon both carry AUTH_EXPIRED so the web renders the same fix
+// guidance; the detail distinguishes them. Missing/Healthy report nothing
+// (spec zero-report rule). Pure for unit testing.
+func credentialHealthDetail(h session.CredentialHealth) (string, bool) {
+	switch h {
+	case session.CredentialDead:
+		return "credential_dead", true
+	case session.CredentialExpiringSoon:
+		return "credential_expiring_soon", true
+	default:
+		return "", false
+	}
 }
 
 // sendStatus is the single agent:status emitter. status MUST be a valid
 // AgentStatus enum value — never a label string (the web maps unknown values
-// to nothing and old builds mapped them to idle, resetting the UI).
-func (b *Bridge) sendStatus(sessionID, protocolName string, status protocol.AgentStatus, detail string) {
-	payload := map[string]interface{}{
-		"sessionId": sessionID,
-		"deviceId":  b.config.DeviceID,
-		"status":    status,
-		"protocol":  protocolName,
-	}
-	if detail != "" {
-		payload["detail"] = detail
-	}
+// to nothing and old builds mapped them to idle, resetting the UI). code is
+// an optional structured error code (engine-explicit-auth) riding alongside
+// the status for auth_required renderings.
+func (b *Bridge) sendStatus(sessionID, protocolName string, status protocol.AgentStatus, detail, code string) {
+	payload := statusPayload(b.config.DeviceID, sessionID, protocolName, status, detail, code)
 	b.sendMessage(Message{
 		Type:      "agent:status",
 		Payload:   payload,
 		Timestamp: time.Now().UnixMilli(),
 	})
 	logger.Debug("[%s] agent status -> %s (session %s)", logger.ModBridge, status, sessionID)
+}
+
+// statusPayload builds the agent:status payload. Pure so the field contract
+// (enum-only status, optional detail/code) is unit-testable without a WS.
+func statusPayload(deviceID, sessionID, protocolName string, status protocol.AgentStatus, detail, code string) map[string]interface{} {
+	payload := map[string]interface{}{
+		"sessionId": sessionID,
+		"deviceId":  deviceID,
+		"status":    status,
+		"protocol":  protocolName,
+	}
+	if detail != "" {
+		payload["detail"] = detail
+	}
+	if code != "" {
+		payload["code"] = code
+	}
+	return payload
 }

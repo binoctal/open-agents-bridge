@@ -32,6 +32,11 @@ type Manager struct {
 	exitCallback     ExitCallback
 	capacityCallback func()
 	removedCallback  RemovedCallback
+	// credentialHealthCallback reports the claude ACP credential health
+	// verdict at session creation (engine-explicit-auth). The bridge maps
+	// Dead/ExpiringSoon to an auth_required pre-warning; Missing/Healthy are
+	// never reported. Set once at startup, read on creation paths.
+	credentialHealthCallback func(sessionID string, h CredentialHealth)
 	maxConcurrent    int
 	queue            []QueueItem
 	queueMu          sync.Mutex
@@ -165,6 +170,13 @@ func (m *Manager) SetExitCallback(callback ExitCallback) {
 // asynchronously from every delete site — safe to re-enter the manager.
 func (m *Manager) SetRemovedCallback(callback RemovedCallback) {
 	m.removedCallback = callback
+}
+
+// SetCredentialHealthCallback registers the creation-time claude credential
+// verdict hook (engine-explicit-auth). Fired inline from the creation path,
+// after the session is registered — the callback must not block.
+func (m *Manager) SetCredentialHealthCallback(callback func(sessionID string, h CredentialHealth)) {
+	m.credentialHealthCallback = callback
 }
 
 // notifyRemoved fires the removal callback off the lock. Callers hold m.mu

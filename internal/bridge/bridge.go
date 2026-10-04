@@ -463,6 +463,9 @@ func (b *Bridge) Start() error {
 	b.sessions.SetCapacityCallback(b.drainTaskQueue)
 	// Session removal (all six delete paths) drops the G18 status tracker.
 	b.sessions.SetRemovedCallback(b.removeStatusTracker)
+	// engine-explicit-auth: creation-time claude credential verdict →
+	// auth_required pre-warning.
+	b.sessions.SetCredentialHealthCallback(b.handleCredentialHealth)
 	if err := b.connect(); err != nil {
 		return err
 	}
@@ -1214,6 +1217,12 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 		// sniffing the error text.
 		if kind, ok := msg.Meta["kind"].(string); ok {
 			errorPayload["kind"] = kind
+		}
+		// engine-explicit-auth (D2): an OAuth-failure hit stamps a structured
+		// code the web renders fix guidance from; a miss forwards the error
+		// verbatim with no code — never worse than the status quo.
+		if code := authErrorCodeOf(msg); code != "" {
+			errorPayload["code"] = code
 		}
 		b.sendMessage(Message{
 			Type:    "session:error",
@@ -4058,7 +4067,7 @@ func (b *Bridge) handleQuestionMarker(sessionID string, sess *session.Session, c
 	// G18: a [QUESTION] on the PTY path is the permission-pending signal —
 	// reuse of the one pattern matcher we have, no second copy of it.
 	if s, changed := b.statusTrackerFor(sessionID).transition(protocol.StatusPermissionPending, false); changed {
-		b.sendStatus(sessionID, sess.GetProtocolName(), s, "")
+		b.sendStatus(sessionID, sess.GetProtocolName(), s, "", "")
 	}
 
 	// Send question to frontend via WebSocket
