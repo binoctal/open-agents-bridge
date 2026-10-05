@@ -22,7 +22,12 @@ lock_versions() {
   local tag cli
   tag=$(grep -E '^NODE_IMAGE_TAG=' versions.env | cut -d= -f2-)
   cli=$(grep -E '^CLAUDE_CODE_VERSION=' versions.env | cut -d= -f2-)
-  [ -n "$tag" ] && [ -n "$cli" ] || { echo "versions.env incomplete" >&2; exit 1; }
+  bridge=$(grep -E '^BRIDGE_VERSION=' versions.env | cut -d= -f2-)
+  [ -n "$tag" ] && [ -n "$cli" ] && [ -n "$bridge" ] || { echo "versions.env incomplete" >&2; exit 1; }
+  if [ "$bridge" = "latest" ] || [ "$bridge" = "*" ]; then
+    echo "refusing to lock a floating bridge spec ($bridge): pin an exact version" >&2
+    exit 1
+  fi
   if [ "$cli" = "latest" ] || [ "$cli" = "*" ]; then
     echo "refusing to lock a floating CLI spec ($cli): pin an exact version" >&2
     exit 1
@@ -50,6 +55,7 @@ lock_versions() {
     echo "NODE_IMAGE_TAG=${tag}"
     echo "NODE_DIGEST=${digest}"
     echo "CLAUDE_CODE_VERSION=${cli}"
+    echo "BRIDGE_VERSION=${bridge}"
   } > versions.lock
   echo "versions.lock updated: $tag -> $digest, claude-code $cli"
 }
@@ -59,13 +65,14 @@ lock_versions() {
 
 # shellcheck disable=SC1091
 source versions.lock
-: "${NODE_IMAGE_TAG:?}" "${NODE_DIGEST:?}" "${CLAUDE_CODE_VERSION:?}"
+: "${NODE_IMAGE_TAG:?}" "${NODE_DIGEST:?}" "${CLAUDE_CODE_VERSION:?}" "${BRIDGE_VERSION:?}"
 
 TAG=${TAG:-$(date +%Y-%m-%d)}
 docker build \
   --build-arg NODE_IMAGE="${NODE_IMAGE_TAG%%:*}" \
   --build-arg NODE_DIGEST="$NODE_DIGEST" \
   --build-arg CLAUDE_CODE_VERSION="$CLAUDE_CODE_VERSION" \
+  --build-arg BRIDGE_VERSION="$BRIDGE_VERSION" \
   -t "$IMAGE_NAME:$TAG" .
 
 # Secret scan BEFORE the image is recorded as usable: a secret that baked in

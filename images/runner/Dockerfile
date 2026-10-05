@@ -15,7 +15,11 @@ ARG NODE_IMAGE
 ARG NODE_DIGEST
 FROM ${NODE_IMAGE}@${NODE_DIGEST}
 ARG CLAUDE_CODE_VERSION
+ARG BRIDGE_VERSION
+# The bridge serves cloud interactive sessions (entrypoint.sh: SESSION_TOKEN).
+# Exact version only; its postinstall pins and verifies the release archive.
 RUN npm install -g --no-audit --no-fund @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+    @binoctal/open-agents-bridge@${BRIDGE_VERSION} \
  && npm cache clean --force
 WORKDIR /workspace
 COPY runner.mjs /opt/runner/runner.mjs
