@@ -17,6 +17,10 @@ const (
 	envUserID       = "USER_ID"
 	envShadowDevice = "SHADOW_DEVICE_ID"
 	envAPIBaseURL   = "API_BASE_URL"
+	// envModel is the catalog model the platform picked for this session. The
+	// gateway refuses any model outside its catalog, and Claude Code's own
+	// defaults (opus/sonnet/haiku names) are not in it.
+	envModel = "MODEL"
 )
 
 // SessionEnvActive reports whether the process was launched as a cloud
@@ -68,6 +72,17 @@ func FromSessionEnv() (*Config, error) {
 	// see any other credential source in this container.
 	_ = os.Setenv("ANTHROPIC_BASE_URL", apiBase+"/api/sandbox/llm")
 	_ = os.Setenv("ANTHROPIC_AUTH_TOKEN", token)
+	if model := strings.TrimSpace(os.Getenv(envModel)); model != "" {
+		for _, k := range []string{
+			"ANTHROPIC_MODEL",
+			"ANTHROPIC_SMALL_FAST_MODEL",
+			"ANTHROPIC_DEFAULT_OPUS_MODEL",
+			"ANTHROPIC_DEFAULT_SONNET_MODEL",
+			"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		} {
+			_ = os.Setenv(k, model)
+		}
+	}
 	_ = os.Setenv("DISABLE_TELEMETRY", "1")
 	_ = os.Setenv("DISABLE_ERROR_REPORTING", "1")
 

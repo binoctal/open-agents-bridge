@@ -35,6 +35,25 @@ func TestFromSessionEnvBuildsConfigAndGatewayCredential(t *testing.T) {
 	}
 }
 
+func TestFromSessionEnvPinsCatalogModelWhenProvided(t *testing.T) {
+	setSessionEnv(t, map[string]string{
+		envSessionToken: "sst_abc", envSessionID: "s1", envUserID: "u1",
+		envShadowDevice: "cse_1", envAPIBaseURL: "https://api.example",
+	})
+	t.Setenv(envModel, "deepseek-flash")
+	for _, k := range []string{"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"} {
+		t.Setenv(k, "")
+	}
+	if _, err := FromSessionEnv(); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"} {
+		if got := os.Getenv(k); got != "deepseek-flash" {
+			t.Fatalf("%s = %q, want deepseek-flash", k, got)
+		}
+	}
+}
+
 func TestFromSessionEnvFailsLoudlyWhenIncomplete(t *testing.T) {
 	setSessionEnv(t, map[string]string{envSessionToken: "sst_abc"})
 	if _, err := FromSessionEnv(); err == nil {
