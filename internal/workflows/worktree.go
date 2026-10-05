@@ -249,7 +249,17 @@ func parseConflictFiles(mergeOutput string) []string {
 	return files
 }
 
-// CleanupStaleWorktrees scans and removes worktrees not belonging to active tasks
+// CleanupStaleWorktrees scans and removes worktrees not belonging to active
+// tasks — but only those that carry nothing of value. The startup sweep runs
+// with no active-task list, and it used to `worktree remove --force` +
+// `branch -D` every task worktree: a bridge restart destroyed completed but
+// not-yet-merged task branches (permanently when the branch push had failed)
+// and the uncommitted work of a task interrupted mid-run, which the
+// re-dispatch path (known-issue #20) would otherwise resume in place. A
+// worktree is now reclaimed only when its tree is clean AND its branch has no
+// commits outside the main checkout's HEAD (merged, or the task produced
+// nothing). Anything else — including any git failure while deciding — is
+// kept.
 func (w *WorktreeManager) CleanupStaleWorktrees(activeTaskIDs map[string]bool) ([]string, error) {
 	worktreesDir := filepath.Join(w.projectDir, WorktreesDir)
 
@@ -282,17 +292,21 @@ func (w *WorktreeManager) CleanupStaleWorktrees(activeTaskIDs map[string]bool) (
 			continue
 		}
 
-		// Remove stale worktree
 		worktreePath := filepath.Join(worktreesDir, dirName)
-		cmd := exec.Command("git", "worktree", "remove", worktreePath, "--force")
-		cmd.Dir = w.projectDir
-		if err := cmd.Run(); err != nil {
-			// If git worktree remove fails, try force directory removal
-			os.RemoveAll(worktreePath)
+		if !w.worktreeIsDisposable(worktreePath, dirName) {
+			continue
 		}
 
-		// Delete the branch
-		cmd = exec.Command("git", "branch", "-D", dirName)
+		// Without --force: a tree that turned dirty since the check makes
+		// git refuse, and the worktree is kept.
+		cmd := exec.Command("git", "worktree", "remove", worktreePath)
+		cmd.Dir = w.projectDir
+		if err := cmd.Run(); err != nil {
+			continue
+		}
+
+		// -d (not -D) refuses a branch that is not merged into HEAD.
+		cmd = exec.Command("git", "branch", "-d", dirName)
 		cmd.Dir = w.projectDir
 		cmd.Run()
 
@@ -300,6 +314,26 @@ func (w *WorktreeManager) CleanupStaleWorktrees(activeTaskIDs map[string]bool) (
 	}
 
 	return cleaned, nil
+}
+
+// worktreeIsDisposable reports whether a task worktree holds no work worth
+// keeping: a clean tree and a branch with no commits outside the main
+// checkout's HEAD. Any git failure answers false.
+func (w *WorktreeManager) worktreeIsDisposable(worktreePath, branchName string) bool {
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = worktreePath
+	out, err := cmd.Output()
+	if err != nil || len(strings.TrimSpace(string(out))) > 0 {
+		return false
+	}
+
+	cmd = exec.Command("git", "rev-list", "--count", "HEAD.."+branchName)
+	cmd.Dir = w.projectDir
+	out, err = cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "0"
 }
 
 // GetBranchName returns the branch name for a given job and task
