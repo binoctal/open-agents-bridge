@@ -10,6 +10,7 @@ import (
 
 	"github.com/binoctal/open-agents-bridge/internal/bridge"
 	"github.com/binoctal/open-agents-bridge/internal/config"
+	"github.com/binoctal/open-agents-bridge/internal/instancelock"
 	"github.com/binoctal/open-agents-bridge/internal/logger"
 	"github.com/binoctal/open-agents-bridge/internal/tray"
 	"github.com/spf13/cobra"
@@ -44,7 +45,7 @@ Examples:
 			targetDevice = os.Getenv("OPEN_AGENTS_DEVICE")
 		}
 
-		if targetDevice == "" {
+		if targetDevice == "" && !config.SessionEnvActive() {
 			fmt.Fprintln(os.Stderr, "Error: device name is required.")
 			fmt.Fprintln(os.Stderr, "Usage: open-agents-bridge start -d <device>")
 			fmt.Fprintln(os.Stderr)
@@ -77,7 +78,17 @@ Examples:
 
 		var cfg *config.Config
 
-		cfg, err = config.LoadDevice(targetDevice)
+		if config.SessionEnvActive() {
+			// Cloud session container: identity comes from the environment.
+			cfg, err = config.FromSessionEnv()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			targetDevice = cfg.DeviceID
+		} else {
+			cfg, err = config.LoadDevice(targetDevice)
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: device '%s' not found.\n", targetDevice)
 			fmt.Fprintln(os.Stderr, "Run 'open-agents-bridge devices' to see available devices.")
@@ -88,6 +99,17 @@ Examples:
 		if deviceDisplay == "" {
 			deviceDisplay = targetDevice
 		}
+
+		// One bridge per device on this machine: take the kernel lock before any
+		// network call so a second launch (service + manual start, a stray
+		// terminal) exits instead of fighting the first over the connection.
+		instLock, err := instancelock.Acquire(instancelock.PathFor(config.ConfigDir(), cfg.DeviceID))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v.\n", err)
+			fmt.Fprintf(os.Stderr, "Stop the other bridge for '%s' first (open-agents-bridge status).\n", deviceDisplay)
+			os.Exit(1)
+		}
+		defer instLock.Close()
 
 		fmt.Printf("Starting Open Agents Bridge...\n")
 		fmt.Printf("  Device:   %s\n", deviceDisplay)

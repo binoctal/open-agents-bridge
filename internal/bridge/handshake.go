@@ -87,6 +87,12 @@ func buildCapabilityReport(version, probeResult, probeDetail string, e2ee bool) 
 		"callbackProbe": probeResult,
 		"e2ee":          e2ee,
 		"detail":        probeDetail,
+		// sessionSpec: bridge understands session:spec_update and reports
+		// session:status (session-spec-status protocol, version 1).
+		"sessionSpec": 1,
+		// missionDelivery: bridge integrates missions into oa/mission-<m>
+		// and handles workflow:deliver (mission-branch-delivery, version 1).
+		"missionDelivery": 1,
 	}
 }
 

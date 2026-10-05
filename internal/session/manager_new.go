@@ -18,12 +18,36 @@ import (
 // potentially slow Connect() call runs outside the lock to avoid blocking
 // other session operations (Get, Stop, etc.) for up to 60 seconds.
 func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, rows int, permissionMode string) (*Session, error) {
+	return m.createSession(cliType, workDir, sessionID, cols, rows, permissionMode, nil)
+}
+
+// StartTaskSession creates a workflow task session. The task identity
+// (JobID/TaskID, session ID == task ID) is written when the session is
+// registered, and the task-pool admission check runs under the same lock, so
+// "is there a free task slot" and "occupy it" are one atomic step: concurrent
+// dispatch and queue drain cannot both claim the last slot, and a session in
+// Connect() already counts as a task session. Returns ErrTaskPoolFull when
+// MaxConcurrent task sessions are active; the caller queues the task.
+func (m *Manager) StartTaskSession(cliType, workDir, taskID, jobID string, cols, rows int, permissionMode string) (*Session, error) {
+	return m.createSession(cliType, workDir, taskID, cols, rows, permissionMode, &taskSpec{jobID: jobID})
+}
+
+func (m *Manager) createSession(cliType, workDir, sessionID string, cols, rows int, permissionMode string, task *taskSpec) (*Session, error) {
 	// Use provided sessionID or generate a new one
 	if sessionID == "" {
 		sessionID = uuid.New().String()
 	}
 	if permissionMode == "" {
 		permissionMode = "default"
+	}
+	// Capture the profile env before any replace path fires the removal
+	// callback (which may drop the session->profile binding).
+	m.mu.RLock()
+	resolver := m.envResolver
+	m.mu.RUnlock()
+	var profileEnv map[string]string
+	if resolver != nil {
+		profileEnv = resolver(sessionID)
 	}
 
 	// Expand `~`/`~/...` to the device home directory before the path reaches
@@ -90,6 +114,11 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 			logger.ModSession, sessionID, cliType, workDir)
 	}
 
+	if task != nil && m.activeTaskCountLocked(sessionID) >= m.maxConcurrent {
+		m.mu.Unlock()
+		return nil, ErrTaskPoolFull
+	}
+
 	protocolMgr := protocol.NewManager()
 	sess := &Session{
 		ID:             sessionID,
@@ -101,6 +130,11 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 		CreatedAt:      time.Now(),
 		ioLogger:       m.ioLogger,
 		connecting:     true,
+	}
+	if task != nil {
+		sess.JobID = task.jobID
+		sess.TaskID = sessionID
+		sess.StartedAt = time.Now()
 	}
 
 	logger.Debug("[%s] Setting up message callback for session %s", logger.ModSession, sessionID)
@@ -136,6 +170,9 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 	m.sessions[sess.ID] = sess
 	m.mu.Unlock()
 	// --- End of locked phase ---
+	if task != nil && m.testHookTaskRegistered != nil {
+		m.testHookTaskRegistered()
+	}
 
 	// --- Phase 2: Connect() outside lock (may block up to 60s for ACP handshake) ---
 	command, args, err := m.getCLICommand(cliType)
@@ -164,6 +201,7 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 		config.ForceProtocol = "pty"
 	}
 	m.applyPermissionMode(permissionMode, cliType, &config)
+	mergeProfileEnv(&config, profileEnv, sessionID)
 
 	// engine-explicit-auth: judge the isolated config dir's OAuth credentials
 	// at creation time (a dead file is removed here). Never blocking — the
@@ -171,7 +209,7 @@ func (m *Manager) CreateWithIDAndSize(cliType, workDir, sessionID string, cols, 
 	// starts normally, because the first two identity tiers (project settings
 	// env, bridge-injected env) may make the stale credentials irrelevant.
 	if cliType == "claude" {
-		if dir, err := claudeACPModeDir(permissionMode); err == nil {
+		if dir, err := claudeACPSharedDir(); err == nil {
 			if h := CheckCredentialHealth(dir, time.Now()); h != CredentialMissing {
 				if m.credentialHealthCallback != nil {
 					m.credentialHealthCallback(sess.ID, h)

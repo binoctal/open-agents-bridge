@@ -8,6 +8,9 @@ import (
 	"strings"
 )
 
+// WorktreesDir is the LEGACY in-repo worktree directory. New worktrees live
+// outside the user's repository (see worktreeRoot); this location is still
+// honoured so existing worktrees are reused and swept.
 const WorktreesDir = ".open-agents-bridge-worktrees"
 
 // WorktreeManager manages git worktrees for parallel task execution
@@ -71,36 +74,14 @@ func (w *WorktreeManager) IsGitRepo() bool {
 	return info.IsDir() || !info.IsDir()
 }
 
-// CreateWorktree creates a new git worktree for the given task branch
-// Returns the worktree path or an error
+// CreateWorktree creates (or reuses) the git worktree for a task branch cut
+// from the current HEAD. Returns the worktree path.
 func (w *WorktreeManager) CreateWorktree(jobID, taskID string) (string, error) {
-	branchName := fmt.Sprintf("task-%s-%s", jobID, taskID)
-	worktreePath := filepath.Join(w.projectDir, WorktreesDir, branchName)
-
-	// Ensure worktrees directory exists
-	worktreesDir := filepath.Join(w.projectDir, WorktreesDir)
-	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create worktrees directory: %w", err)
-	}
-
-	// Known-issue #20: a re-dispatch creates the same task worktree again,
-	// and `git worktree add -b` fails on the existing branch — the caller
-	// then fell back to workDir "." (wrong directory, no isolation). If this
-	// task's worktree already exists (linked worktrees carry a .git file),
-	// hand back the existing path so the session resumes in place.
-	if _, err := os.Stat(filepath.Join(worktreePath, ".git")); err == nil {
-		return worktreePath, nil
-	}
-
-	// Create worktree with new branch from HEAD
-	cmd := exec.Command("git", "worktree", "add", worktreePath, "-b", branchName)
-	cmd.Dir = w.projectDir
-	output, err := cmd.CombinedOutput()
+	tw, err := w.CreateTaskWorktree(jobID, taskID, "")
 	if err != nil {
-		return "", fmt.Errorf("git worktree add failed: %s: %w", string(output), err)
+		return "", err
 	}
-
-	return worktreePath, nil
+	return tw.Path, nil
 }
 
 // CommitAll commits all changes in the worktree
@@ -183,7 +164,10 @@ func (w *WorktreeManager) ListChangedFiles(dir string) []string {
 // RemoveWorktree removes a worktree and its branch
 func (w *WorktreeManager) RemoveWorktree(jobID, taskID string) error {
 	branchName := fmt.Sprintf("task-%s-%s", jobID, taskID)
-	worktreePath := filepath.Join(w.projectDir, WorktreesDir, branchName)
+	worktreePath := w.findWorktree(branchName)
+	if worktreePath == "" {
+		worktreePath = w.worktreePath(branchName)
+	}
 
 	// Remove the worktree
 	cmd := exec.Command("git", "worktree", "remove", worktreePath, "--force")
@@ -203,52 +187,6 @@ func (w *WorktreeManager) RemoveWorktree(jobID, taskID string) error {
 	return nil
 }
 
-// MergeBranch merges a task branch into the current branch (main)
-// Returns conflict files if merge conflict occurs
-func (w *WorktreeManager) MergeBranch(jobID, taskID string) (conflictFiles []string, err error) {
-	branchName := fmt.Sprintf("task-%s-%s", jobID, taskID)
-
-	cmd := exec.Command("git", "merge", branchName)
-	cmd.Dir = w.projectDir
-	output, mergeErr := cmd.CombinedOutput()
-
-	if mergeErr != nil {
-		// Check if it's a merge conflict
-		outputStr := string(output)
-		if strings.Contains(outputStr, "CONFLICT") {
-			conflicts := parseConflictFiles(outputStr)
-			return conflicts, nil
-		}
-		return nil, fmt.Errorf("git merge failed: %s: %w", outputStr, mergeErr)
-	}
-
-	return nil, nil
-}
-
-// parseConflictFiles extracts conflict file paths from git merge output
-func parseConflictFiles(mergeOutput string) []string {
-	var files []string
-	lines := strings.Split(mergeOutput, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.Contains(line, "CONFLICT") {
-			// Extract file path from lines like:
-			// CONFLICT (content): Merge conflict in path/to/file
-			parts := strings.SplitN(line, " in ", 2)
-			if len(parts) == 2 {
-				files = append(files, strings.TrimSpace(parts[1]))
-			} else {
-				// CONFLICT (add/add): Merge conflict in path
-				parts = strings.SplitN(line, "conflict in ", 2)
-				if len(parts) == 2 {
-					files = append(files, strings.TrimSpace(parts[1]))
-				}
-			}
-		}
-	}
-	return files
-}
-
 // CleanupStaleWorktrees scans and removes worktrees not belonging to active
 // tasks — but only those that carry nothing of value. The startup sweep runs
 // with no active-task list, and it used to `worktree remove --force` +
@@ -261,56 +199,59 @@ func parseConflictFiles(mergeOutput string) []string {
 // nothing). Anything else — including any git failure while deciding — is
 // kept.
 func (w *WorktreeManager) CleanupStaleWorktrees(activeTaskIDs map[string]bool) ([]string, error) {
-	worktreesDir := filepath.Join(w.projectDir, WorktreesDir)
-
-	entries, err := os.ReadDir(worktreesDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("failed to read worktrees directory: %w", err)
-	}
-
 	var cleaned []string
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+	for _, dir := range w.worktreeDirs() {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return cleaned, fmt.Errorf("failed to read worktrees directory: %w", err)
 		}
 
-		dirName := entry.Name()
-		// Directory name format: task-{jobId}-{taskId}
-		// Extract taskId from the directory name
-		parts := strings.SplitN(dirName, "-", 3)
-		if len(parts) < 3 {
-			continue
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+
+			dirName := entry.Name()
+			// Directory name format: task-{jobId}-{taskId}. Integration
+			// worktrees (mission-{m}) are never swept here: they hold the
+			// mission's merged result until it is delivered.
+			parts := strings.SplitN(dirName, "-", 3)
+			if len(parts) < 3 || parts[0] != "task" {
+				continue
+			}
+
+			taskID := strings.Join(parts[2:], "-")
+
+			// If this task is still active, skip
+			if activeTaskIDs[taskID] {
+				continue
+			}
+
+			worktreePath := filepath.Join(dir, dirName)
+			if !w.worktreeIsDisposable(worktreePath, dirName) {
+				continue
+			}
+
+			// Without --force: a tree that turned dirty since the check makes
+			// git refuse, and the worktree is kept.
+			cmd := exec.Command("git", "worktree", "remove", worktreePath)
+			cmd.Dir = w.projectDir
+			if err := cmd.Run(); err != nil {
+				continue
+			}
+
+			// Disposable was just verified (no commits outside HEAD or the
+			// mission integration branch), so -D cannot lose work; -d would
+			// refuse a branch merged only into the integration branch.
+			cmd = exec.Command("git", "branch", "-D", dirName)
+			cmd.Dir = w.projectDir
+			cmd.Run()
+
+			cleaned = append(cleaned, dirName)
 		}
-
-		taskID := strings.Join(parts[2:], "-")
-
-		// If this task is still active, skip
-		if activeTaskIDs[taskID] {
-			continue
-		}
-
-		worktreePath := filepath.Join(worktreesDir, dirName)
-		if !w.worktreeIsDisposable(worktreePath, dirName) {
-			continue
-		}
-
-		// Without --force: a tree that turned dirty since the check makes
-		// git refuse, and the worktree is kept.
-		cmd := exec.Command("git", "worktree", "remove", worktreePath)
-		cmd.Dir = w.projectDir
-		if err := cmd.Run(); err != nil {
-			continue
-		}
-
-		// -d (not -D) refuses a branch that is not merged into HEAD.
-		cmd = exec.Command("git", "branch", "-d", dirName)
-		cmd.Dir = w.projectDir
-		cmd.Run()
-
-		cleaned = append(cleaned, dirName)
 	}
 
 	return cleaned, nil
@@ -318,7 +259,9 @@ func (w *WorktreeManager) CleanupStaleWorktrees(activeTaskIDs map[string]bool) (
 
 // worktreeIsDisposable reports whether a task worktree holds no work worth
 // keeping: a clean tree and a branch with no commits outside the main
-// checkout's HEAD. Any git failure answers false.
+// checkout's HEAD — or outside the mission's integration branch, once it
+// exists (a task merged into oa/mission-<m> is not in HEAD until delivery).
+// Any git failure answers false.
 func (w *WorktreeManager) worktreeIsDisposable(worktreePath, branchName string) bool {
 	cmd := exec.Command("git", "status", "--porcelain")
 	cmd.Dir = worktreePath
@@ -327,13 +270,34 @@ func (w *WorktreeManager) worktreeIsDisposable(worktreePath, branchName string) 
 		return false
 	}
 
-	cmd = exec.Command("git", "rev-list", "--count", "HEAD.."+branchName)
+	if w.branchHasNoUniqueCommits("HEAD", branchName) {
+		return true
+	}
+	// task-<mission>-<task>: the mission id is the second dash-separated part.
+	if parts := strings.SplitN(branchName, "-", 3); len(parts) == 3 && parts[0] == "task" {
+		integ := IntegrationBranch(parts[1])
+		if w.refExists("refs/heads/"+integ) && w.branchHasNoUniqueCommits(integ, branchName) {
+			return true
+		}
+	}
+	return false
+}
+
+// branchHasNoUniqueCommits reports whether `base..branch` is empty. Failure → false.
+func (w *WorktreeManager) branchHasNoUniqueCommits(base, branch string) bool {
+	cmd := exec.Command("git", "rev-list", "--count", base+".."+branch)
 	cmd.Dir = w.projectDir
-	out, err = cmd.Output()
+	out, err := cmd.Output()
 	if err != nil {
 		return false
 	}
 	return strings.TrimSpace(string(out)) == "0"
+}
+
+func (w *WorktreeManager) refExists(ref string) bool {
+	cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref)
+	cmd.Dir = w.projectDir
+	return cmd.Run() == nil
 }
 
 // GetBranchName returns the branch name for a given job and task
@@ -345,6 +309,8 @@ func GetBranchName(jobID, taskID string) string {
 type BranchSpec struct {
 	TaskID     string
 	BranchName string
+	// Title labels the merge commit; optional.
+	Title string
 }
 
 // PushBranch pushes a branch from a worktree to the remote origin
@@ -365,36 +331,6 @@ func (w *WorktreeManager) FetchBranch(branchName string) error {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git fetch failed: %s: %w", string(output), err)
-	}
-	return nil
-}
-
-// MergeBranchByRef merges a branch (already fetched) into the current branch
-func (w *WorktreeManager) MergeBranchByRef(branchName string) (conflictFiles []string, err error) {
-	// Use FETCH_HEAD reference (from fetch) or the branch name directly
-	cmd := exec.Command("git", "merge", fmt.Sprintf("origin/%s", branchName))
-	cmd.Dir = w.projectDir
-	output, mergeErr := cmd.CombinedOutput()
-
-	if mergeErr != nil {
-		outputStr := string(output)
-		if strings.Contains(outputStr, "CONFLICT") {
-			conflicts := parseConflictFiles(outputStr)
-			return conflicts, nil
-		}
-		return nil, fmt.Errorf("git merge failed: %s: %w", outputStr, mergeErr)
-	}
-
-	return nil, nil
-}
-
-// PushMain pushes the main branch to origin
-func (w *WorktreeManager) PushMain() error {
-	cmd := exec.Command("git", "push", "origin", "HEAD")
-	cmd.Dir = w.projectDir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git push main failed: %s: %w", string(output), err)
 	}
 	return nil
 }

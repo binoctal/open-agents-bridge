@@ -42,4 +42,7 @@ type AdapterConfig struct {
 	// gates terminal commands on user approval for every mode that does not
 	// explicitly auto-approve (see acp.go handleTerminalCreate).
 	PermissionMode string
+	// ACPModeID, when set, is applied via ACP session/set_mode before the
+	// session is exposed (claude: the shared config dir carries no defaultMode).
+	ACPModeID string
 }

@@ -18,10 +18,12 @@ func TestBuildCapabilityReportPinsTheWireFields(t *testing.T) {
 	report := buildCapabilityReport("0.6.2", probeUnreachable, "dial timeout", false)
 
 	want := map[string]interface{}{
-		"version":       "0.6.2",
-		"callbackProbe": "unreachable",
-		"e2ee":          false,
-		"detail":        "dial timeout",
+		"version":         "0.6.2",
+		"callbackProbe":   "unreachable",
+		"e2ee":            false,
+		"detail":          "dial timeout",
+		"sessionSpec":     1,
+		"missionDelivery": 1,
 	}
 	if len(report) != len(want) {
 		t.Fatalf("report has %d fields, want %d: %+v", len(report), len(want), report)

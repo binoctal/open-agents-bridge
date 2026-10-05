@@ -57,7 +57,8 @@ type ACPAdapter struct {
 	callback   func(Message)
 	requestID  atomic.Int64
 	mu         sync.Mutex
-	sessionID  string
+	sessionID  string // guarded by sessionMu; use getSessionID/setSessionID
+	sessionMu  sync.RWMutex
 	workDir    string
 	safeFS     *filesystem.SafeFileSystem // Security-hardened file operations
 	terminals  map[string]*terminalState  // terminalId -> state
@@ -101,7 +102,15 @@ type ACPAdapter struct {
 	// a "default" session would run arbitrary shell with zero approval
 	// (staging forensics 2026-09-23: `uname -a` in default mode executed via
 	// Terminal tool with no permission:request ever sent).
-	permMode string
+	permMode   string
+	permModeMu sync.RWMutex
+	// desiredModeID is the ACP mode id to apply with session/set_mode before the
+	// session is exposed (empty = engine does not use ACP modes).
+	desiredModeID string
+	// rpcWaiters routes responses of bridge-initiated requests (set_mode) back
+	// to their callers, keyed by request id.
+	rpcWaiters map[string]chan rpcReply
+	rpcMu      sync.Mutex
 	// permPromptTimeout overrides defaultPermissionPromptTimeout (tests).
 	permPromptTimeout time.Duration
 	// pendingPerms holds terminal commands waiting on a permission answer,
@@ -125,6 +134,7 @@ func NewACPAdapter() *ACPAdapter {
 		initDone:     make(chan struct{}),
 		procExited:   make(chan struct{}),
 		permMode:     "default",
+		rpcWaiters:   make(map[string]chan rpcReply),
 	}
 	a.procExitCode.Store(-1)
 	return a
@@ -210,7 +220,8 @@ func (a *ACPAdapter) Connect(config AdapterConfig) error {
 	a.workDir = config.WorkDir
 	// Freeze the permission mode before any goroutine starts: terminal
 	// gating (handleTerminalCreate) reads it from the read-loop goroutine.
-	a.permMode = config.PermissionMode
+	a.setPermMode(config.PermissionMode)
+	a.desiredModeID = config.ACPModeID
 
 	// Start CLI process in its own process group so we can kill
 	// the entire tree (npx → sh → node) on disconnect
@@ -317,13 +328,13 @@ func (a *ACPAdapter) disconnectLocked() {
 	a.manualDisconnect.Store(true)
 
 	// Send session/close before disconnecting
-	if a.sessionID != "" && a.stdin != nil {
+	if a.getSessionID() != "" && a.stdin != nil {
 		closeReq := map[string]interface{}{
 			"jsonrpc": "2.0",
 			"id":      a.nextRequestID(),
 			"method":  "session/close",
 			"params": map[string]interface{}{
-				"sessionId": a.sessionID,
+				"sessionId": a.getSessionID(),
 			},
 		}
 		if err := a.sendJSONRPC(closeReq); err != nil {
@@ -395,7 +406,7 @@ func (a *ACPAdapter) SendMessage(msg Message) error {
 	}
 
 	// Wait for session initialization if needed
-	if a.sessionID == "" && msg.Type == MessageTypeContent {
+	if a.getSessionID() == "" && msg.Type == MessageTypeContent {
 		timeout := time.After(30 * time.Second)
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
@@ -405,7 +416,7 @@ func (a *ACPAdapter) SendMessage(msg Message) error {
 			case <-timeout:
 				return fmt.Errorf("session not initialized after 30s timeout")
 			case <-ticker.C:
-				if a.sessionID != "" {
+				if a.getSessionID() != "" {
 					goto initialized
 				}
 			}
@@ -457,7 +468,7 @@ ready:
 			"id":      promptID,
 			"method":  "session/prompt",
 			"params": map[string]interface{}{
-				"sessionId": a.sessionID,
+				"sessionId": a.getSessionID(),
 				"prompt": []interface{}{
 					map[string]interface{}{
 						"type": "text",
@@ -511,7 +522,7 @@ ready:
 			"jsonrpc": "2.0",
 			"method":  "session/cancel",
 			"params": map[string]interface{}{
-				"sessionId": a.sessionID,
+				"sessionId": a.getSessionID(),
 				"reason":    msg.Content,
 			},
 		}
@@ -1297,7 +1308,7 @@ func (a *ACPAdapter) handleTerminalCreate(msg map[string]interface{}) {
 	// this gate every mode (including "default") would execute shell
 	// silently. accept-edits/accept-all opt out: workflow task sessions run
 	// accept-edits and have no human to answer the prompt.
-	if a.permMode != "accept-edits" && a.permMode != "accept-all" {
+	if pm := a.getPermMode(); pm != "accept-edits" && pm != "accept-all" {
 		a.gateTerminalOnPermission(terminalID, command, env, outputByteLimit)
 		return
 	}
@@ -1332,7 +1343,7 @@ func (a *ACPAdapter) gateTerminalOnPermission(terminalID, command string, env []
 	a.pendingPerms[terminalID] = pt
 	a.terminalMu.Unlock()
 
-	logger.Info("[%s] Terminal command gated on permission (mode %s): %s", logger.ModACP, a.permMode, command)
+	logger.Info("[%s] Terminal command gated on permission (mode %s): %s", logger.ModACP, a.getPermMode(), command)
 
 	a.emitMessage(Message{
 		Type: MessageTypePermission,
@@ -1605,6 +1616,10 @@ func (a *ACPAdapter) handleTerminalRelease(msg map[string]interface{}) {
 func (a *ACPAdapter) handleResponse(msg map[string]interface{}) {
 	result, _ := msg["result"].(map[string]interface{})
 
+	if id, _ := msg["id"].(string); id != "" && a.deliverRPC(id, rpcReply{result: result}) {
+		return
+	}
+
 	// A response to our in-flight session/prompt: matched by request id, not
 	// by result shape. Matching on the stopReason field alone meant an agent
 	// reply without it (or with an unrecognized value) left isProcessing
@@ -1617,8 +1632,15 @@ func (a *ACPAdapter) handleResponse(msg map[string]interface{}) {
 
 	// Handle session/new response (contains sessionId)
 	if sessionID, ok := result["sessionId"].(string); ok {
-		a.sessionID = sessionID
 		logger.Info("[%s] Session created: %s", logger.ModACP, sessionID)
+		if want := a.desiredModeID; want != "" && currentModeID(result) != want {
+			// The session MUST NOT be exposed (sessionID stays empty, so
+			// SendMessage blocks) until the requested mode is in force:
+			// project-level settings may have started it in a looser mode.
+			go a.applyInitialMode(sessionID, want)
+			return
+		}
+		a.setSessionID(sessionID)
 
 		// Send initialized/ready status to signal successful initialization
 		a.emitMessage(Message{
@@ -1728,6 +1750,10 @@ func (a *ACPAdapter) handleError(msg map[string]interface{}) {
 	errObj, _ := msg["error"].(map[string]interface{})
 	code, _ := errObj["code"].(float64)
 	message, _ := errObj["message"].(string)
+
+	if id, _ := msg["id"].(string); id != "" && a.deliverRPC(id, rpcReply{err: fmt.Errorf("%s (code %d)", message, int(code))}) {
+		return
+	}
 
 	// Include error.data for richer diagnostics (e.g. 429 rate-limit details)
 	detail := message
@@ -1846,4 +1872,118 @@ func estimateTokens(text string) int64 {
 	}
 	// Rough estimation: ~4 characters per token
 	return int64((len(text) + 3) / 4)
+}
+
+// rpcReply is the outcome of a bridge-initiated JSON-RPC request.
+type rpcReply struct {
+	result map[string]interface{}
+	err    error
+}
+
+func (a *ACPAdapter) getPermMode() string {
+	a.permModeMu.RLock()
+	defer a.permModeMu.RUnlock()
+	return a.permMode
+}
+
+func (a *ACPAdapter) setPermMode(mode string) {
+	a.permModeMu.Lock()
+	a.permMode = mode
+	a.permModeMu.Unlock()
+}
+
+// currentModeID extracts modes.currentModeId from a session/new result.
+func currentModeID(result map[string]interface{}) string {
+	modes, _ := result["modes"].(map[string]interface{})
+	id, _ := modes["currentModeId"].(string)
+	return id
+}
+
+// deliverRPC hands a response to the waiter registered for id.
+func (a *ACPAdapter) deliverRPC(id string, reply rpcReply) bool {
+	a.rpcMu.Lock()
+	ch, ok := a.rpcWaiters[id]
+	delete(a.rpcWaiters, id)
+	a.rpcMu.Unlock()
+	if ok {
+		ch <- reply
+	}
+	return ok
+}
+
+// callRPC sends a request and waits for its reply (never call from the read loop).
+func (a *ACPAdapter) callRPC(method string, params map[string]interface{}, timeout time.Duration) (map[string]interface{}, error) {
+	id := a.nextRequestID()
+	ch := make(chan rpcReply, 1)
+	a.rpcMu.Lock()
+	a.rpcWaiters[id] = ch
+	a.rpcMu.Unlock()
+	if err := a.sendJSONRPC(map[string]interface{}{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
+		a.rpcMu.Lock()
+		delete(a.rpcWaiters, id)
+		a.rpcMu.Unlock()
+		return nil, err
+	}
+	select {
+	case r := <-ch:
+		return r.result, r.err
+	case <-time.After(timeout):
+		a.rpcMu.Lock()
+		delete(a.rpcWaiters, id)
+		a.rpcMu.Unlock()
+		return nil, fmt.Errorf("%s timed out after %s", method, timeout)
+	}
+}
+
+const setModeTimeout = 15 * time.Second
+
+// applyInitialMode runs session/set_mode before the session is exposed.
+func (a *ACPAdapter) applyInitialMode(sessionID, modeID string) {
+	if _, err := a.callRPC("session/set_mode", map[string]interface{}{"sessionId": sessionID, "modeId": modeID}, setModeTimeout); err != nil {
+		logger.Error("[%s] Initial set_mode %s failed: %v", logger.ModACP, modeID, err)
+		a.emitMessage(Message{
+			Type:    MessageTypeError,
+			Content: fmt.Sprintf("permission mode %s could not be applied: %v", modeID, err),
+			Meta:    map[string]interface{}{"protocol": "acp", "code": "SET_MODE_FAILED", "modeId": modeID},
+		})
+		return
+	}
+	a.setSessionID(sessionID)
+	a.emitMessage(Message{
+		Type:    MessageTypeStatus,
+		Content: "mode_update",
+		Meta:    map[string]interface{}{"protocol": "acp", "modeId": modeID},
+	})
+	a.emitMessage(Message{
+		Type:    MessageTypeStatus,
+		Content: StatusIdle,
+		Meta:    map[string]interface{}{"protocol": "acp", "sessionId": sessionID},
+	})
+}
+
+// SetMode switches the running session's ACP mode and the bridge-level
+// permission mode used for terminal gating. It returns only after the agent
+// acknowledged, so callers can report applied/failed truthfully.
+func (a *ACPAdapter) SetMode(modeID, bridgePermMode string) error {
+	if !a.connected.Load() || a.getSessionID() == "" {
+		return fmt.Errorf("session not ready")
+	}
+	if _, err := a.callRPC("session/set_mode", map[string]interface{}{"sessionId": a.getSessionID(), "modeId": modeID}, setModeTimeout); err != nil {
+		return err
+	}
+	a.setPermMode(bridgePermMode)
+	a.desiredModeID = modeID
+	return nil
+}
+
+func (a *ACPAdapter) getSessionID() string {
+	a.sessionMu.RLock()
+	defer a.sessionMu.RUnlock()
+	return a.sessionID
+}
+
+func (a *ACPAdapter) setSessionID(id string) {
+	a.sessionMu.Lock()
+	a.sessionID = id
+	a.sessionMu.Unlock()
 }

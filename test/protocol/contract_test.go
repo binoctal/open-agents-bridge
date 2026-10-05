@@ -321,6 +321,7 @@ func TestWireToHandlerMapping(t *testing.T) {
 		"workflow:task_guidance",
 		"workflow:task_merge",
 		"workflow:merge_all",
+		"workflow:deliver",
 	}
 
 	for _, msgType := range handledTypes {

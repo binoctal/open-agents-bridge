@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,10 +38,17 @@ type Manager struct {
 	// Dead/ExpiringSoon to an auth_required pre-warning; Missing/Healthy are
 	// never reported. Set once at startup, read on creation paths.
 	credentialHealthCallback func(sessionID string, h CredentialHealth)
-	maxConcurrent    int
-	queue            []QueueItem
-	queueMu          sync.Mutex
-	ioLogger         *logger.IOLogger // I/O logger for debugging and auditing
+	maxConcurrent            int
+	// envResolver supplies the per-session engine-profile env merged into
+	// AdapterConfig.CustomEnv at creation. Never applied to the bridge
+	// process environment, so two sessions can carry two identities.
+	envResolver func(sessionID string) map[string]string
+	// testHookTaskRegistered, when set, runs right after a task session is
+	// registered (lock released) — lets tests hold the slot deterministically.
+	testHookTaskRegistered func()
+	queue                  []QueueItem
+	queueMu                sync.Mutex
+	ioLogger               *logger.IOLogger // I/O logger for debugging and auditing
 	// replayDir, when non-empty, mirrors every ACP session's raw wire
 	// frames to <replayDir>/<sessionID>.jsonl (G17 replay recording).
 	replayDir string
@@ -121,6 +129,36 @@ func (m *Manager) ActiveCount() int {
 	return count
 }
 
+// ErrTaskPoolFull is returned by StartTaskSession when the task pool has no
+// free slot.
+var ErrTaskPoolFull = errors.New("task pool full")
+
+type taskSpec struct{ jobID string }
+
+// ActiveTaskCount counts active workflow task sessions (task ID set). Only
+// these occupy the task pool: interactive chats must not starve missions.
+// ActiveCount stays the all-session figure for health metrics.
+func (m *Manager) ActiveTaskCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.activeTaskCountLocked("")
+}
+
+// activeTaskCountLocked requires m.mu held. excludeID skips a session about to
+// be replaced by the caller.
+func (m *Manager) activeTaskCountLocked(excludeID string) int {
+	count := 0
+	for id, s := range m.sessions {
+		if id == excludeID || s.Status != "active" {
+			continue
+		}
+		if s.IsTaskSession() {
+			count++
+		}
+	}
+	return count
+}
+
 func (m *Manager) Count() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -164,6 +202,32 @@ func (m *Manager) SetCapacityCallback(callback func()) {
 
 func (m *Manager) SetExitCallback(callback ExitCallback) {
 	m.exitCallback = callback
+}
+
+// SetEnvResolver registers the per-session profile env source (engine-profiles).
+func (m *Manager) SetEnvResolver(fn func(sessionID string) map[string]string) {
+	m.mu.Lock()
+	m.envResolver = fn
+	m.mu.Unlock()
+}
+
+// mergeProfileEnv adds profile env to cfg.CustomEnv. Keys the system already
+// set (e.g. CLAUDE_CONFIG_DIR, CLAUDECODE) win; a conflict is warned by key
+// name only, never the value.
+func mergeProfileEnv(cfg *protocol.AdapterConfig, extra map[string]string, sessionID string) {
+	if len(extra) == 0 {
+		return
+	}
+	if cfg.CustomEnv == nil {
+		cfg.CustomEnv = map[string]string{}
+	}
+	for k, v := range extra {
+		if _, taken := cfg.CustomEnv[k]; taken {
+			logger.Warn("[%s] Profile env key %s ignored for session %s: set by the system", logger.ModSession, k, sessionID)
+			continue
+		}
+		cfg.CustomEnv[k] = v
+	}
 }
 
 // SetRemovedCallback registers the session-removal notification. Fired
@@ -329,43 +393,122 @@ func (m *Manager) GetStats() map[string]int {
 	return stats
 }
 
-// claudeACPModeDir returns the isolated CLAUDE_CONFIG_DIR for one bridge
-// permission mode, creating its settings.json if absent or stale (idempotent).
+// claudeACPModes maps bridge permission modes to ACP mode ids.
+var claudeACPModes = map[string]string{
+	"default":      "default",
+	"accept-edits": "acceptEdits",
+	"accept-all":   "bypassPermissions",
+	"plan":         "plan",
+}
+
+// claudeACPModeID returns the ACP mode id for a bridge permission mode.
+// Unknown modes map to "default" (the strictest usable mode).
+func claudeACPModeID(permissionMode string) string {
+	if id, ok := claudeACPModes[permissionMode]; ok {
+		return id
+	}
+	return "default"
+}
+
+// ClaudeACPModeID is the exported form of claudeACPModeID.
+func ClaudeACPModeID(permissionMode string) string { return claudeACPModeID(permissionMode) }
+
+// BridgeModeFromACP maps an ACP mode id back to the bridge permission mode.
+func BridgeModeFromACP(modeID string) (string, bool) {
+	for bridgeMode, id := range claudeACPModes {
+		if id == modeID {
+			return bridgeMode, true
+		}
+	}
+	return "", false
+}
+
+const claudeSharedMigratedMarker = ".migrated-from-mode-dirs"
+
+// claudeACPSharedDir returns the single isolated CLAUDE_CONFIG_DIR shared by
+// every permission mode (idempotent). Its settings.json is "{}": the mode is
+// delivered only through ACP session/set_mode, never through settings, so
+// switching mode neither splits the login state nor depends on host settings.
+// Isolation from the host's ~/.claude/settings.json is preserved (the host's
+// defaultMode/allow rules must not leak into a managed agent).
 //
-// Forensics 2026-09-22 (fix-bridge-session-integrity, /tmp/oa-evidence/): the
-// ACP adapter derives permissionMode ONLY from a settings file
-// (permissions.defaultMode). CLAUDE_PERMISSION_MODE env is read by nobody,
-// and CLI-style args never reach the claude binary (they go to the adapter
-// process, which has no CLI parsing). Worse: without an isolated config dir
-// the adapter reads the HOST's ~/.claude/settings.json, leaking the host's
-// defaultMode/allow rules into a managed agent — a bridge running under a
-// host with defaultMode "auto" silently auto-approved everything. This
-// directory is the only channel that works.
-func claudeACPModeDir(permissionMode string) (string, error) {
-	mapped, known := map[string]string{
-		"default":      "default",
-		"accept-edits": "acceptEdits",
-		"accept-all":   "bypassPermissions",
-		"plan":         "plan",
-	}[permissionMode]
-	if !known {
-		// Unknown mode must still isolate: falling through to the host's
-		// settings is the leak this function exists to prevent.
-		mapped = "default"
-	}
-	dir := filepath.Join(configpkg.ConfigDir(), "claude-acp-config", mapped)
-	settings := []byte(fmt.Sprintf("{\"permissions\":{\"defaultMode\":%q}}\n", mapped))
-	settingsPath := filepath.Join(dir, "settings.json")
-	if existing, err := os.ReadFile(settingsPath); err == nil && bytes.Equal(existing, settings) {
-		return dir, nil
-	}
+// On first use the legacy per-mode directories are COPIED in (never deleted or
+// modified), newest file wins on name clashes.
+func claudeACPSharedDir() (string, error) {
+	root := filepath.Join(configpkg.ConfigDir(), "claude-acp-config")
+	dir := filepath.Join(root, "shared")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("create claude ACP config dir: %w", err)
+		return "", fmt.Errorf("create claude ACP shared dir: %w", err)
 	}
-	if err := os.WriteFile(settingsPath, settings, 0o644); err != nil {
-		return "", fmt.Errorf("write claude ACP settings: %w", err)
+	settings := []byte("{}\n")
+	settingsPath := filepath.Join(dir, "settings.json")
+	if existing, err := os.ReadFile(settingsPath); err != nil || !bytes.Equal(existing, settings) {
+		if err := os.WriteFile(settingsPath, settings, 0o644); err != nil {
+			return "", fmt.Errorf("write claude ACP settings: %w", err)
+		}
+	}
+	marker := filepath.Join(dir, claudeSharedMigratedMarker)
+	if _, err := os.Stat(marker); err != nil {
+		migrateLegacyModeDirs(root, dir)
+		if err := os.WriteFile(marker, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o644); err != nil {
+			logger.Warn("[%s] write migration marker: %v", logger.ModSession, err)
+		}
 	}
 	return dir, nil
+}
+
+// migrateLegacyModeDirs copies credentials and conversation state from the old
+// per-mode directories. Best effort: a failed copy is logged, never fatal.
+func migrateLegacyModeDirs(root, dst string) {
+	for _, mode := range []string{"default", "acceptEdits", "bypassPermissions", "plan"} {
+		src := filepath.Join(root, mode)
+		if st, err := os.Stat(src); err != nil || !st.IsDir() {
+			continue
+		}
+		for _, name := range []string{".credentials.json", ".claude.json", "plugins", "projects"} {
+			if err := copyNewest(filepath.Join(src, name), filepath.Join(dst, name)); err != nil {
+				logger.Warn("[%s] migrate %s/%s: %v", logger.ModSession, mode, name, err)
+			}
+		}
+	}
+}
+
+// copyNewest copies src (file or tree) to dst; a file already at dst is
+// replaced only when src is newer.
+func copyNewest(src, dst string) error {
+	st, err := os.Stat(src)
+	if err != nil {
+		return nil // nothing to migrate
+	}
+	if st.IsDir() {
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(dst, 0o755); err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if err := copyNewest(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if dstSt, err := os.Stat(dst); err == nil && !st.ModTime().After(dstSt.ModTime()) {
+		return nil
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(dst, data, st.Mode().Perm()); err != nil {
+		return err
+	}
+	return os.Chtimes(dst, st.ModTime(), st.ModTime())
 }
 
 // applyPermissionMode configures the adapter based on permission mode
@@ -377,11 +520,10 @@ func (m *Manager) applyPermissionMode(permissionMode, cliType string, config *pr
 		config.CustomEnv = make(map[string]string)
 	}
 
-	// claude ACP: see claudeACPModeDir — the settings file is the only working
-	// channel, and it must be set for EVERY mode (including default) or the
-	// host's own claude settings leak in.
+	// claude ACP: see claudeACPSharedDir — the shared dir isolates from the host's
+	// settings for EVERY mode; the mode itself goes through ACP set_mode.
 	if cliType == "claude" {
-		dir, err := claudeACPModeDir(permissionMode)
+		dir, err := claudeACPSharedDir()
 		if err != nil {
 			// Deliberately not fatal: the session still runs, just with the
 			// adapter's own defaults instead of the requested mode.
@@ -389,6 +531,7 @@ func (m *Manager) applyPermissionMode(permissionMode, cliType string, config *pr
 			return
 		}
 		config.CustomEnv["CLAUDE_CONFIG_DIR"] = dir
+		config.ACPModeID = claudeACPModeID(permissionMode)
 		return
 	}
 

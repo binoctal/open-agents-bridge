@@ -96,22 +96,24 @@ type contentBatch struct {
 }
 
 type Bridge struct {
-	config      *config.Config
-	conn        *websocket.Conn
-	sessions    *session.Manager
-	permServer  *permission.Server
-	permHandler *permission.Handler
-	store       *storage.Store
-	s3Uploader  *storage.S3Uploader
-	rulesEngine *rules.Engine
-	apiClient   *api.Client
-	keyPair     *crypto.KeyPair
-	webPubKey   *[crypto.KeySize]byte
-	done        chan struct{}
-	connMu      sync.Mutex // protects conn read/write and conn lifecycle only
-	mu          sync.Mutex // protects other shared state (keyPair, webPubKey, etc.)
-	mcpManager  *mcpPkg.Manager
-	scanner     *scanner.Scanner
+	profiles     *profileStore // engine-profile env (memory only)
+	profilesOnce sync.Once
+	config       *config.Config
+	conn         *websocket.Conn
+	sessions     *session.Manager
+	permServer   *permission.Server
+	permHandler  *permission.Handler
+	store        *storage.Store
+	s3Uploader   *storage.S3Uploader
+	rulesEngine  *rules.Engine
+	apiClient    *api.Client
+	keyPair      *crypto.KeyPair
+	webPubKey    *[crypto.KeySize]byte
+	done         chan struct{}
+	connMu       sync.Mutex // protects conn read/write and conn lifecycle only
+	mu           sync.Mutex // protects other shared state (keyPair, webPubKey, etc.)
+	mcpManager   *mcpPkg.Manager
+	scanner      *scanner.Scanner
 	// Custom scanner rules come from two independent places and must be kept
 	// apart: the scanner's "custom" plugin is replaced wholesale on every
 	// update, so holding only the merged set would make either source able to
@@ -125,15 +127,23 @@ type Bridge struct {
 	loopDetectors     map[string]*loopdetect.Detector
 	// G18 per-session status trackers (AgentStatus derivation). Cleaned via
 	// the session manager's removed-callback — see status_tracker.go.
-	statusTrackers    map[string]*statusTracker
-	statusTrackersMu  sync.Mutex
-	callbackManager   *workflows.CallbackManager
-	worktreeManager   *workflows.WorktreeManager
-	reconnectStrategy *reconnect.Strategy
-	stateManager      *StateManager
-	reconnectCallback *reconnect.CallbackManager
-	reconnectMetrics  *reconnect.Metrics
-	ioLogger          *logger.IOLogger // I/O logger for debugging and auditing
+	statusTrackers   map[string]*statusTracker
+	statusTrackersMu sync.Mutex
+	callbackManager  *workflows.CallbackManager
+	worktreeManager  *workflows.WorktreeManager
+	// worktreeManagers caches one manager per repository root; jobManagers
+	// remembers which one a job's task was cut from so merge/cleanup/delivery
+	// land in the same repository. worktreeManager stays as the legacy "."
+	// fallback for dispatches from an API that sends no projectPath.
+	worktreeManagers   map[string]*workflows.WorktreeManager
+	jobManagers        map[string]*workflows.WorktreeManager
+	isolatedSessions   map[string]string // sessionID -> project dir of its isolated worktree
+	worktreeManagersMu sync.Mutex
+	reconnectStrategy  *reconnect.Strategy
+	stateManager       *StateManager
+	reconnectCallback  *reconnect.CallbackManager
+	reconnectMetrics   *reconnect.Metrics
+	ioLogger           *logger.IOLogger // I/O logger for debugging and auditing
 	// Golden uplink recording (G17, second face of a recorded session):
 	// merges WS messages and HTTP callbacks into one time-ordered sequence.
 	// Nil unless EnableReplayRecording was called.
@@ -142,6 +152,8 @@ type Bridge struct {
 
 	// Permission ID -> Session ID mapping for precise routing
 	permSessionMap map[string]string
+	specs          *specTracker
+	specsOnce      sync.Once
 	permSessionMu  sync.RWMutex
 
 	// Pending questions for human-in-the-loop (taskId -> answer channel)
@@ -165,6 +177,11 @@ type Bridge struct {
 	// Task metadata for workflow tasks (sessionID -> taskMeta)
 	taskMeta   map[string]*taskMeta
 	taskMetaMu sync.RWMutex
+	// taskBases remembers each task's mission baseline (set at assign,
+	// reported on workflow:task_started). Guarded by taskBasesMu; lazily
+	// initialised so bare Bridge literals in tests stay valid.
+	taskBases   map[string]taskBase
+	taskBasesMu sync.Mutex
 
 	// Task-idle watchdogs (taskId -> timer): a task session whose prompt
 	// went out but that produces zero protocol activity within the window
@@ -192,6 +209,13 @@ type Bridge struct {
 	// (known issue #22): the bridge never gives up — it keeps trying once
 	// per slowRetryInterval so it self-recovers when the server returns.
 	slowRetry atomic.Bool
+
+	// Single-instance arbitration (execution-model-redesign D13): a random
+	// per-process id sent on connect and in keep_alive frames; standby is set
+	// after repeated 4009 rejections and silences every outbound loop.
+	instanceID    string
+	conflictCount int // readLoop goroutine only
+	standby       atomic.Bool
 
 	// Message batching (Scheme 1: merge small content chunks)
 	batchMu sync.Mutex
@@ -293,6 +317,7 @@ func New(cfg *config.Config) (*Bridge, error) {
 	b := &Bridge{
 		config:           cfg,
 		sessions:         sessionMgr,
+		profiles:         newProfileStore(),
 		permHandler:      handler,
 		permServer:       permission.NewServer(handler),
 		store:            store,
@@ -303,6 +328,7 @@ func New(cfg *config.Config) (*Bridge, error) {
 		loopDetectors:    make(map[string]*loopdetect.Detector),
 		statusTrackers:   make(map[string]*statusTracker),
 		permSessionMap:   make(map[string]string),
+		specs:            newSpecTracker(),
 		pendingQuestions: make(map[string]chan string),
 		lineBoundary:     make(map[string]bool),
 		sessionDisp:      make(map[string]chan protocol.Message),
@@ -321,6 +347,8 @@ func New(cfg *config.Config) (*Bridge, error) {
 		messageQueue:      make(chan Message, 100), // Buffered queue for ordered processing
 		ioLogger:          ioLogger,
 		worktreeManager:   workflows.NewWorktreeManager("."),
+		worktreeManagers:  map[string]*workflows.WorktreeManager{},
+		jobManagers:       map[string]*workflows.WorktreeManager{},
 		callbackManager: workflows.NewCallbackManager(workflows.CallbackConfig{
 			APIURL:      cfg.ServerURL,
 			DeviceID:    cfg.DeviceID,
@@ -331,6 +359,7 @@ func New(cfg *config.Config) (*Bridge, error) {
 		offlineBuf:    nil,
 		msgBuffer:     NewMessageBuffer(DefaultBufferCapacity),
 		keepAliveDone: make(chan struct{}),
+		instanceID:    newInstanceID(),
 	}
 
 	// Apply scanner config
@@ -462,7 +491,8 @@ func (b *Bridge) Start() error {
 	// Freed pool slots drain queued tasks (see drainTaskQueue).
 	b.sessions.SetCapacityCallback(b.drainTaskQueue)
 	// Session removal (all six delete paths) drops the G18 status tracker.
-	b.sessions.SetRemovedCallback(b.removeStatusTracker)
+	b.sessions.SetRemovedCallback(func(id string) { b.removeStatusTracker(id); b.specTracker().forget(id) })
+	b.sessions.SetEnvResolver(func(id string) map[string]string { return b.profileStore().resolve(id) })
 	// engine-explicit-auth: creation-time claude credential verdict →
 	// auth_required pre-warning.
 	b.sessions.SetCredentialHealthCallback(b.handleCredentialHealth)
@@ -632,6 +662,8 @@ func (b *Bridge) closeGolden() {
 }
 
 func (b *Bridge) connect() error {
+	// A new socket means the API re-pushes profiles; forget stale plaintext.
+	b.profileStore().dropCache()
 	u, err := url.Parse(b.config.ServerURL)
 	if err != nil {
 		return err
@@ -642,6 +674,7 @@ func (b *Bridge) connect() error {
 	q.Set("type", "bridge")
 	q.Set("deviceId", b.config.DeviceID)
 	q.Set("token", b.config.DeviceToken)
+	q.Set("instanceId", b.instanceID)
 	// Report CLI capabilities so the server knows which agents are available
 	if len(b.config.CLIEnabled) > 0 {
 		cliNames := make([]string, 0, len(b.config.CLIEnabled))
@@ -766,6 +799,7 @@ func (b *Bridge) readLoop() {
 			// Re-send the capability report: the probe conclusion may have
 			// changed while disconnected (e.g. API moved, token rotated).
 			go b.sendCapabilityReport()
+			go b.sendAllSessionStatus()
 			// Drain terminal callbacks (task_result/task_error) that exhausted
 			// their retries while the API was rate-limiting or unreachable and
 			// were persisted to the callback cache. Without this the cache
@@ -784,8 +818,17 @@ func (b *Bridge) readLoop() {
 
 		b.logDebug("[%s] Waiting for message on WebSocket...", logger.ModBridge)
 		_, data, err := b.conn.ReadMessage()
+		if err == nil {
+			b.conflictCount = 0
+		}
 		if err != nil {
 			closeCode := b.extractCloseCode(err)
+			if closeCode == closeCodeAnotherInstance {
+				if b.onInstanceConflict() {
+					return
+				}
+				continue
+			}
 			if b.isPermanentCloseCode(closeCode) {
 				b.logInfo("[%s] WebSocket closed with permanent code %d: %v", logger.ModBridge, closeCode, err)
 				b.stateManager.SetState(StateFailed, fmt.Sprintf("permanent_close_%d", closeCode))
@@ -1074,6 +1117,9 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 		// web mapped unknown strings to idle and reset the UI mid-turn.
 		if label, isLabel := statusLabel(msg); isLabel {
 			b.sendStatusLabel(sessionID, protocolName, label)
+			if label == "mode_update" || label == "config_update" {
+				b.reportEngineMode(sessionID, msg)
+			}
 		}
 
 		// A CLI that finishes by itself only reports status=idle with an
@@ -1225,8 +1271,8 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 			errorPayload["code"] = code
 		}
 		b.sendMessage(Message{
-			Type:    "session:error",
-			Payload: errorPayload,
+			Type:      "session:error",
+			Payload:   errorPayload,
 			Timestamp: time.Now().UnixMilli(),
 		})
 
@@ -1257,6 +1303,8 @@ func (b *Bridge) handleMessage(msg Message) {
 		b.handleSessionSend(msg)
 	case "session:stop":
 		b.handleSessionStop(msg)
+	case "session:spec_update":
+		b.handleSessionSpecUpdate(msg)
 	case "session:cancel":
 		b.handleSessionCancel(msg)
 	case "session:resize":
@@ -1273,6 +1321,8 @@ func (b *Bridge) handleMessage(msg Message) {
 		b.handleControlTakeover(msg)
 	case "config:sync":
 		b.handleConfigSync(msg)
+	case "profile:sync":
+		b.handleProfileSync(msg)
 	case "rules:sync":
 		b.handleRulesSync(msg)
 	case "storage:sync":
@@ -1307,6 +1357,8 @@ func (b *Bridge) handleMessage(msg Message) {
 		b.handleWorkflowTaskMerge(msg)
 	case "workflow:merge_all":
 		b.handleWorkflowMergeAll(msg)
+	case "workflow:deliver":
+		b.handleWorkflowDeliver(msg)
 	case "workflow:get_state":
 		b.handleWorkflowGetState(msg)
 	case "workflow:set_state":
@@ -1475,6 +1527,23 @@ func (b *Bridge) sendListDirResult(requestID, path string, dirs []dirEntry, errM
 	})
 }
 
+// rejectMissingProject answers a session entry point that carried no project
+// path. Falling back to "." (the bridge's launch directory) would put the
+// agent in a directory the user never chose.
+func (b *Bridge) rejectMissingProject(sessionID, source string) {
+	b.logWarn("[%s] %s without a project path: rejecting", logger.ModSession, source)
+	b.sendMessage(Message{
+		Type: "session:error",
+		Payload: map[string]interface{}{
+			"sessionId": sessionID,
+			"deviceId":  b.config.DeviceID,
+			"error":     "PROJECT_REQUIRED: a project path (workDir) is required",
+			"code":      "PROJECT_REQUIRED",
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
 func (b *Bridge) handleSessionStart(msg Message) {
 	b.logDebug("[%s] handleSessionStart called", logger.ModSession)
 	payload, ok := msg.Payload.(map[string]interface{})
@@ -1488,6 +1557,7 @@ func (b *Bridge) handleSessionStart(msg Message) {
 	workDir, _ := payload["workDir"].(string)
 	initialCommand, _ := payload["command"].(string)
 	permissionMode, _ := payload["permissionMode"].(string)
+	b.bindSessionProfile(sessionID, payload)
 
 	// Get terminal size from payload
 	cols := 120 // default
@@ -1505,7 +1575,8 @@ func (b *Bridge) handleSessionStart(msg Message) {
 		cliType = "claude" // default
 	}
 	if workDir == "" {
-		workDir = "."
+		b.rejectMissingProject(sessionID, "session:start")
+		return
 	}
 	// Expand at the entry so the expanded path flows into session:started,
 	// ReportSessionToAPI and the session store consistently (the manager's
@@ -1514,6 +1585,19 @@ func (b *Bridge) handleSessionStart(msg Message) {
 	if err != nil {
 		b.logError("[%s] Cannot expand workDir %q: %v", logger.ModSession, workDir, err)
 		return
+	}
+
+	// Isolated copy: run in a linked worktree on oa/session-<id> instead of
+	// the user's own checkout (workspace-checkout D5).
+	isolated, _ := payload["isolated"].(bool)
+	if isolated {
+		wtPath, ierr := b.prepareIsolatedWorkDir(sessionID, workDir)
+		if ierr != nil {
+			b.logError("[%s] Isolated copy failed: %v", logger.ModSession, ierr)
+			b.sendSessionStartFailed(sessionID, ierr.Error())
+			return
+		}
+		workDir = wtPath
 	}
 
 	sess, err := b.sessions.CreateWithIDAndSize(cliType, workDir, sessionID, cols, rows, permissionMode)
@@ -1543,9 +1627,12 @@ func (b *Bridge) handleSessionStart(msg Message) {
 			"deviceId":  b.config.DeviceID,
 			"cliType":   cliType,
 			"workDir":   workDir,
+			"isolated":  isolated,
 		},
 		Timestamp: time.Now().UnixMilli(),
 	})
+
+	b.sendSessionStatus(sess, applyStateApplied, "")
 
 	metrics.StartSession(sess.ID)
 
@@ -1569,6 +1656,7 @@ func (b *Bridge) handleSessionResume(msg Message) {
 
 	sessionID, _ := payload["sessionId"].(string)
 	deviceID, _ := payload["deviceId"].(string)
+	b.bindSessionProfile(sessionID, payload)
 
 	b.logDebug("[%s] Resume request: sessionID=%s, deviceID=%s", logger.ModSession, sessionID, deviceID)
 
@@ -1622,6 +1710,7 @@ func (b *Bridge) handleSessionResume(msg Message) {
 				},
 				Timestamp: time.Now().UnixMilli(),
 			})
+			b.sendSessionStatus(recreated, applyStateApplied, "")
 			return
 		}
 		b.sendMessage(Message{
@@ -1670,6 +1759,7 @@ func (b *Bridge) handleSessionResume(msg Message) {
 		},
 		Timestamp: time.Now().UnixMilli(),
 	})
+	b.sendSessionStatus(sess, applyStateApplied, "")
 }
 
 // handleResumeWithContext creates a new session and injects historical context
@@ -1695,7 +1785,8 @@ func (b *Bridge) handleResumeWithContext(msg Message) {
 		cliType = "claude"
 	}
 	if workDir == "" {
-		workDir = "."
+		b.rejectMissingProject(originalSessionID, "session:resume-with-context")
+		return
 	}
 	workDir, _ = session.ExpandTilde(workDir)
 
@@ -1816,6 +1907,7 @@ func (b *Bridge) handleSessionSend(msg Message) {
 		b.logError("[%s] content missing or invalid type", logger.ModSession)
 		return
 	}
+	b.bindSessionProfile(sessionID, payload)
 	b.logDebug("[%s] Parameters extracted: sessionID=%s, contentLength=%d, content=%s",
 		logger.ModSession, sessionID, len(content), logger.Truncate(content, logger.MaxPayload))
 
@@ -1950,6 +2042,8 @@ func (b *Bridge) handleSessionStop(msg Message) {
 
 	// End session metrics
 	metrics.EndSession(sessionID)
+
+	b.reclaimIsolatedSession(sessionID)
 
 	// Send session stopped notification
 	b.sendMessage(Message{
@@ -2188,10 +2282,9 @@ func (b *Bridge) handleConfigSync(msg Message) {
 				b.config.EnvVars[k] = s
 			}
 		}
-		// Apply to current process
-		for k, v := range b.config.EnvVars {
-			os.Setenv(k, v)
-		}
+		// Deliberately not applied with os.Setenv: a process-wide env made
+		// one identity leak into every session (engine-profiles). Identity
+		// now rides per session via profile:sync + AdapterConfig.CustomEnv.
 		b.logDebug("[%s] Synced %d environment variables", logger.ModBridge, len(b.config.EnvVars))
 	}
 
@@ -2373,8 +2466,15 @@ func (b *Bridge) handleChatSend(msg Message) {
 
 	sess := b.sessions.Get(sessionID)
 	if sess == nil {
+		// Auto-create only into an explicit project; the launch directory has
+		// no meaning for a bridge running as a service.
+		chatWorkDir, _ := payload["workDir"].(string)
+		if chatWorkDir == "" {
+			b.rejectMissingProject(sessionID, "chat:send")
+			return
+		}
 		var err error
-		sess, err = b.sessions.Create("claude", ".")
+		sess, err = b.sessions.Create("claude", chatWorkDir)
 		if err != nil {
 			b.logError("[%s] Failed to create session: %v", logger.ModSession, err)
 			return
@@ -2497,6 +2597,9 @@ func (b *Bridge) heartbeat() {
 		case <-b.done:
 			return
 		case <-ticker.C:
+			if b.standby.Load() {
+				continue
+			}
 			// Process suspend detection via wall-clock gap
 			now := time.Now()
 			if !lastTickTime.IsZero() {
@@ -2536,14 +2639,12 @@ func (b *Bridge) heartbeat() {
 	}
 }
 
-// keepAliveLoop sends periodic keep-alive data frames to prevent proxy idle timeout.
-// Sends a JSON frame every 5 minutes, resetting the timer on business message sends.
+// keepAliveLoop sends a liveness frame every keepAliveInterval unless a
+// business message already went out in that window. The server uses any
+// inbound frame (carrying our instanceId) to judge the connection alive.
 func (b *Bridge) keepAliveLoop() {
-	ticker := time.NewTicker(1 * time.Minute) // Check every minute
+	ticker := time.NewTicker(keepAliveInterval)
 	defer ticker.Stop()
-
-	interval := 5 * time.Minute
-	lastKeepAlive := time.Now()
 
 	for {
 		select {
@@ -2552,40 +2653,36 @@ func (b *Bridge) keepAliveLoop() {
 		case <-b.keepAliveDone:
 			return
 		case <-ticker.C:
-			// Check if we've sent any business message recently
-			lastSend := atomic.LoadInt64(&b.lastSendTime)
-			if lastSend > 0 {
-				lastSendTime := time.UnixMilli(lastSend)
-				if time.Since(lastSendTime) < interval {
-					// Business message sent recently, reset keep-alive timer
-					lastKeepAlive = lastSendTime
-					continue
-				}
+			if b.standby.Load() {
+				continue
 			}
-
-			// Send keep-alive if interval has passed since last activity
-			if time.Since(lastKeepAlive) >= interval {
-				b.connMu.Lock()
-				if b.conn != nil {
-					keepAliveMsg := map[string]interface{}{
-						"type":      "keep_alive",
-						"timestamp": time.Now().UnixMilli(),
-					}
-					data, err := json.Marshal(keepAliveMsg)
-					if err == nil {
-						b.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-						writeErr := b.conn.WriteMessage(websocket.TextMessage, data)
-						if writeErr != nil {
-							b.logDebug("[%s] Keep-alive send failed: %v", logger.ModBridge, writeErr)
-						} else {
-							b.logDebug("[%s] Keep-alive frame sent", logger.ModBridge)
-						}
-					}
-				}
-				b.connMu.Unlock()
-				lastKeepAlive = time.Now()
+			if lastSend := atomic.LoadInt64(&b.lastSendTime); lastSend > 0 &&
+				time.Since(time.UnixMilli(lastSend)) < keepAliveInterval {
+				continue // business traffic already proves liveness
 			}
+			b.sendKeepAlive()
 		}
+	}
+}
+
+// sendKeepAlive writes one keep_alive frame carrying the instance id.
+func (b *Bridge) sendKeepAlive() {
+	b.connMu.Lock()
+	defer b.connMu.Unlock()
+	if b.conn == nil {
+		return
+	}
+	data, err := json.Marshal(map[string]interface{}{
+		"type":       "keep_alive",
+		"instanceId": b.instanceID,
+		"timestamp":  time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return
+	}
+	b.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if writeErr := b.conn.WriteMessage(websocket.TextMessage, data); writeErr != nil {
+		b.logDebug("[%s] Keep-alive send failed: %v", logger.ModBridge, writeErr)
 	}
 }
 
@@ -3273,6 +3370,56 @@ func (b *Bridge) fireTaskWatchdog(taskId string) {
 	}
 }
 
+// getWorktreeManager returns the manager for the repository containing
+// projectPath, cached by repository root so two paths inside one repo share a
+// manager. An empty path yields the legacy launch-directory manager.
+func (b *Bridge) getWorktreeManager(projectPath string) *workflows.WorktreeManager {
+	if projectPath == "" {
+		return b.worktreeManager
+	}
+	projectPath, _ = session.ExpandTilde(projectPath)
+	m := workflows.NewWorktreeManager(projectPath)
+	b.worktreeManagersMu.Lock()
+	defer b.worktreeManagersMu.Unlock()
+	if b.worktreeManagers == nil {
+		b.worktreeManagers = map[string]*workflows.WorktreeManager{}
+	}
+	if cached, ok := b.worktreeManagers[m.ProjectDir()]; ok {
+		return cached
+	}
+	b.worktreeManagers[m.ProjectDir()] = m
+	return m
+}
+
+// rememberJobManager records the manager a job was dispatched with.
+func (b *Bridge) rememberJobManager(jobId string, m *workflows.WorktreeManager) {
+	if jobId == "" || m == nil {
+		return
+	}
+	b.worktreeManagersMu.Lock()
+	if b.jobManagers == nil {
+		b.jobManagers = map[string]*workflows.WorktreeManager{}
+	}
+	b.jobManagers[jobId] = m
+	b.worktreeManagersMu.Unlock()
+}
+
+// managerFor resolves the manager for a workflow message: an explicit
+// projectPath wins, then the manager the job was dispatched with, then the
+// legacy fallback.
+func (b *Bridge) managerFor(payload map[string]interface{}, jobId string) *workflows.WorktreeManager {
+	if pp := getString(payload, "projectPath"); pp != "" {
+		return b.getWorktreeManager(pp)
+	}
+	b.worktreeManagersMu.Lock()
+	m := b.jobManagers[jobId]
+	b.worktreeManagersMu.Unlock()
+	if m != nil {
+		return m
+	}
+	return b.worktreeManager
+}
+
 // handleWorkflowTaskAssign handles task assignment from Orchestrator
 func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 	payload, ok := msg.Payload.(map[string]interface{})
@@ -3293,6 +3440,13 @@ func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 	// generation that started the run. Absent field -> 0, which the
 	// orchestrator soft-passes for pre-G19 peers.
 	attempt := getInt(payload, "attempt")
+	// mission-branch-delivery D1: the mission's pinned baseline. Absent (old
+	// API) → the task is cut from HEAD.
+	baseCommit := getString(payload, "baseCommit")
+	// workspace-checkout: the project this task belongs to. Absent (old API)
+	// → the legacy launch-directory manager.
+	wm := b.getWorktreeManager(getString(payload, "projectPath"))
+	b.rememberJobManager(jobId, wm)
 
 	b.logInfo("[%s] Workflow task assign: %s (agent: %s) in job %s", logger.ModWorkflow, taskId, agent, jobId)
 
@@ -3305,28 +3459,70 @@ func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 	// orchestrator records it as dispatched to this device.
 	if isLiveTaskSession(b.sessions.Get(taskId)) {
 		b.logWarn("[%s] Re-dispatch for live task %s (job %s): ignoring, session healthy", logger.ModWorkflow, taskId, jobId)
-		_ = b.sendMessage(taskStartedMessage(jobId, taskId, b.config.DeviceID))
+		_ = b.sendMessage(b.taskStartedWithBase(jobId, taskId))
 		return
 	}
 
-	// Determine working directory — use worktree if available
+	// Determine working directory — use worktree if available. With an
+	// explicit project the fallback is that project, never the launch dir.
 	workDir := "."
+	if getString(payload, "projectPath") != "" {
+		workDir = wm.ProjectDir()
+	}
 	if worktreeBranch != "" {
-		if b.worktreeManager.IsGitRepo() {
-			wtPath, err := b.worktreeManager.CreateWorktree(jobId, taskId)
+		if wm.IsGitRepo() {
+			tw, err := wm.CreateTaskWorktree(jobId, taskId, baseCommit)
+			if errors.Is(err, workflows.ErrBaseUnreachable) {
+				// Never fall back to HEAD: the task would silently diverge
+				// from its siblings' baseline.
+				b.logWarn("[%s] Task %s: baseline %s unreachable, failing task", logger.ModWorkflow, taskId, baseCommit)
+				b.sendMessage(Message{
+					Type: "workflow:task_error",
+					Payload: map[string]interface{}{
+						"jobId":        jobId,
+						"taskId":       taskId,
+						"deviceId":     b.config.DeviceID,
+						"executorKind": ExecutorKindBridge,
+						"error":        err.Error(),
+						"errorType":    "base_unreachable",
+						"attempt":      attempt,
+					},
+					Timestamp: time.Now().UnixMilli(),
+				})
+				return
+			}
 			if err != nil {
 				b.logInfo("[%s] Worktree creation failed for task %s: %v, falling back to original dir", logger.ModWorkflow, taskId, err)
 			} else {
-				workDir = wtPath
-				b.logInfo("[%s] Created worktree for task %s at %s", logger.ModWorkflow, taskId, wtPath)
+				workDir = tw.Path
+				b.setTaskBase(taskId, taskBase{Branch: tw.BaseBranch, Commit: tw.BaseCommit})
+				b.logInfo("[%s] Created worktree for task %s at %s", logger.ModWorkflow, taskId, tw.Path)
 			}
+		} else if getString(payload, "projectPath") != "" {
+			// An explicit project that is not a git repo cannot host an
+			// isolated task worktree; running in place would defeat isolation.
+			b.logWarn("[%s] Task %s: project %s is not a git repo, failing task", logger.ModWorkflow, taskId, getString(payload, "projectPath"))
+			b.sendMessage(Message{
+				Type: "workflow:task_error",
+				Payload: map[string]interface{}{
+					"jobId":        jobId,
+					"taskId":       taskId,
+					"deviceId":     b.config.DeviceID,
+					"executorKind": ExecutorKindBridge,
+					"error":        "not_a_git_repo: " + getString(payload, "projectPath"),
+					"errorType":    "not_a_git_repo",
+					"attempt":      attempt,
+				},
+				Timestamp: time.Now().UnixMilli(),
+			})
+			return
 		} else {
 			b.logDebug("[%s] Not a git repo, skipping worktree for task %s", logger.ModWorkflow, taskId)
 		}
 	}
 
 	// Check process pool capacity
-	if b.sessions.ActiveCount() >= b.sessions.MaxConcurrent() {
+	if b.sessions.ActiveTaskCount() >= b.sessions.MaxConcurrent() {
 		b.logInfo("[%s] Process pool full, queuing task %s", logger.ModWorkflow, taskId)
 		b.sessions.Enqueue(session.QueueItem{
 			CLIType:   agent,
@@ -3411,8 +3607,18 @@ func (b *Bridge) startTaskSession(jobId, taskId, agent, title, description, cont
 // Shared by the direct dispatch path (startTaskSession) and the queue drain
 // (drainTaskQueue) so a queued task gets the identical lifecycle — including
 // the completion exit callback, which keys on the session's job/task metadata.
-func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, rows int, permMode, prompt, title string, attempt int) {
-	sess, err := b.sessions.CreateWithIDAndSize(cli, workDir, taskId, cols, rows, permMode)
+func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, rows int, permMode, prompt, title string, attempt int) bool {
+	sess, err := b.sessions.StartTaskSession(cli, workDir, taskId, jobId, cols, rows, permMode)
+	if errors.Is(err, session.ErrTaskPoolFull) {
+		// Lost the race for the last slot between the caller's check and
+		// registration; the pool check is atomic with registration, so queue.
+		b.logInfo("[%s] Process pool full at registration, queuing task %s", logger.ModWorkflow, taskId)
+		b.sessions.Enqueue(session.QueueItem{
+			CLIType: cli, WorkDir: workDir, SessionID: taskId, JobID: jobId,
+			Attempt: attempt, Cols: cols, Rows: rows, PermMode: permMode, Prompt: prompt,
+		})
+		return false
+	}
 	if err != nil {
 		b.logInfo("[%s] Failed to create session for task %s: %v", logger.ModWorkflow, taskId, err)
 		b.sendMessage(Message{
@@ -3430,13 +3636,13 @@ func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, row
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
-		return
+		return true
 	}
 
 	// Known-issue #7: emit the task_started signal on the dispatch path (the
 	// web-origin command echoes are no longer its only emitters), then the
 	// progress-0 "started" step report.
-	_ = b.sendMessage(taskStartedMessage(jobId, taskId, b.config.DeviceID))
+	_ = b.sendMessage(b.taskStartedWithBase(jobId, taskId))
 
 	// Report progress
 	b.sendMessage(Message{
@@ -3452,12 +3658,10 @@ func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, row
 		Timestamp: time.Now().UnixMilli(),
 	})
 
-	// Store job/task metadata BEFORE sending the prompt: the turn-end
-	// terminal check (taskTurnExitCode) reads sess.JobID/TaskID, and a fast
-	// agent can answer the prompt before SetMultiAgentMetadata would have
-	// run — that ordering turned a completed turn into a task stuck in
-	// `running` forever (caught by the G17 replay suite under -race).
-	sess.SetMultiAgentMetadata(jobId, taskId)
+	// Job/task metadata was written at registration (StartTaskSession), so
+	// the turn-end terminal check (taskTurnExitCode) and the task pool see it
+	// from the first instant — a fast agent answering the prompt can no
+	// longer outrun it (caught by the G17 replay suite under -race).
 
 	// Store task meta before the prompt too: a prompt-send failure below
 	// stops the session, and handleSessionExit only reports a task result
@@ -3488,12 +3692,13 @@ func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, row
 		if err := b.sessions.StopWithExitCode(taskId, 1); err != nil {
 			b.logWarn("[%s] Stop after failed prompt send failed for %s: %v", logger.ModWorkflow, taskId, err)
 		}
-		return
+		return true
 	}
 	b.notePromptSent(sess.ID, sess.GetProtocolName())
 	// Idle watchdog: if the CLI never starts the turn, fail fast instead
 	// of waiting for the platform-side timeout.
 	b.armTaskWatchdog(taskId)
+	return true
 }
 
 // drainTaskQueue starts queued tasks as pool capacity frees. Without it the
@@ -3503,7 +3708,7 @@ func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, row
 // until retry/stuck-recovery (found live in dogfood 2026-08-22).
 func (b *Bridge) drainTaskQueue() {
 	for {
-		if b.sessions.ActiveCount() >= b.sessions.MaxConcurrent() {
+		if b.sessions.ActiveTaskCount() >= b.sessions.MaxConcurrent() {
 			return
 		}
 		item := b.sessions.DequeueNext()
@@ -3512,8 +3717,10 @@ func (b *Bridge) drainTaskQueue() {
 		}
 		b.logInfo("[%s] Draining queued task %s (job %s, waited %s)", logger.ModWorkflow,
 			item.SessionID, item.JobID, time.Since(item.EnqueuedAt).Round(time.Second))
-		b.launchTaskSession(item.JobID, item.SessionID, item.CLIType, item.WorkDir,
-			item.Cols, item.Rows, item.PermMode, item.Prompt, "", item.Attempt)
+		if !b.launchTaskSession(item.JobID, item.SessionID, item.CLIType, item.WorkDir,
+			item.Cols, item.Rows, item.PermMode, item.Prompt, "", item.Attempt) {
+			return // re-queued: pool is full, the next capacity event drains
+		}
 	}
 }
 
@@ -3544,14 +3751,16 @@ func (b *Bridge) handleWorkflowTaskCleanup(msg Message) {
 
 	b.logInfo("[%s] Workflow task cleanup: %s in job %s", logger.ModWorkflow, taskId, jobId)
 
-	if err := b.worktreeManager.RemoveWorktree(jobId, taskId); err != nil {
+	if err := b.managerFor(payload, jobId).RemoveWorktree(jobId, taskId); err != nil {
 		b.logInfo("[%s] Worktree cleanup failed for task %s: %v", logger.ModWorkflow, taskId, err)
 	} else {
 		b.logInfo("[%s] Cleaned up worktree for task %s", logger.ModWorkflow, taskId)
 	}
 }
 
-// handleWorkflowTaskMerge handles branch merge request from web UI
+// handleWorkflowTaskMerge merges one task branch. Like merge_all it lands in
+// the mission's integration worktree (never the user's checkout, never a
+// push); the legacy task_* reply frames are kept for the existing consumers.
 func (b *Bridge) handleWorkflowTaskMerge(msg Message) {
 	payload, ok := msg.Payload.(map[string]interface{})
 	if !ok {
@@ -3560,12 +3769,20 @@ func (b *Bridge) handleWorkflowTaskMerge(msg Message) {
 
 	jobId := getString(payload, "jobId")
 	taskId := getString(payload, "taskId")
+	baseCommit := getString(payload, "baseCommit")
 
 	b.logInfo("[%s] Workflow task merge: %s in job %s", logger.ModWorkflow, taskId, jobId)
 
-	conflictFiles, err := b.worktreeManager.MergeBranch(jobId, taskId)
-	if err != nil {
-		b.logInfo("[%s] Merge failed for task %s: %v", logger.ModWorkflow, taskId, err)
+	var ev workflows.MergeEvent
+	out, err := b.managerFor(payload, jobId).IntegrateBranches(jobId, baseCommit,
+		[]workflows.BranchSpec{{TaskID: taskId, BranchName: workflows.GetBranchName(jobId, taskId)}},
+		func(e workflows.MergeEvent) { ev = e })
+	if err != nil || ev.Status == "error" || ev.Status == "fetch_failed" {
+		detail := ev.Status
+		if err != nil {
+			detail = err.Error()
+		}
+		b.logInfo("[%s] Merge failed for task %s: %s", logger.ModWorkflow, taskId, detail)
 		b.sendMessage(Message{
 			Type: "workflow:task_error",
 			Payload: map[string]interface{}{
@@ -3573,7 +3790,7 @@ func (b *Bridge) handleWorkflowTaskMerge(msg Message) {
 				"taskId":       taskId,
 				"deviceId":     b.config.DeviceID,
 				"executorKind": ExecutorKindBridge,
-				"error":        err.Error(),
+				"error":        detail,
 				"errorType":    "merge_failed",
 			},
 			Timestamp: time.Now().UnixMilli(),
@@ -3581,15 +3798,15 @@ func (b *Bridge) handleWorkflowTaskMerge(msg Message) {
 		return
 	}
 
-	if len(conflictFiles) > 0 {
-		b.logInfo("[%s] Merge conflict for task %s: %v", logger.ModWorkflow, taskId, conflictFiles)
+	if ev.Status == "conflict" {
+		b.logInfo("[%s] Merge conflict for task %s: %v", logger.ModWorkflow, taskId, ev.ConflictFiles)
 		b.sendMessage(Message{
 			Type: "workflow:task_merge_conflict",
 			Payload: map[string]interface{}{
 				"jobId":         jobId,
 				"taskId":        taskId,
 				"deviceId":      b.config.DeviceID,
-				"conflictFiles": conflictFiles,
+				"conflictFiles": ev.ConflictFiles,
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
@@ -3610,10 +3827,10 @@ func (b *Bridge) handleWorkflowTaskMerge(msg Message) {
 	})
 
 	// add-preview-hosting (task 4.1-4.3): fire-and-forget build+upload of a
-	// static preview from the just-merged repo. Kicked off in a goroutine
-	// AFTER the merge-succeeded message above so a slow or failing build
-	// never delays it; jobId here is what the platform calls missionId.
-	b.maybeBuildPreview(jobId, preview.TaskIDMerge)
+	// static preview, now from the integration worktree. Kicked off in a
+	// goroutine AFTER the merge-succeeded message above so a slow or failing
+	// build never delays it; jobId here is what the platform calls missionId.
+	b.maybeBuildPreview(jobId, preview.TaskIDMerge, out.Path)
 }
 
 // maybeBuildPreview kicks off the preview build+upload flow for a mission
@@ -3623,11 +3840,10 @@ func (b *Bridge) handleWorkflowTaskMerge(msg Message) {
 // artifact is the merged tree's final state, not any single task's product.
 // It never blocks the caller and never surfaces an error to it — see
 // preview.RunAndUpload for why.
-func (b *Bridge) maybeBuildPreview(jobId, taskID string) {
+func (b *Bridge) maybeBuildPreview(jobId, taskID, repoRoot string) {
 	if !b.config.PreviewBuildEffective() {
 		return
 	}
-	repoRoot := b.worktreeManager.ProjectDir()
 	go preview.RunAndUpload(b.apiClient, b.previewCache, jobId, repoRoot, taskID, b.logInfo)
 }
 
@@ -3711,6 +3927,9 @@ func (b *Bridge) previewRevivePollLoop() {
 		case <-b.done:
 			return
 		case <-ticker.C:
+			if b.standby.Load() {
+				continue
+			}
 			b.pollPreviewRevives()
 		}
 	}
@@ -3752,6 +3971,9 @@ func (b *Bridge) deploySourcePollLoop() {
 		case <-b.done:
 			return
 		case <-ticker.C:
+			if b.standby.Load() {
+				continue
+			}
 			b.pollDeploySources()
 		}
 	}
@@ -3803,7 +4025,10 @@ func (b *Bridge) pollDeploySources() {
 	}
 }
 
-// handleWorkflowMergeAll handles multi-branch merge request for multi-device jobs
+// handleWorkflowMergeAll integrates the mission's task branches into the
+// integration branch oa/mission-<m> (mission-branch-delivery D3). The user's
+// main checkout is never written and nothing is pushed; delivery is a
+// separate, explicit workflow:deliver.
 func (b *Bridge) handleWorkflowMergeAll(msg Message) {
 	payload, ok := msg.Payload.(map[string]interface{})
 	if !ok {
@@ -3811,6 +4036,7 @@ func (b *Bridge) handleWorkflowMergeAll(msg Message) {
 	}
 
 	jobId := getString(payload, "jobId")
+	baseCommit := getString(payload, "baseCommit")
 
 	// Extract branches array
 	branchesRaw, ok := payload["branches"]
@@ -3833,93 +4059,60 @@ func (b *Bridge) handleWorkflowMergeAll(msg Message) {
 		branches = append(branches, workflows.BranchSpec{
 			TaskID:     getString(brMap, "taskId"),
 			BranchName: getString(brMap, "branchName"),
+			Title:      getString(brMap, "title"),
 		})
 	}
 
 	b.logInfo("[%s] Workflow merge_all: %d branches for job %s", logger.ModWorkflow, len(branches), jobId)
 
-	// allMerged tracks whether every branch made it in cleanly. The preview
-	// build (task 4.1) only makes sense once the whole multi-device job has
-	// landed in main — a partial merge_all (fetch failure, merge error, or a
-	// conflict that stopped the loop) must not trigger a build against a
-	// half-merged tree.
-	allMerged := len(branches) > 0
-
-	// Execute sequential merge
-	for _, branch := range branches {
-		b.logInfo("[%s] Merging branch %s (task %s)", logger.ModWorkflow, branch.BranchName, branch.TaskID)
-
-		// Fetch remote branch first
-		if err := b.worktreeManager.FetchBranch(branch.BranchName); err != nil {
-			b.logInfo("[%s] Fetch failed for branch %s: %v", logger.ModWorkflow, branch.BranchName, err)
-			b.sendMessage(Message{
-				Type: "workflow:merge_progress",
-				Payload: map[string]interface{}{
-					"jobId":  jobId,
-					"taskId": branch.TaskID,
-					"status": "fetch_failed",
-				},
-				Timestamp: time.Now().UnixMilli(),
-			})
-			allMerged = false
-			continue
+	progress := func(e workflows.MergeEvent) {
+		p := map[string]interface{}{
+			"jobId":  jobId,
+			"taskId": e.TaskID,
+			"status": e.Status,
 		}
-
-		// Merge the branch
-		conflictFiles, err := b.worktreeManager.MergeBranchByRef(branch.BranchName)
-		if err != nil {
-			b.logInfo("[%s] Merge failed for branch %s: %v", logger.ModWorkflow, branch.BranchName, err)
-			b.sendMessage(Message{
-				Type: "workflow:merge_progress",
-				Payload: map[string]interface{}{
-					"jobId":  jobId,
-					"taskId": branch.TaskID,
-					"status": "error",
-				},
-				Timestamp: time.Now().UnixMilli(),
-			})
-			allMerged = false
-			continue
+		if len(e.ConflictFiles) > 0 {
+			p["conflictFiles"] = e.ConflictFiles
 		}
+		b.logInfo("[%s] merge_all: task %s -> %s", logger.ModWorkflow, e.TaskID, e.Status)
+		b.sendMessage(Message{Type: "workflow:merge_progress", Payload: p, Timestamp: time.Now().UnixMilli()})
+	}
 
-		if len(conflictFiles) > 0 {
-			b.logInfo("[%s] Merge conflict for branch %s: %v", logger.ModWorkflow, branch.BranchName, conflictFiles)
-			b.sendMessage(Message{
-				Type: "workflow:merge_progress",
-				Payload: map[string]interface{}{
-					"jobId":         jobId,
-					"taskId":        branch.TaskID,
-					"status":        "conflict",
-					"conflictFiles": conflictFiles,
-				},
-				Timestamp: time.Now().UnixMilli(),
-			})
-			allMerged = false
-			// Stop merging on conflict
-			break
+	out, err := b.managerFor(payload, jobId).IntegrateBranches(jobId, baseCommit, branches, progress)
+	if err != nil {
+		b.logWarn("[%s] merge_all: integration setup failed for job %s: %v", logger.ModWorkflow, jobId, err)
+		status := "error"
+		if errors.Is(err, workflows.ErrBaseUnreachable) {
+			status = "base_unreachable"
 		}
-
-		// Push main after each successful merge
-		if err := b.worktreeManager.PushMain(); err != nil {
-			b.logInfo("[%s] Push main failed after merging %s: %v", logger.ModWorkflow, branch.BranchName, err)
-		}
-
 		b.sendMessage(Message{
 			Type: "workflow:merge_progress",
 			Payload: map[string]interface{}{
 				"jobId":  jobId,
-				"taskId": branch.TaskID,
-				"status": "merged",
+				"status": status,
+				"error":  err.Error(),
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
+		return
 	}
 
-	// add-preview-hosting (task 4.1-4.3): only once every branch in this
-	// merge_all landed cleanly, same fire-and-forget contract as the
-	// single-task merge path.
-	if allMerged {
-		b.maybeBuildPreview(jobId, preview.TaskIDMerge)
+	// Only once every branch landed does the mission count as integrated; a
+	// partial run (conflict / error) must not trigger a preview build against
+	// a half-merged tree, nor advertise a deliverable branch.
+	if out.Integrated {
+		b.sendMessage(Message{
+			Type: "workflow:merge_progress",
+			Payload: map[string]interface{}{
+				"jobId":             jobId,
+				"status":            "integrated",
+				"integrationBranch": out.Branch,
+				"headCommit":        out.HeadCommit,
+				"legacyBase":        out.LegacyBase,
+			},
+			Timestamp: time.Now().UnixMilli(),
+		})
+		b.maybeBuildPreview(jobId, preview.TaskIDMerge, out.Path)
 	}
 }
 
@@ -3946,12 +4139,13 @@ func (b *Bridge) handleSessionExit(sessionID string, exitCode int, output []byte
 	// runs regardless of worktree isolation — when isolation was skipped the
 	// CLI wrote into the live repo, and that output must still be reported
 	// (workDir-blindspot incident 2026-09-04).
-	changedFiles := b.worktreeManager.ListChangedFiles(meta.WorkDir)
+	wm := b.managerFor(nil, meta.JobID)
+	changedFiles := wm.ListChangedFiles(meta.WorkDir)
 
 	// Auto-commit in worktree if applicable
 	var commitHash string
 	if meta.Worktree {
-		hash, err := b.worktreeManager.CommitAll(meta.WorkDir, meta.TaskID, meta.Title)
+		hash, err := wm.CommitAll(meta.WorkDir, meta.TaskID, meta.Title)
 		if err != nil {
 			b.logInfo("[%s] Worktree commit failed for task %s: %v", logger.ModWorkflow, meta.TaskID, err)
 		} else if hash != "" {
@@ -3960,7 +4154,7 @@ func (b *Bridge) handleSessionExit(sessionID string, exitCode int, output []byte
 
 			// Push branch to remote for cross-device merging
 			branchName := workflows.GetBranchName(meta.JobID, meta.TaskID)
-			if err := b.worktreeManager.PushBranch(meta.WorkDir, branchName); err != nil {
+			if err := wm.PushBranch(meta.WorkDir, branchName); err != nil {
 				b.logInfo("[%s] Push failed for task %s branch %s: %v", logger.ModWorkflow, meta.TaskID, branchName, err)
 			} else {
 				b.logInfo("[%s] Pushed branch %s for task %s", logger.ModWorkflow, branchName, meta.TaskID)

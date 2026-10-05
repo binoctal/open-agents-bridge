@@ -263,8 +263,11 @@ func TestMessageRoutingsessionOutput(t *testing.T) {
 	received := waitForWSType(t, webWS, "session:output-batch", 5*time.Second)
 	payloadBytes, _ := json.Marshal(received.Payload)
 	var payload struct {
-		SessionId string   `json:"sessionId"`
-		Lines     []string `json:"lines"`
+		SessionId string `json:"sessionId"`
+		Lines     []struct {
+			Content    string `json:"content"`
+			OutputType string `json:"outputType"`
+		} `json:"lines"`
 	}
 	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
 		t.Fatalf("Failed to parse session:output-batch payload: %v", err)
@@ -272,7 +275,7 @@ func TestMessageRoutingsessionOutput(t *testing.T) {
 	if payload.SessionId != "sess_go_1" {
 		t.Errorf("sessionId = %s, want sess_go_1", payload.SessionId)
 	}
-	if len(payload.Lines) != 1 || payload.Lines[0] != "Hello from Go bridge" {
+	if len(payload.Lines) != 1 || payload.Lines[0].Content != "Hello from Go bridge" {
 		t.Errorf("lines = %v, want [Hello from Go bridge]", payload.Lines)
 	}
 }

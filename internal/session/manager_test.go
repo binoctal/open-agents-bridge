@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -372,7 +373,7 @@ func TestSession_MultiAgentMetadata(t *testing.T) {
 // --- applyPermissionMode (pure config mutation) ---------------------------
 
 func TestManager_applyPermissionMode(t *testing.T) {
-	// claudeACPModeDir writes under config.ConfigDir(), which follows HOME —
+	// claudeACPSharedDir writes under config.ConfigDir(), which follows HOME —
 	// redirect it so tests never touch the real user config.
 	t.Setenv("HOME", t.TempDir())
 
@@ -505,16 +506,16 @@ func TestManager_applyPermissionMode(t *testing.T) {
 	}
 }
 
-// assertClaudeIsolation pins the only channel that actually configures the
-// ACP adapter: CLAUDE_CONFIG_DIR pointing at a settings.json carrying the
-// mapped defaultMode — with the dead env/args channels absent.
+// assertClaudeIsolation pins the isolation contract: CLAUDE_CONFIG_DIR is the
+// single shared dir whose settings carry NO defaultMode, and the requested mode
+// travels as ACPModeID (applied via session/set_mode before the session is exposed).
 func assertClaudeIsolation(t *testing.T, c *protocol.AdapterConfig, wantMode string) {
 	t.Helper()
 	dir := c.CustomEnv["CLAUDE_CONFIG_DIR"]
 	if dir == "" {
 		t.Fatal("CLAUDE_CONFIG_DIR not set — adapter would read the HOST's ~/.claude/settings.json")
 	}
-	want := filepath.Join(configpkg.ConfigDir(), "claude-acp-config", wantMode)
+	want := filepath.Join(configpkg.ConfigDir(), "claude-acp-config", "shared")
 	if dir != want {
 		t.Errorf("CLAUDE_CONFIG_DIR = %q, want %q", dir, want)
 	}
@@ -522,16 +523,15 @@ func assertClaudeIsolation(t *testing.T, c *protocol.AdapterConfig, wantMode str
 	if err != nil {
 		t.Fatalf("read settings.json: %v", err)
 	}
-	var parsed struct {
-		Permissions struct {
-			DefaultMode string `json:"defaultMode"`
-		} `json:"permissions"`
-	}
+	var parsed map[string]interface{}
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("parse settings.json (%s): %v", data, err)
 	}
-	if parsed.Permissions.DefaultMode != wantMode {
-		t.Errorf("settings defaultMode = %q, want %q", parsed.Permissions.DefaultMode, wantMode)
+	if _, has := parsed["permissions"]; has {
+		t.Errorf("shared settings must not carry permissions/defaultMode, got %s", data)
+	}
+	if c.ACPModeID != wantMode {
+		t.Errorf("ACPModeID = %q, want %q", c.ACPModeID, wantMode)
 	}
 	if _, ok := c.CustomEnv["CLAUDE_PERMISSION_MODE"]; ok {
 		t.Error("CLAUDE_PERMISSION_MODE is read by nobody — must not be set")
@@ -541,37 +541,90 @@ func assertClaudeIsolation(t *testing.T, c *protocol.AdapterConfig, wantMode str
 	}
 }
 
-// claudeACPModeDir must be idempotent: an identical settings.json is not
-// rewritten, and a stale one is.
-func TestClaudeACPModeDirIdempotent(t *testing.T) {
+// The shared dir is idempotent and identical for every mode.
+func TestClaudeACPSharedDirIdempotentAndModeIndependent(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
-	dir1, err := claudeACPModeDir("default")
+	dir1, err := claudeACPSharedDir()
 	if err != nil {
 		t.Fatalf("first call: %v", err)
 	}
-	settingsPath := filepath.Join(dir1, "settings.json")
-	before, err := os.Stat(settingsPath)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-
-	// Same mode again: file untouched (compare write size + mtime is flaky on
-	// coarse filesystems, so rewrite a marker instead).
-	if err := os.WriteFile(settingsPath+".probe", []byte("x"), 0o644); err != nil {
+	probe := filepath.Join(dir1, "sibling.probe")
+	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
-	dir2, err := claudeACPModeDir("default")
-	if err != nil {
-		t.Fatalf("second call: %v", err)
+	dir2, err := claudeACPSharedDir()
+	if err != nil || dir2 != dir1 {
+		t.Fatalf("second call: dir=%q err=%v want %q", dir2, err, dir1)
 	}
-	if dir2 != dir1 {
-		t.Errorf("dir changed between calls: %q vs %q", dir1, dir2)
-	}
-	if _, err := os.Stat(settingsPath + ".probe"); err != nil {
+	if _, err := os.Stat(probe); err != nil {
 		t.Error("sibling file was clobbered by the idempotent path")
 	}
-	_ = before
+}
+
+// Migration copies from legacy per-mode dirs, never touches them, newest wins,
+// and runs once (marker).
+func TestClaudeACPSharedDirMigratesByCopyOnly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := filepath.Join(configpkg.ConfigDir(), "claude-acp-config")
+	oldDir := filepath.Join(root, "bypassPermissions")
+	newerDir := filepath.Join(root, "default")
+	for _, d := range []string{oldDir, newerDir} {
+		if err := os.MkdirAll(filepath.Join(d, "projects", "p1"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	older := filepath.Join(oldDir, ".credentials.json")
+	newer := filepath.Join(newerDir, ".credentials.json")
+	os.WriteFile(older, []byte("OLD"), 0o600)
+	os.WriteFile(newer, []byte("NEW"), 0o600)
+	past := time.Now().Add(-time.Hour)
+	os.Chtimes(older, past, past)
+	os.WriteFile(filepath.Join(oldDir, "projects", "p1", "s.jsonl"), []byte("hist"), 0o600)
+	before, _ := os.ReadFile(older)
+
+	dir, err := claudeACPSharedDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, ".credentials.json"))
+	if string(got) != "NEW" {
+		t.Errorf("credentials = %q, want newest (NEW)", got)
+	}
+	if h, _ := os.ReadFile(filepath.Join(dir, "projects", "p1", "s.jsonl")); string(h) != "hist" {
+		t.Errorf("session history not migrated: %q", h)
+	}
+	if after, _ := os.ReadFile(older); string(after) != string(before) {
+		t.Error("legacy dir was modified")
+	}
+	if _, err := os.Stat(filepath.Join(dir, claudeSharedMigratedMarker)); err != nil {
+		t.Error("migration marker missing")
+	}
+
+	// Second run must not re-migrate: a credential deleted from shared stays gone.
+	os.Remove(filepath.Join(dir, ".credentials.json"))
+	if _, err := claudeACPSharedDir(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".credentials.json")); err == nil {
+		t.Error("migration re-ran despite marker")
+	}
+}
+
+// A host with defaultMode=bypassPermissions must not reach the shared settings.
+func TestClaudeACPSharedDirIgnoresHostSettings(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
+	os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{"permissions":{"defaultMode":"bypassPermissions"}}`), 0o644)
+	dir, err := claudeACPSharedDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "settings.json"))
+	if strings.Contains(string(data), "defaultMode") {
+		t.Errorf("shared settings leaked host defaultMode: %s", data)
+	}
 }
 
 func contains(slice []string, want string) bool {

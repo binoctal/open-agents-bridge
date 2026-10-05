@@ -12,6 +12,7 @@ import (
 
 	"github.com/binoctal/open-agents-bridge/internal/config"
 	"github.com/binoctal/open-agents-bridge/internal/crypto"
+	"github.com/binoctal/open-agents-bridge/internal/fingerprint"
 	"github.com/spf13/cobra"
 )
 
@@ -273,14 +274,17 @@ func init() {
 }
 
 type PairResponse struct {
-	Success     bool           `json:"success"`
-	UserID      string         `json:"userId"`
-	DeviceID    string         `json:"deviceId"`
-	DeviceName  string         `json:"deviceName"`
-	DeviceToken string         `json:"deviceToken"`
-	ServerURL   string         `json:"serverUrl"`
-	WebPubKey   string         `json:"webPubKey,omitempty"`
-	Error       *ErrorResponse `json:"error,omitempty"`
+	Success     bool   `json:"success"`
+	UserID      string `json:"userId"`
+	DeviceID    string `json:"deviceId"`
+	DeviceName  string `json:"deviceName"`
+	DeviceToken string `json:"deviceToken"`
+	ServerURL   string `json:"serverUrl"`
+	WebPubKey   string `json:"webPubKey,omitempty"`
+	// DuplicateFingerprint is the server's hint that this machine looks already
+	// paired (device-model-ia D3). Informational only.
+	DuplicateFingerprint bool           `json:"duplicate_fingerprint,omitempty"`
+	Error                *ErrorResponse `json:"error,omitempty"`
 }
 
 type ErrorResponse struct {
@@ -292,7 +296,8 @@ func pairDevice(code string, keyPair *crypto.KeyPair) (*config.Config, error) {
 	apiURL := strings.TrimSuffix(pairServerURL, "/") + "/api/devices/pair/verify"
 
 	body := map[string]string{
-		"pairCode": code,
+		"pairCode":    code,
+		"fingerprint": fingerprint.Compute(),
 	}
 	bodyJSON, _ := json.Marshal(body)
 
@@ -321,6 +326,10 @@ func pairDevice(code string, keyPair *crypto.KeyPair) (*config.Config, error) {
 
 	if !result.Success {
 		return nil, fmt.Errorf("pairing failed")
+	}
+
+	if result.DuplicateFingerprint {
+		fmt.Println("Note: this computer looks like it was already paired to your account. You can remove the old entry in the web app.")
 	}
 
 	return &config.Config{
