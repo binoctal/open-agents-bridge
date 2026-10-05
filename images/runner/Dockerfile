@@ -16,10 +16,15 @@ ARG NODE_DIGEST
 FROM ${NODE_IMAGE}@${NODE_DIGEST}
 ARG CLAUDE_CODE_VERSION
 ARG BRIDGE_VERSION
+ARG ACP_ADAPTER_VERSION
 # The bridge serves cloud interactive sessions (entrypoint.sh: SESSION_TOKEN).
 # Exact version only; its postinstall pins and verifies the release archive.
+# The bridge launches the claude engine as `npx @agentclientprotocol/claude-agent-acp`;
+# the sandbox has no npm egress, so the adapter must be preinstalled (npx finds
+# a global install) or the session falls back to a PTY that cannot answer.
 RUN npm install -g --no-audit --no-fund @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
     @binoctal/open-agents-bridge@${BRIDGE_VERSION} \
+    @agentclientprotocol/claude-agent-acp@${ACP_ADAPTER_VERSION} \
  && npm cache clean --force
 WORKDIR /workspace
 COPY runner.mjs /opt/runner/runner.mjs

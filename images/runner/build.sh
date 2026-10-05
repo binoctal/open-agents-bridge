@@ -23,9 +23,14 @@ lock_versions() {
   tag=$(grep -E '^NODE_IMAGE_TAG=' versions.env | cut -d= -f2-)
   cli=$(grep -E '^CLAUDE_CODE_VERSION=' versions.env | cut -d= -f2-)
   bridge=$(grep -E '^BRIDGE_VERSION=' versions.env | cut -d= -f2-)
-  [ -n "$tag" ] && [ -n "$cli" ] && [ -n "$bridge" ] || { echo "versions.env incomplete" >&2; exit 1; }
+  acp=$(grep -E '^ACP_ADAPTER_VERSION=' versions.env | cut -d= -f2-)
+  [ -n "$tag" ] && [ -n "$cli" ] && [ -n "$bridge" ] && [ -n "$acp" ] || { echo "versions.env incomplete" >&2; exit 1; }
   if [ "$bridge" = "latest" ] || [ "$bridge" = "*" ]; then
     echo "refusing to lock a floating bridge spec ($bridge): pin an exact version" >&2
+    exit 1
+  fi
+  if [ "$acp" = "latest" ] || [ "$acp" = "*" ]; then
+    echo "refusing to lock a floating ACP adapter spec ($acp): pin an exact version" >&2
     exit 1
   fi
   if [ "$cli" = "latest" ] || [ "$cli" = "*" ]; then
@@ -56,6 +61,7 @@ lock_versions() {
     echo "NODE_DIGEST=${digest}"
     echo "CLAUDE_CODE_VERSION=${cli}"
     echo "BRIDGE_VERSION=${bridge}"
+    echo "ACP_ADAPTER_VERSION=${acp}"
   } > versions.lock
   echo "versions.lock updated: $tag -> $digest, claude-code $cli"
 }
@@ -65,7 +71,7 @@ lock_versions() {
 
 # shellcheck disable=SC1091
 source versions.lock
-: "${NODE_IMAGE_TAG:?}" "${NODE_DIGEST:?}" "${CLAUDE_CODE_VERSION:?}" "${BRIDGE_VERSION:?}"
+: "${NODE_IMAGE_TAG:?}" "${NODE_DIGEST:?}" "${CLAUDE_CODE_VERSION:?}" "${BRIDGE_VERSION:?}" "${ACP_ADAPTER_VERSION:?}"
 
 TAG=${TAG:-$(date +%Y-%m-%d)}
 docker build \
@@ -73,6 +79,7 @@ docker build \
   --build-arg NODE_DIGEST="$NODE_DIGEST" \
   --build-arg CLAUDE_CODE_VERSION="$CLAUDE_CODE_VERSION" \
   --build-arg BRIDGE_VERSION="$BRIDGE_VERSION" \
+  --build-arg ACP_ADAPTER_VERSION="$ACP_ADAPTER_VERSION" \
   -t "$IMAGE_NAME:$TAG" .
 
 # Secret scan BEFORE the image is recorded as usable: a secret that baked in
