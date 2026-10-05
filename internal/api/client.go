@@ -135,6 +135,17 @@ type WorkItem struct {
 	Attempt    int    `json:"attempt,omitempty"`
 	Model      string `json:"model,omitempty"`
 
+	// Interactive cloud-session fields (cloud-session-shadow-device). Empty
+	// LifecycleMode means a task sandbox. SessionToken is the plaintext sst_
+	// credential: like TaskToken it lives only in this poll response and the
+	// container env, never on disk or in logs. ExecutorID (above) is the shadow
+	// device id the container's bridge connects as.
+	LifecycleMode      string `json:"lifecycleMode,omitempty"`
+	SessionID          string `json:"sessionId,omitempty"`
+	SessionToken       string `json:"sessionToken,omitempty"`
+	IdleReclaimSeconds int    `json:"idleReclaimSeconds,omitempty"`
+	MaxLifetimeSeconds int    `json:"maxLifetimeSeconds,omitempty"`
+
 	// Runtime preview fields (add-dynamic-preview-compute 3.3); empty on
 	// deployment and sandbox items. Host is the {label}.deploy suffix host the
 	// agent routes; PreviewID/SnapshotTaskID identify the R2 snapshot the tree

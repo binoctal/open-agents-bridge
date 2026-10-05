@@ -491,3 +491,25 @@ func (s *reportSink) reportsFor() []map[string]any {
 	defer s.mu.Unlock()
 	return append([]map[string]any(nil), s.reports...)
 }
+
+func TestSandboxUpArgsInteractiveSessionCarriesOnlySessionCredential(t *testing.T) {
+	item := api.WorkItem{
+		SandboxID: "sb1", ExecutorID: "cse_abc", ContainerName: "oa-sb1",
+		SizeClass:     &api.SizeClass{ID: "sandbox-s1", VCPU: 0.5, MemoryMiB: 512, StorageMiB: 1024},
+		APIBaseURL:    "https://api.example",
+		LifecycleMode: "interactive-session", SessionID: "sess1", UserID: "u1", SessionToken: "sst_secret",
+		IdleReclaimSeconds: 1800, MaxLifetimeSeconds: 14400,
+		TaskToken: "must-not-leak", TaskPrompt: "must-not-leak",
+	}
+	joined := strings.Join(sandboxUpArgs(item, "runner"), "\n")
+	for _, want := range []string{"SESSION_TOKEN=sst_secret", "SESSION_ID=sess1", "USER_ID=u1", "SHADOW_DEVICE_ID=cse_abc", "IDLE_RECLAIM_SECONDS=1800", "MAX_LIFETIME_SECONDS=14400"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in args", want)
+		}
+	}
+	for _, bad := range []string{"TASK_TOKEN", "TASK_PROMPT", "MISSION_ID", "TASK_ID", "must-not-leak"} {
+		if strings.Contains(joined, bad) {
+			t.Errorf("interactive session args must not contain %q", bad)
+		}
+	}
+}

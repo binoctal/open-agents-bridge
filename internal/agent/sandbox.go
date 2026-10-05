@@ -91,6 +91,10 @@ func (a *Agent) docker() dockerRunner {
 // digest-verified local name (ImageRef minus its @sha256 pin -- a
 // locally-built image is not addressable by its config digest, so the name is
 // what docker accepts; the pin was already checked against it).
+// lifecycleInteractiveSession is the work-item lifecycleMode of a cloud
+// interactive session (task sandboxes leave it empty or "task").
+const lifecycleInteractiveSession = "interactive-session"
+
 func sandboxUpArgs(item api.WorkItem, imageName string) []string {
 	sc := item.SizeClass
 	args := []string{
@@ -107,11 +111,31 @@ func sandboxUpArgs(item api.WorkItem, imageName string) []string {
 		"--tmpfs", fmt.Sprintf("/tmp:size=%dm,rw,noexec,mode=1777", sc.StorageMiB),
 		// Real resolvers, not the unreachable 127.0.0.11 (see sandboxResolvConf).
 		"-v", sandboxResolvConf + ":/etc/resolv.conf:ro",
-		"-e", "TASK_TOKEN=" + item.TaskToken,
 		"-e", "API_BASE_URL=" + item.APIBaseURL,
-		"-e", "MISSION_ID=" + item.MissionID,
-		"-e", "TASK_ID=" + item.TaskID,
-		"-e", "TASK_PROMPT=" + item.TaskPrompt,
+	}
+	if item.LifecycleMode == lifecycleInteractiveSession {
+		// An interactive session container holds ONLY its sst_ credential and the
+		// shadow identity it connects as; it never receives a task token or any
+		// mission/task context, so a leaked env cannot touch task endpoints.
+		args = append(args,
+			"-e", "SESSION_TOKEN="+item.SessionToken,
+			"-e", "SESSION_ID="+item.SessionID,
+			"-e", "USER_ID="+item.UserID,
+			"-e", "SHADOW_DEVICE_ID="+item.ExecutorID,
+		)
+		if item.IdleReclaimSeconds > 0 {
+			args = append(args, "-e", "IDLE_RECLAIM_SECONDS="+strconv.Itoa(item.IdleReclaimSeconds))
+		}
+		if item.MaxLifetimeSeconds > 0 {
+			args = append(args, "-e", "MAX_LIFETIME_SECONDS="+strconv.Itoa(item.MaxLifetimeSeconds))
+		}
+	} else {
+		args = append(args,
+			"-e", "TASK_TOKEN="+item.TaskToken,
+			"-e", "MISSION_ID="+item.MissionID,
+			"-e", "TASK_ID="+item.TaskID,
+			"-e", "TASK_PROMPT="+item.TaskPrompt,
+		)
 	}
 	// The dispatch generation: the runner echoes it back on task-result /
 	// task-error so the callback can pair the report with the attempt that
@@ -202,8 +226,17 @@ func (a *Agent) handleSandboxUp(ctx context.Context, ep APIEndpoint, item api.Wo
 		}
 		return nil
 	}
-	if item.SizeClass == nil || item.ImageRef == "" || item.ContainerName == "" || item.TaskToken == "" || item.TaskPrompt == "" {
-		a.logf("sandbox %s: up item missing payload (sizeClass/imageRef/containerName/taskToken/taskPrompt)", item.SandboxID)
+	if item.SizeClass == nil || item.ImageRef == "" || item.ContainerName == "" {
+		a.logf("sandbox %s: up item missing payload (sizeClass/imageRef/containerName)", item.SandboxID)
+		return report(api.EventSandboxUpFailed, "", "malformed sandbox_up item")
+	}
+	if item.LifecycleMode == lifecycleInteractiveSession {
+		if item.SessionToken == "" || item.SessionID == "" || item.ExecutorID == "" || item.UserID == "" {
+			a.logf("sandbox %s: session up item missing payload (sessionToken/sessionId/executorId/userId)", item.SandboxID)
+			return report(api.EventSandboxUpFailed, "", "malformed sandbox_up item")
+		}
+	} else if item.TaskToken == "" || item.TaskPrompt == "" {
+		a.logf("sandbox %s: up item missing payload (taskToken/taskPrompt)", item.SandboxID)
 		return report(api.EventSandboxUpFailed, "", "malformed sandbox_up item")
 	}
 
