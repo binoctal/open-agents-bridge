@@ -26,6 +26,19 @@ func SessionEnvActive() bool {
 	return os.Getenv(envSessionToken) != ""
 }
 
+// wsBaseURL maps the API's http(s) base to the ws(s) form Config.ServerURL
+// carries: connect() dials it as-is, and every HTTP consumer normalizes it
+// back. Passing https:// through fails the dial with "malformed ws or wss URL".
+func wsBaseURL(apiBase string) string {
+	switch {
+	case strings.HasPrefix(apiBase, "https://"):
+		return "wss://" + strings.TrimPrefix(apiBase, "https://")
+	case strings.HasPrefix(apiBase, "http://"):
+		return "ws://" + strings.TrimPrefix(apiBase, "http://")
+	}
+	return apiBase
+}
+
 // FromSessionEnv builds the in-memory config of a session container and wires
 // the Claude Code gateway credential into this process's environment (the ACP
 // child inherits it). Nothing is written to disk.
@@ -62,7 +75,7 @@ func FromSessionEnv() (*Config, error) {
 		UserID:      userID,
 		DeviceID:    deviceID,
 		DeviceToken: token,
-		ServerURL:   apiBase,
+		ServerURL:   wsBaseURL(apiBase),
 		DeviceName:  "cloud-session",
 	}, nil
 }

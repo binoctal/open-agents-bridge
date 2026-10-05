@@ -24,7 +24,7 @@ func TestFromSessionEnvBuildsConfigAndGatewayCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.DeviceID != "cse_1" || cfg.UserID != "u1" || cfg.DeviceToken != "sst_abc" || cfg.ServerURL != "https://api.example" {
+	if cfg.DeviceID != "cse_1" || cfg.UserID != "u1" || cfg.DeviceToken != "sst_abc" || cfg.ServerURL != "wss://api.example" {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 	if got := os.Getenv("ANTHROPIC_BASE_URL"); got != "https://api.example/api/sandbox/llm" {
