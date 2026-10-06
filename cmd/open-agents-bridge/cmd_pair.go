@@ -39,7 +39,7 @@ var pairCmd = &cobra.Command{
 	Short: "Pair this device with your Open Agents account",
 	Long: `Pair this device with your Open Agents account using a pairing code.
 
-1. Go to the dashboard at https://open-agents-web.pages.dev/dashboard/devices
+1. Go to the dashboard at https://openagents.top/dashboard/devices
 2. Click "Add Device" to get a pairing code
 3. Enter the code when prompted
 
