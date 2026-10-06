@@ -7,8 +7,11 @@
 package agent
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -278,11 +281,91 @@ func (a *Agent) handleSandboxUp(ctx context.Context, ep APIEndpoint, item api.Wo
 	return report(api.EventSandboxUp, containerID, "")
 }
 
+// Workspace artifact export (cloud-session-shadow-device 4.5). The container's
+// workspace is the only user data a session sandbox holds; everything under
+// HOME=/tmp is a noexec tmpfs that dies with it by design. The export runs
+// BEFORE `docker rm` and streams `docker cp` through gzip into a capped temp
+// file, so an oversized workspace fails the export instead of eating the node.
+const (
+	artifactMaxBytes = 1 << 30 // 1 GiB compressed cap
+)
+
+// dockerCpTar is the streaming seam for `docker cp <c>:/workspace -`. It is
+// NOT the dockerRunner seam: cp must stream megabytes to disk, never buffer
+// them in a (string, error).
+var dockerCpTar = func(ctx context.Context, containerName string, w io.Writer) error {
+	cmd := exec.CommandContext(ctx, "docker", "cp", containerName+":/workspace", "-")
+	cmd.Stdout = w
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker cp: %v: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// cappedWriter fails the export once past the byte ceiling instead of letting
+// a runaway workspace fill the node disk.
+type cappedWriter struct {
+	w        io.Writer
+	written  int64
+	max      int64
+	exceeded bool
+}
+
+func (c *cappedWriter) Write(p []byte) (int, error) {
+	if c.written+int64(len(p)) > c.max {
+		c.exceeded = true
+		return 0, fmt.Errorf("artifact export exceeds %d bytes cap", c.max)
+	}
+	n, err := c.w.Write(p)
+	c.written += int64(n)
+	return n, err
+}
+
+// exportWorkspaceArtifact uploads the container's /workspace as a tar.gz to
+// the item's presigned URL. Returns the artifactsStatus for the destroy
+// report: "available" or "failed". Failure never blocks the destroy itself --
+// the workspace is destroyed either way (the spec promise is the ORDER, not a
+// guaranteed export).
+func (a *Agent) exportWorkspaceArtifact(ctx context.Context, item api.WorkItem) string {
+	f, err := os.CreateTemp("", "sbx-artifact-*.tar.gz")
+	if err != nil {
+		a.logf("sandbox %s: artifact temp file: %v", item.SandboxID, err)
+		return "failed"
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+
+	capped := &cappedWriter{w: f, max: artifactMaxBytes}
+	gz := gzip.NewWriter(capped)
+	cpErr := dockerCpTar(ctx, item.ContainerName, gz)
+	gzErr := gz.Close()
+	if cpErr != nil || gzErr != nil || capped.exceeded {
+		a.logf("sandbox %s: artifact export failed: cp=%v gzip=%v capped=%v",
+			item.SandboxID, cpErr, gzErr, capped.exceeded)
+		return "failed"
+	}
+	size, err := f.Seek(0, io.SeekStart)
+	if err != nil {
+		a.logf("sandbox %s: artifact seek: %v", item.SandboxID, err)
+		return "failed"
+	}
+	if err := a.Client.PutArtifact(ctx, item.ArtifactUploadURL, f, size); err != nil {
+		a.logf("sandbox %s: artifact upload failed: %v", item.SandboxID, err)
+		return "failed"
+	}
+	a.logf("sandbox %s: workspace artifact uploaded (%d bytes)", item.SandboxID, size)
+	return "available"
+}
+
 // handleSandboxDestroy force-removes the container. "No such container" is
-// success -- the box is gone, which is all this action promises.
+// success -- the box is gone, which is all this action promises. For an
+// interactive session with an artifact URL, the workspace is exported first
+// and the outcome rides the destroy report (4.5).
 func (a *Agent) handleSandboxDestroy(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {
-	report := func(event, detail string) error {
-		if err := ep.Client.ReportSandbox(ctx, item.SandboxID, event, "", detail); err != nil {
+	report := func(event, detail, artifacts string) error {
+		if err := ep.Client.ReportSandboxOpts(ctx, item.SandboxID, event, "", detail, artifacts); err != nil {
 			if api.Unauthorized(err) {
 				a.disableEndpoint(ep)
 			} else {
@@ -292,19 +375,28 @@ func (a *Agent) handleSandboxDestroy(ctx context.Context, ep APIEndpoint, item a
 		return nil
 	}
 	if item.ContainerName == "" {
-		return report(api.EventSandboxDestroyFailed, "malformed sandbox_destroy item")
+		return report(api.EventSandboxDestroyFailed, "malformed sandbox_destroy item", "")
+	}
+	artifacts := ""
+	if item.LifecycleMode == lifecycleInteractiveSession && item.ArtifactUploadURL != "" {
+		artifacts = a.exportWorkspaceArtifact(ctx, item)
 	}
 	_, err := a.docker()(ctx, "rm", "-f", item.ContainerName)
 	if err == nil {
 		a.logf("sandbox %s: container %s removed", item.SandboxID, item.ContainerName)
-		return report(api.EventSandboxDestroy, "")
+		return report(api.EventSandboxDestroy, "", artifacts)
 	}
 	if strings.Contains(err.Error(), "No such") || strings.Contains(err.Error(), "no such") {
 		a.logf("sandbox %s: container %s already gone", item.SandboxID, item.ContainerName)
-		return report(api.EventSandboxDestroy, "")
+		// A container that vanished before the export ran still reports the
+		// export outcome: "failed" when nothing could be collected.
+		if artifacts == "" && item.LifecycleMode == lifecycleInteractiveSession && item.ArtifactUploadURL != "" {
+			artifacts = "failed"
+		}
+		return report(api.EventSandboxDestroy, "", artifacts)
 	}
 	a.logf("sandbox %s: docker rm failed: %v", item.SandboxID, err)
-	return report(api.EventSandboxDestroyFailed, err.Error())
+	return report(api.EventSandboxDestroyFailed, err.Error(), "")
 }
 
 func shortID(id string) string {

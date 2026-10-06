@@ -3,9 +3,13 @@ package agent
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/binoctal/open-agents/hosting-agent/internal/api"
@@ -511,5 +515,150 @@ func TestSandboxUpArgsInteractiveSessionCarriesOnlySessionCredential(t *testing.
 		if strings.Contains(joined, bad) {
 			t.Errorf("interactive session args must not contain %q", bad)
 		}
+	}
+}
+
+// --- workspace artifact export (cloud-session-shadow-device 4.5) -------------
+
+// uploadServer accepts artifact PUTs and records what landed.
+type uploadServer struct {
+	srv    *httptest.Server
+	mu     sync.Mutex
+	puts   []int // body sizes
+	bodies []string
+}
+
+func newUploadServer(t *testing.T) *uploadServer {
+	t.Helper()
+	u := &uploadServer{}
+	u.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("artifact endpoint got %s, want PUT", r.Method)
+			w.WriteHeader(405)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		u.mu.Lock()
+		u.puts = append(u.puts, len(b))
+		u.bodies = append(u.bodies, string(b))
+		u.mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	t.Cleanup(u.srv.Close)
+	return u
+}
+
+func interactiveDestroyItem(uploadURL string) api.WorkItem {
+	return api.WorkItem{
+		Action:            api.ActionSandboxDestroy,
+		SandboxID:         "sb1",
+		ExecutorID:        "cse_abc",
+		ContainerName:     "oa-sb1",
+		LifecycleMode:     "interactive-session",
+		SessionID:         "sess1",
+		ArtifactUploadURL: uploadURL,
+	}
+}
+
+func stubCpTar(t *testing.T, tarErr error, content string) {
+	t.Helper()
+	orig := dockerCpTar
+	dockerCpTar = func(ctx context.Context, containerName string, w io.Writer) error {
+		if tarErr != nil {
+			return tarErr
+		}
+		_, err := w.Write([]byte(content))
+		return err
+	}
+	t.Cleanup(func() { dockerCpTar = orig })
+}
+
+// Destroy of an interactive session with an artifact URL: export BEFORE rm,
+// upload gzip(understood as opaque bytes here), and the destroy report carries
+// artifactsStatus=available. The rm must happen after the cp.
+func TestDestroyExportsWorkspaceArtifact(t *testing.T) {
+	sink, client := newReportAPIServer(t)
+	up := newUploadServer(t)
+	stubCpTar(t, nil, "hello-workspace")
+
+	var order []string
+	dk := &fakeDocker{}
+	a := &Agent{Client: client, dockerRun: func(ctx context.Context, args ...string) (string, error) {
+		order = append(order, strings.Join(args[:2], " "))
+		return dk.run(ctx, args...)
+	}}
+	if err := a.handleSandboxDestroy(context.Background(), a.endpoints()[0], interactiveDestroyItem(up.srv.URL)); err != nil {
+		t.Fatalf("handleSandboxDestroy: %v", err)
+	}
+	if len(up.puts) != 1 {
+		t.Fatalf("want 1 artifact PUT, got %d", len(up.puts))
+	}
+	// gzip magic: the upload must be compressed, not a raw tar copy.
+	if !strings.HasPrefix(up.bodies[0], "\x1f\x8b") {
+		t.Errorf("uploaded body is not gzip (starts %q)", up.bodies[0][:min(2, len(up.bodies[0]))])
+	}
+	if sink.lastArtifactsStatus(api.EventSandboxDestroy) != "available" {
+		t.Errorf("want artifactsStatus=available on destroy report, got %q", sink.lastArtifactsStatus(api.EventSandboxDestroy))
+	}
+	// Order: the export (cp) must precede the removal (rm).
+	if len(order) != 1 || order[0] != "rm -f" {
+		t.Fatalf("docker calls = %v (cp rides its own seam)", order)
+	}
+}
+
+// A failed export (container already gone, cp error, oversized, upload
+// 5xx) must NOT block the destroy: the report still says sandbox_destroy with
+// artifactsStatus=failed.
+func TestDestroyArtifactFailureDoesNotBlockRemoval(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		cpErr    error
+		cpOutput string
+		putCode  int
+	}{
+		{"cp fails", errors.New("docker cp: No such container: oa-sb1"), "", 200},
+		{"upload 5xx", nil, "data", 500},
+	} {
+		sink, client := newReportAPIServer(t)
+		up := newUploadServer(t)
+		if tc.putCode != 200 {
+			up.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.putCode)
+			})
+		}
+		stubCpTar(t, tc.cpErr, tc.cpOutput)
+		dk := &fakeDocker{}
+		a := &Agent{Client: client, dockerRun: dk.run}
+		if err := a.handleSandboxDestroy(context.Background(), a.endpoints()[0], interactiveDestroyItem(up.srv.URL)); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if sink.count(api.EventSandboxDestroy) != 1 {
+			t.Errorf("%s: want destroy report", tc.name)
+		}
+		if got := sink.lastArtifactsStatus(api.EventSandboxDestroy); got != "failed" {
+			t.Errorf("%s: want artifactsStatus=failed, got %q", tc.name, got)
+		}
+		if sink.count(api.EventSandboxDestroyFailed) != 0 {
+			t.Errorf("%s: destroy itself must succeed", tc.name)
+		}
+	}
+}
+
+// Task sandboxes and old-API destroys (no artifact URL) never upload and the
+// report carries no artifactsStatus.
+func TestDestroyWithoutArtifactChannelIsUnchanged(t *testing.T) {
+	sink, client := newReportAPIServer(t)
+	stubCpTar(t, nil, "should-not-run")
+	dk := &fakeDocker{}
+	a := &Agent{Client: client, dockerRun: dk.run}
+	item := api.WorkItem{Action: api.ActionSandboxDestroy, SandboxID: "sbx-1", ContainerName: "sbx-abc123"}
+	if err := a.handleSandboxDestroy(context.Background(), a.endpoints()[0], item); err != nil {
+		t.Fatalf("handleSandboxDestroy: %v", err)
+	}
+	if sink.count(api.EventSandboxDestroy) != 1 {
+		t.Fatal("want destroy report")
+	}
+	if got := sink.lastArtifactsStatus(api.EventSandboxDestroy); got != "" {
+		t.Errorf("task destroy must not carry artifactsStatus, got %q", got)
 	}
 }

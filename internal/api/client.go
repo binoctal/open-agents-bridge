@@ -24,6 +24,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -145,6 +146,10 @@ type WorkItem struct {
 	SessionToken       string `json:"sessionToken,omitempty"`
 	IdleReclaimSeconds int    `json:"idleReclaimSeconds,omitempty"`
 	MaxLifetimeSeconds int    `json:"maxLifetimeSeconds,omitempty"`
+	// ArtifactUploadURL (interactive-session destroy items, 4.5): presigned
+	// R2 PUT the agent uploads the /workspace export to BEFORE removing the
+	// container. Empty = export nothing (task sandboxes, R2 off, old API).
+	ArtifactUploadURL string `json:"artifactUploadUrl,omitempty"`
 
 	// Runtime preview fields (add-dynamic-preview-compute 3.3); empty on
 	// deployment and sandbox items. Host is the {label}.deploy suffix host the
@@ -298,6 +303,14 @@ func (c *Client) Report(ctx context.Context, deploymentID, event string, repoPor
 // the API's /report route dispatches on that field). containerID is required
 // for sandbox_up -- it is what the metering side joins on.
 func (c *Client) ReportSandbox(ctx context.Context, sandboxID, event, containerID, detail string) error {
+	return c.ReportSandboxOpts(ctx, sandboxID, event, containerID, detail, "")
+}
+
+// ReportSandboxOpts is ReportSandbox plus the workspace-export outcome
+// (cloud-session-shadow-device 4.5). artifactsStatus is "available" or
+// "failed" on an interactive session's sandbox_destroy; empty omits the field
+// (task sandboxes, and every non-destroy event).
+func (c *Client) ReportSandboxOpts(ctx context.Context, sandboxID, event, containerID, detail, artifactsStatus string) error {
 	payload := map[string]any{
 		"agentId":     c.AgentID,
 		"sandboxId":   sandboxID,
@@ -305,7 +318,37 @@ func (c *Client) ReportSandbox(ctx context.Context, sandboxID, event, containerI
 		"containerId": containerID,
 		"detail":      detail,
 	}
+	if artifactsStatus != "" {
+		payload["artifactsStatus"] = artifactsStatus
+	}
 	return c.postJSON(ctx, "/internal/hosting-agent/report", payload, nil)
+}
+
+// ArtifactHTTP is the upload client for presigned artifact PUTs. Separate
+// from Client.HTTP on purpose: the JSON client's 30s timeout cannot carry a
+// multi-hundred-MB workspace to R2. A var so tests can swap it.
+var ArtifactHTTP = &http.Client{Timeout: 15 * time.Minute}
+
+// PutArtifact uploads a workspace export (tar.gz) to a presigned R2 PUT URL.
+// The URL is opaque and short-lived; the body is streamed from disk so a large
+// workspace never sits in agent memory.
+func (c *Client) PutArtifact(ctx context.Context, url string, body io.Reader, size int64) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, body)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = size
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := ArtifactHTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("artifact PUT %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	return nil
 }
 
 // RuntimeSnapshotManifest is GET /runtime-snapshot's answer: the full

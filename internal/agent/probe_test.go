@@ -117,3 +117,15 @@ func TestHandleProbeStreakGate(t *testing.T) {
 		t.Fatalf("failure right after a report must start a new streak, got %d reports", got)
 	}
 }
+
+func (s *reportSink) lastArtifactsStatus(event string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.reports) - 1; i >= 0; i-- {
+		if s.reports[i]["event"] == event {
+			v, _ := s.reports[i]["artifactsStatus"].(string)
+			return v
+		}
+	}
+	return ""
+}
