@@ -1,6 +1,8 @@
 package bridge
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/binoctal/open-agents-bridge/internal/protocol"
@@ -61,5 +63,32 @@ func TestCapabilityReportDeclaresSessionSpec(t *testing.T) {
 	r := buildCapabilityReport("v", "ok", "", false)
 	if r["sessionSpec"] != 1 {
 		t.Errorf("sessionSpec = %v, want 1", r["sessionSpec"])
+	}
+}
+
+// The claude CLI refuses bypassPermissions for root, so switching to
+// accept-all as root must report failed instead of pretending to apply.
+// Runs only when executed as root (compile as user, run the binary via sudo):
+//
+//	go test -c -o /tmp/spec_root.test ./internal/bridge
+//	sudo env IS_SANDBOX= /tmp/spec_root.test -test.run TestApplyPermissionSpecRootBypassFails -test.v
+func TestApplyPermissionSpecRootBypassFails(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root: run the compiled test binary via sudo")
+	}
+	if os.Getenv("IS_SANDBOX") != "" {
+		t.Skip("IS_SANDBOX set: bypass is legitimately available here")
+	}
+	sess := &session.Session{ID: "s", CLIType: "claude", PermissionMode: "default",
+		Protocol: protocol.NewManagerWithAdapter(protocol.NewACPAdapter())}
+	state, reason := applyPermissionSpec(sess, "accept-all")
+	if state != applyStateFailed {
+		t.Errorf("state = %q, want failed", state)
+	}
+	if !strings.Contains(reason, "root") {
+		t.Errorf("reason = %q, want it to mention root", reason)
+	}
+	if sess.PermissionMode != "default" {
+		t.Errorf("mode changed to %q despite failure", sess.PermissionMode)
 	}
 }
