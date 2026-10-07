@@ -50,7 +50,7 @@ func (m *Manager) createSession(cliType, workDir, sessionID string, cols, rows i
 		profileEnv = resolver(sessionID)
 	}
 
-	// Expand `~`/`~/...` to the device home directory before the path reaches
+	// Expand `~`/`~/...` to the machine home directory before the path reaches
 	// os/exec: cmd.Dir would otherwise chdir into a literal "~" directory and
 	// surface as a misleading "fork/exec <cmd>: no such file or directory".
 	// This is the single choke point for every creation call site (bridge

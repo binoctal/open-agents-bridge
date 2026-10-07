@@ -14,7 +14,7 @@ import (
 // The gap this closes was never a coding mistake — it was a branch nobody
 // thought to record. Requests the bridge's rules engine answers never reach the
 // server at all, so the WebSocket path that records every other approval cannot
-// see them: a device with permissive rules could auto-approve dangerous tool
+// see them: a machine with permissive rules could auto-approve dangerous tool
 // calls all day and `permission_requests` stayed empty. On a report that reads
 // as "nothing happened", not "nothing was recorded".
 //

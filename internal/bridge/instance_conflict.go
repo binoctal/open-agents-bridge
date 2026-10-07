@@ -10,7 +10,7 @@ import (
 
 const (
 	// closeCodeAnotherInstance is sent by the server when another live bridge
-	// instance already owns this device's connection. It is deliberately NOT a
+	// instance already owns this machine's connection. It is deliberately NOT a
 	// permanent close code: a legitimate restart briefly looks like a conflict
 	// until the old connection ages out of the server's liveness window.
 	closeCodeAnotherInstance = 4009
@@ -51,11 +51,11 @@ func (b *Bridge) onInstanceConflict() bool {
 	b.conflictCount++
 	if b.conflictCount > maxInstanceConflictRetries {
 		b.standby.Store(true)
-		b.logError("[%s] Another bridge instance is already online for this device; this instance is on standby (no reconnects, no heartbeat). Stop the other instance and restart this one.", logger.ModBridge)
+		b.logError("[%s] Another bridge instance is already online for this machine; this instance is on standby (no reconnects, no heartbeat). Stop the other instance and restart this one.", logger.ModBridge)
 		return true
 	}
 
-	b.logWarn("[%s] Another bridge instance is online for this device (rejected %d/%d); retrying in %v",
+	b.logWarn("[%s] Another bridge instance is online for this machine (rejected %d/%d); retrying in %v",
 		logger.ModBridge, b.conflictCount, maxInstanceConflictRetries, instanceConflictBackoff)
 	select {
 	case <-b.done:

@@ -11,7 +11,7 @@ Local Bridge CLI that connects AI coding tools with the OpenAgents cloud platfor
 - End-to-end encryption
 - Permission request forwarding
 - Multi-session management
-- **Multi-device support** — run multiple bridge instances on one machine
+- **Multi-machine support** — run multiple bridge instances on one machine
 - **I/O logging** — record user input and AI responses for debugging
 - Cross-platform: Windows, Linux, macOS
 
@@ -35,34 +35,34 @@ make install
 
 ## Quick Start
 
-### Pair a device
+### Pair a machine
 
 ```bash
 # Interactive pairing
 open-agents-bridge pair
 
-# With device name
+# With machine name
 open-agents-bridge pair --name work-pc
 ```
 
 ### Start the bridge
 
 ```bash
-# Start a device
-open-agents-bridge start --device work-pc
+# Start a machine
+open-agents-bridge start --machine work-pc
 
 # With debug logging
-open-agents-bridge start --device work-pc --log-level debug
+open-agents-bridge start --machine work-pc --log-level debug
 ```
 
-### Manage devices
+### Manage machines
 
 ```bash
-# List all devices
-open-agents-bridge devices
+# List all machines
+open-agents-bridge machines
 
-# View device details
-open-agents-bridge device work-pc
+# View machine details
+open-agents-bridge machine work-pc
 ```
 
 ### System service
@@ -81,7 +81,7 @@ Config files are stored in `~/.open-agents-bridge/`:
 ```
 ~/.open-agents-bridge/
 ├── config.json           # Global config
-├── devices/              # Device configs
+├── machines/              # Machine configs
 │   ├── work-pc.json
 │   └── laptop.json
 ├── logs/                 # Log files

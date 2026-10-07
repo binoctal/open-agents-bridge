@@ -13,7 +13,7 @@ import (
 
 type Client struct {
 	baseURL     string
-	deviceToken string
+	machineToken string
 	httpClient  *http.Client
 }
 
@@ -32,7 +32,7 @@ func NewClient(cfg *config.Config) *Client {
 
 	return &Client{
 		baseURL:     baseURL,
-		deviceToken: cfg.DeviceToken,
+		machineToken: cfg.MachineToken,
 		httpClient:  &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -60,7 +60,7 @@ func (c *Client) requestWithStatus(method, path string, body interface{}) ([]byt
 		return nil, 0, err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.deviceToken)
+	req.Header.Set("Authorization", "Bearer "+c.machineToken)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -171,7 +171,7 @@ func (c *Client) GetCommandAlertRules() ([]CommandAlertRule, error) {
 	return resp.Rules, nil
 }
 
-// SecurityAlert is an alert this device raised. The server takes the device and
+// SecurityAlert is an alert this machine raised. The server takes the machine and
 // the user from the token, so neither is sent here.
 type SecurityAlert struct {
 	RuleID      string `json:"ruleId"`
@@ -187,13 +187,13 @@ func (c *Client) ReportSecurityAlert(alert SecurityAlert) error {
 	return err
 }
 
-// PermissionDecision is a permission request this device's own rules engine
+// PermissionDecision is a permission request this machine's own rules engine
 // resolved without ever asking the server. Those requests never reach the
 // WebSocket path that records every other approval, so without this report the
-// audit table would show a device's human approvals and silently omit
+// audit table would show a machine's human approvals and silently omit
 // everything its rules decided.
 //
-// As with SecurityAlert, the device and the user come from the token — this is
+// As with SecurityAlert, the machine and the user come from the token — this is
 // the table whose entire purpose is saying who let something through, so the
 // sender does not get to name itself.
 type PermissionDecision struct {
@@ -256,10 +256,10 @@ type SessionInfo struct {
 	EndedAt         int64  `json:"endedAt,omitempty"`
 }
 
-// ListSessions fetches the device's recent sessions for restore-on-reconnect.
-// It uses the device-token-scoped /api/bridge/sessions endpoint: the old
+// ListSessions fetches the machine's recent sessions for restore-on-reconnect.
+// It uses the machine-token-scoped /api/bridge/sessions endpoint: the old
 // /api/sessions path is user-JWT authenticated and answered 401 "Invalid
-// token" for every restore after a reconnect (2026-09-21 e2e). The device
+// token" for every restore after a reconnect (2026-09-21 e2e). The machine
 // identity comes from the token itself, not from a query parameter.
 func (c *Client) ListSessions(limit int) ([]SessionInfo, error) {
 	path := fmt.Sprintf("/api/bridge/sessions?limit=%d", limit)
@@ -498,7 +498,7 @@ func (c *Client) ReportArtifactKind(jobID, kind string) error {
 }
 
 // PendingRevive is one mission whose preview the user asked to regenerate
-// while this device was offline or busy.
+// while this machine was offline or busy.
 type PendingRevive struct {
 	MissionID string `json:"missionId"`
 	PreviewID string `json:"previewId"`
@@ -551,10 +551,10 @@ func (c *Client) UploadPreviewFile(url string, data []byte) error {
 // manifest, PUT each presigned object, complete. The only trigger is a
 // `pending` hosted_deployments row the user created with an explicit deploy
 // click; nothing here ever runs on the task-completed or merge paths, so
-// zero source leaves the device unless the user asked for it.
+// zero source leaves the machine unless the user asked for it.
 
 // HostedDeployWork is one pending source pack the platform asked this
-// device to produce (GET /internal/hosted-deployments/pending).
+// machine to produce (GET /internal/hosted-deployments/pending).
 type HostedDeployWork struct {
 	MissionID    string `json:"missionId"`
 	DeploymentID string `json:"deploymentId"`

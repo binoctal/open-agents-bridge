@@ -160,7 +160,7 @@ func (b *Bridge) decidePermission(req permission.Request) (permissionOutcome, st
 // decides a request locally where it can, and otherwise forwards it to the web
 // client for the user to answer.
 func (b *Bridge) handlePermissionRequest(req permission.Request) {
-	req.DeviceID = b.config.DeviceID
+	req.MachineID = b.config.MachineID
 
 	outcome, ruleID, hits := b.decidePermission(req)
 
@@ -172,7 +172,7 @@ func (b *Bridge) handlePermissionRequest(req permission.Request) {
 	// Every branch below that does NOT forward the request to the web client
 	// must also report the decision, or it leaves no trace anywhere: the server
 	// never sees the request at all, so `permission_requests` would record the
-	// device's human approvals and silently omit everything its rules decided.
+	// machine's human approvals and silently omit everything its rules decided.
 	// `permission_decision_reported_test.go` enforces this on new branches.
 	switch outcome {
 	case permissionApprove:

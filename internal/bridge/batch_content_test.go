@@ -20,7 +20,7 @@ import (
 func newBatchBridge(t *testing.T) *Bridge {
 	t.Helper()
 	return &Bridge{
-		config:   &config.Config{DeviceID: "dev-batch"},
+		config:   &config.Config{MachineID: "dev-batch"},
 		batchBuf: make(map[string]*contentBatch),
 	}
 }

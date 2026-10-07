@@ -7,7 +7,7 @@ import (
 )
 
 func TestTaskStartedWithBaseCarriesBaseline(t *testing.T) {
-	b := &Bridge{config: &config.Config{DeviceID: "dev-1"}}
+	b := &Bridge{config: &config.Config{MachineID: "dev-1"}}
 
 	// Unknown task: plain frame, no base fields.
 	p := b.taskStartedWithBase("job-1", "t-0").Payload.(map[string]interface{})

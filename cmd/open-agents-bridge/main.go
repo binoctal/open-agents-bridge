@@ -14,7 +14,7 @@ var rootCmd = &cobra.Command{
 (Claude, Cline, Codex, Gemini) to the Open Agents cloud platform.
 
 It enables remote monitoring, permission management, and real-time
-collaboration across multiple devices.`,
+collaboration across multiple machines.`,
 }
 
 func main() {
@@ -27,7 +27,7 @@ func main() {
 func init() {
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(pairCmd)
-	rootCmd.AddCommand(devicesCmd)
+	rootCmd.AddCommand(machinesCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(serviceCmd)
 	rootCmd.AddCommand(logsCmd)

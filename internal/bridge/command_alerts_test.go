@@ -14,7 +14,7 @@ import (
 	"github.com/binoctal/open-agents-bridge/internal/rules"
 )
 
-// alertSink is the API's /security-alert endpoint, recording what the device
+// alertSink is the API's /security-alert endpoint, recording what the machine
 // files. Reports are sent from their own goroutine, so tests read them off a
 // channel rather than asserting immediately.
 type alertSink struct {
@@ -90,7 +90,7 @@ func newPermBridge(t *testing.T, sink *alertSink, autoRules []config.AutoApprova
 	t.Helper()
 	h := permission.NewHandler()
 	b := &Bridge{
-		config:      &config.Config{DeviceID: "dev-1", ServerURL: sink.URL},
+		config:      &config.Config{MachineID: "dev-1", ServerURL: sink.URL},
 		permHandler: h,
 		rulesEngine: rules.NewEngine(autoRules),
 		msgBuffer:   NewMessageBuffer(DefaultBufferCapacity),
@@ -260,7 +260,7 @@ func TestAlertSyncFailureLeavesPermissionsWorking(t *testing.T) {
 }
 
 func TestReportFailureDoesNotBlockTheDecision(t *testing.T) {
-	// The device is offline as far as the API is concerned; the user must
+	// The machine is offline as far as the API is concerned; the user must
 	// still be asked.
 	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
@@ -269,7 +269,7 @@ func TestReportFailureDoesNotBlockTheDecision(t *testing.T) {
 
 	h := permission.NewHandler()
 	b := &Bridge{
-		config:      &config.Config{DeviceID: "dev-1", ServerURL: failing.URL},
+		config:      &config.Config{MachineID: "dev-1", ServerURL: failing.URL},
 		permHandler: h,
 		rulesEngine: rules.NewEngine(nil),
 		msgBuffer:   NewMessageBuffer(DefaultBufferCapacity),
@@ -313,7 +313,7 @@ func TestReportingDoesNotWaitOnTheAPI(t *testing.T) {
 
 	h := permission.NewHandler()
 	b := &Bridge{
-		config:      &config.Config{DeviceID: "dev-1", ServerURL: slow.URL},
+		config:      &config.Config{MachineID: "dev-1", ServerURL: slow.URL},
 		permHandler: h,
 		rulesEngine: rules.NewEngine(nil),
 		msgBuffer:   NewMessageBuffer(DefaultBufferCapacity),

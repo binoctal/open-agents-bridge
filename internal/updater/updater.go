@@ -284,7 +284,7 @@ func ApplyUpdate(newBinary string) error {
 func applyUpdateTo(dst, newBinary string) error {
 	// Stage the new binary next to the target so the final rename never
 	// crosses a filesystem boundary (e.g. /tmp tmpfs vs ~/.local on another
-	// mount, where os.Rename fails with "invalid cross-device link").
+	// mount, where os.Rename fails with "invalid cross-machine link").
 	stagePath, err := stageNextTo(dst, newBinary)
 	if err != nil {
 		return fmt.Errorf("stage failed: %w", err)

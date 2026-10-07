@@ -6,14 +6,14 @@ import (
 	"strings"
 )
 
-// ExpandTilde resolves a leading `~` in dir to the device user's home
+// ExpandTilde resolves a leading `~` in dir to the machine user's home
 // directory: `~` becomes the home directory itself and `~/rest` becomes
 // home/rest. Absolute and relative paths are returned unchanged. The `~user`
 // form (another user's home) is NOT supported — it is returned unchanged and
 // will fail at spawn time with a truthful error, which is the documented
 // boundary.
 //
-// Only the bridge (running on the device) knows the real home directory; the
+// Only the bridge (running on the machine) knows the real home directory; the
 // web/API side cannot expand this, so `~` arrives here verbatim.
 func ExpandTilde(dir string) (string, error) {
 	if dir != "~" && !strings.HasPrefix(dir, "~/") {

@@ -27,7 +27,7 @@ type Client struct {
 	conn       *websocket.Conn
 	userID     string
 	clientType string // "web" or "bridge"
-	deviceID   string
+	machineID   string
 }
 
 type Hub struct {
@@ -41,7 +41,7 @@ func (h *Hub) register(c *Client) {
 	h.mu.Lock()
 	h.clients[c] = true
 	h.mu.Unlock()
-	log.Printf("[+] %s connected: user=%s device=%s", c.clientType, c.userID, c.deviceID)
+	log.Printf("[+] %s connected: user=%s machine=%s", c.clientType, c.userID, c.machineID)
 	h.broadcastStatus()
 }
 
@@ -85,7 +85,7 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 		userID = r.PathValue("userId")
 	}
 	clientType := r.URL.Query().Get("type")
-	deviceID := r.URL.Query().Get("deviceId")
+	machineID := r.URL.Query().Get("machineId")
 
 	if userID == "" {
 		http.Error(w, "userId required", http.StatusBadRequest)
@@ -102,7 +102,7 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 		conn:       conn,
 		userID:     userID,
 		clientType: clientType,
-		deviceID:   deviceID,
+		machineID:   machineID,
 	}
 
 	hub.register(client)
@@ -138,14 +138,14 @@ func handlePair(w http.ResponseWriter, r *http.Request) {
 	// Mock pairing response
 	resp := map[string]interface{}{
 		"userId":      "dev_user_123",
-		"deviceId":    fmt.Sprintf("dev_device_%s", req.Code),
-		"deviceToken": fmt.Sprintf("token_%s", req.Code),
+		"machineId":    fmt.Sprintf("dev_machine_%s", req.Code),
+		"machineToken": fmt.Sprintf("token_%s", req.Code),
 		"serverUrl":   "ws://localhost:8787",
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
-	log.Printf("[pair] code=%s -> deviceId=%s", req.Code, resp["deviceId"])
+	log.Printf("[pair] code=%s -> machineId=%s", req.Code, resp["machineId"])
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {

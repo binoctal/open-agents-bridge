@@ -94,7 +94,7 @@ func TestNewCallbackManagerNormalizesWSScheme(t *testing.T) {
 		{"", ""},
 	}
 	for _, tt := range tests {
-		cm := NewCallbackManager(CallbackConfig{APIURL: tt.in, DeviceID: "dev-1"})
+		cm := NewCallbackManager(CallbackConfig{APIURL: tt.in, MachineID: "dev-1"})
 		if cm.config.APIURL != tt.want {
 			t.Errorf("APIURL %q normalized to %q, want %q", tt.in, cm.config.APIURL, tt.want)
 		}
@@ -102,20 +102,20 @@ func TestNewCallbackManagerNormalizesWSScheme(t *testing.T) {
 }
 
 func TestSendTaskResultUsesMissionEventRoute(t *testing.T) {
-	var gotPath, gotAuth, gotSecret, gotDeviceID string
+	var gotPath, gotAuth, gotSecret, gotMachineID string
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
 		gotSecret = r.Header.Get("X-Internal-Secret")
-		gotDeviceID = r.Header.Get("X-Device-ID")
+		gotMachineID = r.Header.Get("X-Machine-ID")
 		body, _ := io.ReadAll(r.Body)
 		json.Unmarshal(body, &gotBody)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
-	cm := NewCallbackManager(CallbackConfig{APIURL: srv.URL, DeviceID: "dev-1", UserID: "user-1", DeviceToken: "devtok"})
+	cm := NewCallbackManager(CallbackConfig{APIURL: srv.URL, MachineID: "dev-1", UserID: "user-1", MachineToken: "devtok"})
 	if err := cm.SendTaskResult(TaskResult{JobID: "j1", TaskID: "t1", Success: true}); err != nil {
 		t.Fatalf("SendTaskResult: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestSendTaskResultUsesMissionEventRoute(t *testing.T) {
 	if gotPath != "/api/missions/internal/orchestrator/event" {
 		t.Errorf("callback path = %q, want /api/missions/internal/orchestrator/event", gotPath)
 	}
-	// The device token is the only credential reachable from a user's machine:
+	// The machine token is the only credential reachable from a user's machine:
 	// the API's shared secret is server-side and has no delivery channel here,
 	// which is why every callback used to 403.
 	if gotAuth != "Bearer devtok" {
@@ -132,8 +132,8 @@ func TestSendTaskResultUsesMissionEventRoute(t *testing.T) {
 	if gotSecret != "" {
 		t.Errorf("X-Internal-Secret = %q, want it unset", gotSecret)
 	}
-	if gotDeviceID != "dev-1" {
-		t.Errorf("X-Device-ID = %q, want dev-1", gotDeviceID)
+	if gotMachineID != "dev-1" {
+		t.Errorf("X-Machine-ID = %q, want dev-1", gotMachineID)
 	}
 	// The internal route has no JWT context; the payload must carry the
 	// mission owner so the route can build the user-scoped orchestrator.
@@ -183,7 +183,7 @@ func newBatchingManager(rs *recordingServer, t *testing.T) *CallbackManager {
 	t.Helper()
 	return NewCallbackManager(CallbackConfig{
 		APIURL:  rs.srv.URL,
-		DeviceID: "dev-batch",
+		MachineID: "dev-batch",
 		CacheDir: t.TempDir(),
 	})
 }
@@ -304,7 +304,7 @@ func TestNewCallbackManagerDefaultsCacheDir(t *testing.T) {
 	// The bridge core constructs CallbackConfig without CacheDir and
 	// cacheEvent is gated on it — without the default a terminal callback
 	// that exhausts its retries is lost for good (prod job_1788524351375).
-	cm := NewCallbackManager(CallbackConfig{APIURL: "http://localhost:1", DeviceID: "dev-cd"})
+	cm := NewCallbackManager(CallbackConfig{APIURL: "http://localhost:1", MachineID: "dev-cd"})
 	if !strings.Contains(cm.config.CacheDir, ".open-agents-bridge") {
 		t.Errorf("default CacheDir = %q, want under .open-agents-bridge", cm.config.CacheDir)
 	}
@@ -316,7 +316,7 @@ func TestRetryCachedEventsSendsAndRemoves(t *testing.T) {
 	dir := t.TempDir()
 	cm := NewCallbackManager(CallbackConfig{
 		APIURL:   rs.srv.URL,
-		DeviceID: "dev-cache",
+		MachineID: "dev-cache",
 		CacheDir: dir,
 	})
 

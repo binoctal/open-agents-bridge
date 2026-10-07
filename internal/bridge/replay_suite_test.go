@@ -322,7 +322,7 @@ func renderGolden(events []goldenEvent) string {
 // the capability report must arrive right after the WS dial (it is the
 // whole point of the registration handshake — the server cannot pair what
 // it never receives), and the server's mismatch verdict must not take the
-// bridge down: a degraded device that stops processing work would turn a
+// bridge down: a degraded machine that stops processing work would turn a
 // loud failure back into the silent one this change exists to prevent.
 func TestReplayHandshakeReportArrivesAndMismatchSurvives(t *testing.T) {
 	sink := newReplaySink(t)

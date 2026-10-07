@@ -49,20 +49,20 @@ open-agents-bridge pair --name work-pc
 
 ```bash
 # 启动设备
-open-agents-bridge start --device work-pc
+open-agents-bridge start --machine work-pc
 
 # 指定日志级别
-open-agents-bridge start --device work-pc --log-level debug
+open-agents-bridge start --machine work-pc --log-level debug
 ```
 
 ### 管理设备
 
 ```bash
 # 列出所有设备
-open-agents-bridge devices
+open-agents-bridge machines
 
 # 查看设备详情
-open-agents-bridge device work-pc
+open-agents-bridge machine work-pc
 ```
 
 ### 安装为系统服务
@@ -81,7 +81,7 @@ open-agents-bridge service uninstall # 卸载服务
 ```
 ~/.open-agents-bridge/
 ├── config.json           # 全局配置
-├── devices/              # 设备配置
+├── machines/              # 设备配置
 │   ├── work-pc.json
 │   └── laptop.json
 ├── logs/                 # 日志文件

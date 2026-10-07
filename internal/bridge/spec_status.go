@@ -112,7 +112,7 @@ func (b *Bridge) handleSessionSpecUpdate(msg Message) {
 func (b *Bridge) sendSessionStatus(sess *session.Session, applyState, reason string) {
 	payload := map[string]interface{}{
 		"sessionId":          sess.ID,
-		"deviceId":           b.config.DeviceID,
+		"machineId":           b.config.MachineID,
 		"appliedSpecVersion": b.specTracker().get(sess.ID),
 		"permissionMode":     sess.PermissionMode,
 		"applyState":         applyState,

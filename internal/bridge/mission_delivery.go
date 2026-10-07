@@ -24,7 +24,7 @@ func (b *Bridge) setTaskBase(taskId string, tb taskBase) {
 // taskStartedWithBase is the dispatch-path workflow:task_started frame plus
 // the baseline (baseBranch/baseCommit) the API records for the mission.
 func (b *Bridge) taskStartedWithBase(jobId, taskId string) Message {
-	msg := taskStartedMessage(jobId, taskId, b.config.DeviceID)
+	msg := taskStartedMessage(jobId, taskId, b.config.MachineID)
 	b.taskBasesMu.Lock()
 	tb, ok := b.taskBases[taskId]
 	b.taskBasesMu.Unlock()
@@ -55,7 +55,7 @@ func (b *Bridge) handleWorkflowDeliver(msg Message) {
 	out := map[string]interface{}{
 		"missionId": missionId,
 		"jobId":     getString(payload, "jobId"),
-		"deviceId":  b.config.DeviceID,
+		"machineId":  b.config.MachineID,
 		"action":    action,
 		"ok":        res.OK,
 	}

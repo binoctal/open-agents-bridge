@@ -355,9 +355,9 @@ func New(cfg *config.Config) (*Bridge, error) {
 		jobManagers:       map[string]*workflows.WorktreeManager{},
 		callbackManager: workflows.NewCallbackManager(workflows.CallbackConfig{
 			APIURL:      cfg.ServerURL,
-			DeviceID:    cfg.DeviceID,
+			MachineID:    cfg.MachineID,
 			UserID:      cfg.UserID,
-			DeviceToken: cfg.DeviceToken,
+			MachineToken: cfg.MachineToken,
 		}),
 		batchBuf:      make(map[string]*contentBatch),
 		offlineBuf:    nil,
@@ -422,7 +422,7 @@ func New(cfg *config.Config) (*Bridge, error) {
 	}
 
 	// Initialize metrics
-	metrics.Init(cfg.DeviceID, "1.0.0")
+	metrics.Init(cfg.MachineID, "1.0.0")
 
 	// Initialize alert system
 	alert.Init(alert.Config{
@@ -518,7 +518,7 @@ func (b *Bridge) Start() error {
 		}
 	}
 
-	// Note: device:online message is sent by the server (room.ts) when bridge connects
+	// Note: machine:online message is sent by the server (room.ts) when bridge connects
 	// No need to send it here to avoid duplicate notifications
 
 	b.logInfo("[%s] Starting goroutines...", logger.ModBridge)
@@ -549,7 +549,7 @@ func (b *Bridge) Start() error {
 
 	// add-coolify-hosting (task 4.2): poll for user-requested deploy source
 	// packs. Unconditional on purpose — the poll itself uploads nothing; rows
-	// exist only after an explicit deploy click, so a device with no deploy
+	// exist only after an explicit deploy click, so a machine with no deploy
 	// activity costs one empty GET per tick.
 	b.logInfo("[%s] Launching deploySourcePollLoop goroutine...", logger.ModBridge)
 	go b.deploySourcePollLoop()
@@ -676,8 +676,8 @@ func (b *Bridge) connect() error {
 	// Add connection parameters
 	q := u.Query()
 	q.Set("type", "bridge")
-	q.Set("deviceId", b.config.DeviceID)
-	q.Set("token", b.config.DeviceToken)
+	q.Set("machineId", b.config.MachineID)
+	q.Set("token", b.config.MachineToken)
 	q.Set("instanceId", b.instanceID)
 	// Report CLI capabilities so the server knows which agents are available
 	if len(b.config.CLIEnabled) > 0 {
@@ -739,7 +739,7 @@ func (b *Bridge) readLoop() {
 				// Known issue #22: returning here made the process a zombie —
 				// Start() still blocks on <-b.done, so the bridge stayed alive
 				// with no WS, no heartbeats, and no exit, holding sessions,
-				// worktrees, and the device slot. Instead, fall back to a slow
+				// worktrees, and the machine slot. Instead, fall back to a slow
 				// keep-alive cadence (NextDelay returns 0 once the budget is
 				// spent, so the sleep below is the only pacing).
 				if b.enterSlowRetry() {
@@ -816,7 +816,7 @@ func (b *Bridge) readLoop() {
 				Layer:     "websocket",
 			})
 
-			// Note: device:online message is sent by the server (room.ts) when bridge reconnects
+			// Note: machine:online message is sent by the server (room.ts) when bridge reconnects
 			b.logInfo("[%s] Connected successfully", logger.ModBridge)
 		}
 
@@ -1021,7 +1021,7 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 					Type: "security:alert",
 					Payload: map[string]interface{}{
 						"sessionId":   sessionID,
-						"deviceId":    b.config.DeviceID,
+						"machineId":    b.config.MachineID,
 						"category":    a.Category,
 						"level":       a.Level,
 						"ruleId":      a.RuleID,
@@ -1082,7 +1082,7 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 			Type: "tool:call",
 			Payload: map[string]interface{}{
 				"sessionId": sessionID,
-				"deviceId":  b.config.DeviceID,
+				"machineId":  b.config.MachineID,
 				"toolCall":  msg.Content,
 				"protocol":  protocolName,
 			},
@@ -1102,7 +1102,7 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 			Type: "permission:request",
 			Payload: map[string]interface{}{
 				"sessionId":   sessionID,
-				"deviceId":    b.config.DeviceID,
+				"machineId":    b.config.MachineID,
 				"id":          permReq.ID,
 				"toolName":    permReq.ToolName,
 				"toolInput":   permReq.ToolInput,
@@ -1195,7 +1195,7 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 			Type: "session:usage",
 			Payload: map[string]interface{}{
 				"sessionId": sessionID,
-				"deviceId":  b.config.DeviceID,
+				"machineId":  b.config.MachineID,
 				"usage": map[string]interface{}{
 					"inputTokens":   usage.InputTokens,
 					"outputTokens":  usage.OutputTokens,
@@ -1213,7 +1213,7 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 			Type: "agent:plan",
 			Payload: map[string]interface{}{
 				"sessionId": sessionID,
-				"deviceId":  b.config.DeviceID,
+				"machineId":  b.config.MachineID,
 				"plan":      msg.Content,
 				"protocol":  protocolName,
 			},
@@ -1241,7 +1241,7 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 					Type: "session:output",
 					Payload: map[string]interface{}{
 						"sessionId":  sessionID,
-						"deviceId":   b.config.DeviceID,
+						"machineId":   b.config.MachineID,
 						"outputType": "stderr",
 						"content":    fmt.Sprintf("[fallback] %s failed, switching to %s", sess.CLIType, fallback),
 					},
@@ -1259,7 +1259,7 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 
 		errorPayload := map[string]interface{}{
 			"sessionId": sessionID,
-			"deviceId":  b.config.DeviceID,
+			"machineId":  b.config.MachineID,
 			"error":     msg.Content,
 			"protocol":  protocolName,
 		}
@@ -1287,7 +1287,7 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 				Type: "session:output",
 				Payload: map[string]interface{}{
 					"sessionId":  sessionID,
-					"deviceId":   b.config.DeviceID,
+					"machineId":   b.config.MachineID,
 					"outputType": "stdout",
 					"content":    msg.Content,
 					"protocol":   protocolName,
@@ -1332,8 +1332,8 @@ func (b *Bridge) handleMessage(msg Message) {
 		b.handleRulesSync(msg)
 	case "storage:sync":
 		b.handleStorageSync(msg)
-	case "device:restart":
-		b.handleDeviceRestart(msg)
+	case "machine:restart":
+		b.handleMachineRestart(msg)
 	case "handshake:mismatch":
 		b.handleHandshakeMismatch(msg)
 	case "prompts:sync":
@@ -1374,15 +1374,15 @@ func (b *Bridge) handleMessage(msg Message) {
 		b.handleScannerToggle(msg)
 	case "scanner:rules:sync":
 		b.handleScannerRulesSync(msg)
-	case "device:listDir":
+	case "machine:listDir":
 		b.handleListDir(msg)
 	default:
 		b.logDebug("[%s] Unknown message type: %s", logger.ModBridge, msg.Type)
 	}
 }
 
-// handleDeviceRestart handles restart command from web
-func (b *Bridge) handleDeviceRestart(msg Message) {
+// handleMachineRestart handles restart command from web
+func (b *Bridge) handleMachineRestart(msg Message) {
 	b.logInfo("[%s] Received restart command", logger.ModBridge)
 	payload, ok := msg.Payload.(map[string]interface{})
 	if !ok {
@@ -1390,9 +1390,9 @@ func (b *Bridge) handleDeviceRestart(msg Message) {
 		return
 	}
 
-	deviceId, _ := payload["deviceId"].(string)
-	if deviceId != b.config.DeviceID {
-		b.logDebug("[%s] Restart command not for this device (got %s, expected %s)", logger.ModBridge, deviceId, b.config.DeviceID)
+	machineId, _ := payload["machineId"].(string)
+	if machineId != b.config.MachineID {
+		b.logDebug("[%s] Restart command not for this machine (got %s, expected %s)", logger.ModBridge, machineId, b.config.MachineID)
 		return
 	}
 
@@ -1527,7 +1527,7 @@ func (b *Bridge) sendListDirResult(requestID, path string, dirs []dirEntry, errM
 	}
 
 	b.sendMessage(Message{
-		Type:    "device:listDirResult",
+		Type:    "machine:listDirResult",
 		Payload: result,
 	})
 }
@@ -1541,7 +1541,7 @@ func (b *Bridge) rejectMissingProject(sessionID, source string) {
 		Type: "session:error",
 		Payload: map[string]interface{}{
 			"sessionId": sessionID,
-			"deviceId":  b.config.DeviceID,
+			"machineId":  b.config.MachineID,
 			"error":     "PROJECT_REQUIRED: a project path (workDir) is required",
 			"code":      "PROJECT_REQUIRED",
 		},
@@ -1615,7 +1615,7 @@ func (b *Bridge) handleSessionStart(msg Message) {
 				// sessionId + code let the web map this to a translated
 				// message (the raw error alone is unactionable for users).
 				"sessionId": sessionID,
-				"deviceId":  b.config.DeviceID,
+				"machineId":  b.config.MachineID,
 				"error":     err.Error(),
 				"code":      "SESSION_START_FAILED",
 			},
@@ -1629,7 +1629,7 @@ func (b *Bridge) handleSessionStart(msg Message) {
 		Type: "session:started",
 		Payload: map[string]interface{}{
 			"sessionId": sess.ID,
-			"deviceId":  b.config.DeviceID,
+			"machineId":  b.config.MachineID,
 			"cliType":   cliType,
 			"workDir":   workDir,
 			"isolated":  isolated,
@@ -1660,14 +1660,14 @@ func (b *Bridge) handleSessionResume(msg Message) {
 	}
 
 	sessionID, _ := payload["sessionId"].(string)
-	deviceID, _ := payload["deviceId"].(string)
+	machineID, _ := payload["machineId"].(string)
 	b.bindSessionProfile(sessionID, payload)
 
-	b.logDebug("[%s] Resume request: sessionID=%s, deviceID=%s", logger.ModSession, sessionID, deviceID)
+	b.logDebug("[%s] Resume request: sessionID=%s, machineID=%s", logger.ModSession, sessionID, machineID)
 
-	// Verify device ID matches
-	if deviceID != "" && deviceID != b.config.DeviceID {
-		b.logDebug("[%s] Resume not for this device (got %s, expected %s)", logger.ModSession, deviceID, b.config.DeviceID)
+	// Verify machine ID matches
+	if machineID != "" && machineID != b.config.MachineID {
+		b.logDebug("[%s] Resume not for this machine (got %s, expected %s)", logger.ModSession, machineID, b.config.MachineID)
 		return
 	}
 
@@ -1706,7 +1706,7 @@ func (b *Bridge) handleSessionResume(msg Message) {
 				Type: "session:resumed",
 				Payload: map[string]interface{}{
 					"sessionId":      recreated.ID,
-					"deviceId":       b.config.DeviceID,
+					"machineId":       b.config.MachineID,
 					"cliType":        recreated.CLIType,
 					"workDir":        recreated.WorkDir,
 					"permissionMode": recreated.PermissionMode,
@@ -1756,7 +1756,7 @@ func (b *Bridge) handleSessionResume(msg Message) {
 		Type: "session:resumed",
 		Payload: map[string]interface{}{
 			"sessionId":      sess.ID,
-			"deviceId":       b.config.DeviceID,
+			"machineId":       b.config.MachineID,
 			"cliType":        sess.CLIType,
 			"workDir":        sess.WorkDir,
 			"permissionMode": sess.PermissionMode,
@@ -1780,9 +1780,9 @@ func (b *Bridge) handleResumeWithContext(msg Message) {
 	originalSessionID, _ := payload["originalSessionId"].(string)
 	cliType, _ := payload["cliType"].(string)
 	workDir, _ := payload["workDir"].(string)
-	deviceID, _ := payload["deviceId"].(string)
+	machineID, _ := payload["machineId"].(string)
 
-	if deviceID != "" && deviceID != b.config.DeviceID {
+	if machineID != "" && machineID != b.config.MachineID {
 		return
 	}
 
@@ -1834,7 +1834,7 @@ func (b *Bridge) handleResumeWithContext(msg Message) {
 			"sessionId":         sess.ID,
 			"originalSessionId": originalSessionID,
 			"messageCount":      messageCount,
-			"deviceId":          b.config.DeviceID,
+			"machineId":          b.config.MachineID,
 			"cliType":           cliType,
 			"workDir":           workDir,
 		},
@@ -1923,7 +1923,7 @@ func (b *Bridge) handleSessionSend(msg Message) {
 				Type: "security:alert",
 				Payload: map[string]interface{}{
 					"sessionId":   sessionID,
-					"deviceId":    b.config.DeviceID,
+					"machineId":    b.config.MachineID,
 					"category":    a.Category,
 					"level":       a.Level,
 					"ruleId":      a.RuleID,
@@ -1959,7 +1959,7 @@ func (b *Bridge) handleSessionSend(msg Message) {
 				Type: "session:error",
 				Payload: map[string]interface{}{
 					"sessionId": sessionID,
-					"deviceId":  b.config.DeviceID,
+					"machineId":  b.config.MachineID,
 					"error":     "session lost after bridge restart and no workDir provided for auto-recreate; please restart the session",
 					"code":      "PARAM_MISSING",
 				},
@@ -1978,7 +1978,7 @@ func (b *Bridge) handleSessionSend(msg Message) {
 			Type: "session:started",
 			Payload: map[string]interface{}{
 				"sessionId": sess.ID,
-				"deviceId":  b.config.DeviceID,
+				"machineId":  b.config.MachineID,
 				"cliType":   cliType,
 				"workDir":   workDir,
 			},
@@ -2012,7 +2012,7 @@ func (b *Bridge) handleSessionSend(msg Message) {
 			Type: "session:error",
 			Payload: map[string]interface{}{
 				"sessionId": sessionID,
-				"deviceId":  b.config.DeviceID,
+				"machineId":  b.config.MachineID,
 				"error":     fmt.Sprintf("Failed to send message: %v", err),
 			},
 			Timestamp: time.Now().UnixMilli(),
@@ -2037,7 +2037,7 @@ func (b *Bridge) handleSessionStop(msg Message) {
 			Type: "session:error",
 			Payload: map[string]interface{}{
 				"sessionId": sessionID,
-				"deviceId":  b.config.DeviceID,
+				"machineId":  b.config.MachineID,
 				"error":     fmt.Sprintf("Failed to stop session: %v", err),
 			},
 			Timestamp: time.Now().UnixMilli(),
@@ -2055,7 +2055,7 @@ func (b *Bridge) handleSessionStop(msg Message) {
 		Type: "session:stopped",
 		Payload: map[string]interface{}{
 			"sessionId": sessionID,
-			"deviceId":  b.config.DeviceID,
+			"machineId":  b.config.MachineID,
 		},
 		Timestamp: time.Now().UnixMilli(),
 	})
@@ -2090,7 +2090,7 @@ func (b *Bridge) handleSessionCancel(msg Message) {
 		Type: "session:cancelled",
 		Payload: map[string]interface{}{
 			"sessionId": sessionID,
-			"deviceId":  b.config.DeviceID,
+			"machineId":  b.config.MachineID,
 		},
 		Timestamp: time.Now().UnixMilli(),
 	})
@@ -2374,7 +2374,7 @@ func (b *Bridge) handleConfigSync(msg Message) {
 	// Send ack
 	b.sendMessage(Message{
 		Type:      "config:synced",
-		Payload:   map[string]string{"deviceId": b.config.DeviceID},
+		Payload:   map[string]string{"machineId": b.config.MachineID},
 		Timestamp: time.Now().UnixMilli(),
 	})
 }
@@ -2413,7 +2413,7 @@ func (b *Bridge) handleRulesSync(msg Message) {
 
 	b.sendMessage(Message{
 		Type:      "rules:synced",
-		Payload:   map[string]interface{}{"deviceId": b.config.DeviceID, "count": len(newRules)},
+		Payload:   map[string]interface{}{"machineId": b.config.MachineID, "count": len(newRules)},
 		Timestamp: time.Now().UnixMilli(),
 	})
 }
@@ -2447,7 +2447,7 @@ func (b *Bridge) handleStorageSync(msg Message) {
 
 	b.sendMessage(Message{
 		Type:      "storage:synced",
-		Payload:   map[string]string{"deviceId": b.config.DeviceID, "storageType": storageType},
+		Payload:   map[string]string{"machineId": b.config.MachineID, "storageType": storageType},
 		Timestamp: time.Now().UnixMilli(),
 	})
 }
@@ -2487,7 +2487,7 @@ func (b *Bridge) handleChatSend(msg Message) {
 				Type: "security:alert",
 				Payload: map[string]interface{}{
 					"sessionId":   sessionID,
-					"deviceId":    b.config.DeviceID,
+					"machineId":    b.config.MachineID,
 					"category":    a.Category,
 					"level":       a.Level,
 					"ruleId":      a.RuleID,
@@ -2528,7 +2528,7 @@ func (b *Bridge) handleChatSend(msg Message) {
 			Type: "session:error",
 			Payload: map[string]interface{}{
 				"sessionId": sessionID,
-				"deviceId":  b.config.DeviceID,
+				"machineId":  b.config.MachineID,
 				"error":     fmt.Sprintf("Failed to send message: %v", err),
 			},
 			Timestamp: time.Now().UnixMilli(),
@@ -2666,7 +2666,7 @@ func (b *Bridge) heartbeat() {
 			}
 			b.connMu.Unlock()
 			// Update last_seen via API heartbeat — only while the WS is up.
-			// Refreshing it during an outage kept the device reading "online"
+			// Refreshing it during an outage kept the machine reading "online"
 			// while the slow-retry window silently dropped messages
 			// (2026-09-21 e2e).
 			if connActive {
@@ -2745,7 +2745,7 @@ func (b *Bridge) stopKeepAlive() {
 	}
 }
 
-// updateLastSeen sends a heartbeat to the API to update the device's last_seen timestamp
+// updateLastSeen sends a heartbeat to the API to update the machine's last_seen timestamp
 func (b *Bridge) updateLastSeen() {
 	// Derive API URL from WebSocket URL
 	apiURL := b.config.ServerURL
@@ -2755,7 +2755,7 @@ func (b *Bridge) updateLastSeen() {
 		apiURL = "http" + apiURL[2:]
 	}
 
-	url := fmt.Sprintf("%s/api/devices/%s/heartbeat", apiURL, b.config.DeviceID)
+	url := fmt.Sprintf("%s/api/machines/%s/heartbeat", apiURL, b.config.MachineID)
 
 	req, err := http.NewRequest("POST", url, nil)
 	if err != nil {
@@ -2763,7 +2763,7 @@ func (b *Bridge) updateLastSeen() {
 		return
 	}
 
-	req.Header.Set("Authorization", "Bearer "+b.config.DeviceToken)
+	req.Header.Set("Authorization", "Bearer "+b.config.MachineToken)
 	req.Header.Set("Content-Type", "application/json")
 
 	// Use the reused HTTP client instead of creating a new one
@@ -2785,7 +2785,7 @@ func (b *Bridge) updateLastSeen() {
 
 	// A non-2xx status is a heartbeat failure even though the transport
 	// succeeded: the counter used to reset here unconditionally, so a
-	// persistent 401 (stale device token) only ever DEBUG-logged and the
+	// persistent 401 (stale machine token) only ever DEBUG-logged and the
 	// reconnect that re-establishes the WebSocket never fired.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b.heartbeatFailures++
@@ -2865,7 +2865,7 @@ func (b *Bridge) sendSessionRestore() {
 		Type: "sessions:restore",
 		Payload: map[string]interface{}{
 			"sessions": sessions,
-			"deviceId": b.config.DeviceID,
+			"machineId": b.config.MachineID,
 		},
 		Timestamp: time.Now().UnixMilli(),
 	})
@@ -2885,7 +2885,7 @@ func (b *Bridge) notifyStaleSessionsStopped() {
 			Type: "session:stopped",
 			Payload: map[string]interface{}{
 				"sessionId": sessionID,
-				"deviceId":  b.config.DeviceID,
+				"machineId":  b.config.MachineID,
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
@@ -2970,7 +2970,7 @@ func (b *Bridge) doFlushLocked() {
 			Type: msgType,
 			Payload: map[string]interface{}{
 				"sessionId": batch.sessionID,
-				"deviceId":  b.config.DeviceID,
+				"machineId":  b.config.MachineID,
 				"content":   toSend,
 				"protocol":  batch.protocolName,
 			},
@@ -3107,10 +3107,10 @@ func isTemporaryCloseCode(code int) bool {
 	return temporaryCloseCodes[code]
 }
 
-func getDeviceName() string {
+func getMachineName() string {
 	hostname, err := os.Hostname()
 	if err != nil {
-		return "Unknown Device"
+		return "Unknown Machine"
 	}
 	return hostname
 }
@@ -3173,7 +3173,7 @@ func (b *Bridge) handlePromptsSync(msg Message) {
 		return
 	}
 
-	deviceId := getString(payload, "deviceId")
+	machineId := getString(payload, "machineId")
 
 	// Store prompts locally in config
 	if prompts, ok := payload["prompts"]; ok {
@@ -3188,7 +3188,7 @@ func (b *Bridge) handlePromptsSync(msg Message) {
 	b.sendMessage(Message{
 		Type: "prompts:synced",
 		Payload: map[string]interface{}{
-			"deviceId": deviceId,
+			"machineId": machineId,
 			"success":  true,
 		},
 		Timestamp: time.Now().UnixMilli(),
@@ -3213,7 +3213,7 @@ func (b *Bridge) handleScannerToggle(msg Message) {
 	b.sendMessage(Message{
 		Type: "scanner:status",
 		Payload: map[string]interface{}{
-			"deviceId": b.config.DeviceID,
+			"machineId": b.config.MachineID,
 			"enabled":  enabled,
 		},
 		Timestamp: time.Now().UnixMilli(),
@@ -3259,7 +3259,7 @@ func (b *Bridge) handleScannerRulesSync(msg Message) {
 	b.sendMessage(Message{
 		Type: "scanner:rules:synced",
 		Payload: map[string]interface{}{
-			"deviceId": b.config.DeviceID,
+			"machineId": b.config.MachineID,
 			"count":    len(defs),
 		},
 		Timestamp: time.Now().UnixMilli(),
@@ -3285,7 +3285,7 @@ func (b *Bridge) handleWorkflowStartJob(msg Message) {
 		}
 		taskId := getString(task, "id")
 		// Notify web that task has started
-		b.sendMessage(taskStartedMessage(jobId, taskId, b.config.DeviceID))
+		b.sendMessage(taskStartedMessage(jobId, taskId, b.config.MachineID))
 	}
 }
 
@@ -3323,7 +3323,7 @@ func (b *Bridge) handleWorkflowStartTask(msg Message) {
 	b.logInfo("[%s] Starting workflow task %s (agent: %s) in job %s", logger.ModWorkflow, taskId, agentId, jobId)
 
 	// Notify progress
-	b.sendMessage(taskStartedMessage(jobId, taskId, b.config.DeviceID))
+	b.sendMessage(taskStartedMessage(jobId, taskId, b.config.MachineID))
 }
 
 // isLiveTaskSession reports whether an existing session for a task ID is
@@ -3501,7 +3501,7 @@ func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 	// failed resume on the workDir mismatch, and REPLACED the healthy
 	// session with one in the wrong directory — output lost, task stuck.
 	// The task is running here; just re-emit its start signal so the
-	// orchestrator records it as dispatched to this device.
+	// orchestrator records it as dispatched to this machine.
 	if isLiveTaskSession(b.sessions.Get(taskId)) {
 		b.logWarn("[%s] Re-dispatch for live task %s (job %s): ignoring, session healthy", logger.ModWorkflow, taskId, jobId)
 		_ = b.sendMessage(b.taskStartedWithBase(jobId, taskId))
@@ -3526,7 +3526,7 @@ func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 					Payload: map[string]interface{}{
 						"jobId":        jobId,
 						"taskId":       taskId,
-						"deviceId":     b.config.DeviceID,
+						"machineId":     b.config.MachineID,
 						"executorKind": ExecutorKindBridge,
 						"error":        err.Error(),
 						"errorType":    "base_unreachable",
@@ -3552,7 +3552,7 @@ func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 				Payload: map[string]interface{}{
 					"jobId":        jobId,
 					"taskId":       taskId,
-					"deviceId":     b.config.DeviceID,
+					"machineId":     b.config.MachineID,
 					"executorKind": ExecutorKindBridge,
 					"error":        "not_a_git_repo: " + getString(payload, "projectPath"),
 					"errorType":    "not_a_git_repo",
@@ -3630,13 +3630,13 @@ func taskTurnExitCode(meta map[string]interface{}, isTask bool) (int, bool) {
 	}
 }
 
-func taskStartedMessage(jobId, taskId, deviceId string) Message {
+func taskStartedMessage(jobId, taskId, machineId string) Message {
 	return Message{
 		Type: "workflow:task_started",
 		Payload: map[string]interface{}{
 			"jobId":        jobId,
 			"taskId":       taskId,
-			"deviceId":     deviceId,
+			"machineId":     machineId,
 			"executorKind": ExecutorKindBridge,
 		},
 		Timestamp: time.Now().UnixMilli(),
@@ -3671,7 +3671,7 @@ func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, row
 			Payload: map[string]interface{}{
 				"jobId":        jobId,
 				"taskId":       taskId,
-				"deviceId":     b.config.DeviceID,
+				"machineId":     b.config.MachineID,
 				"executorKind": ExecutorKindBridge,
 				"error":        err.Error(),
 				"errorType":    "crash",
@@ -3695,7 +3695,7 @@ func (b *Bridge) launchTaskSession(jobId, taskId, cli, workDir string, cols, row
 		Payload: map[string]interface{}{
 			"jobId":        jobId,
 			"taskId":       taskId,
-			"deviceId":     b.config.DeviceID,
+			"machineId":     b.config.MachineID,
 			"executorKind": ExecutorKindBridge,
 			"progress":     0,
 			"step":         "started",
@@ -3833,7 +3833,7 @@ func (b *Bridge) handleWorkflowTaskMerge(msg Message) {
 			Payload: map[string]interface{}{
 				"jobId":        jobId,
 				"taskId":       taskId,
-				"deviceId":     b.config.DeviceID,
+				"machineId":     b.config.MachineID,
 				"executorKind": ExecutorKindBridge,
 				"error":        detail,
 				"errorType":    "merge_failed",
@@ -3850,7 +3850,7 @@ func (b *Bridge) handleWorkflowTaskMerge(msg Message) {
 			Payload: map[string]interface{}{
 				"jobId":         jobId,
 				"taskId":        taskId,
-				"deviceId":      b.config.DeviceID,
+				"machineId":      b.config.MachineID,
 				"conflictFiles": ev.ConflictFiles,
 			},
 			Timestamp: time.Now().UnixMilli(),
@@ -3952,7 +3952,7 @@ func (b *Bridge) previewBuildDone(jobId string) {
 }
 
 // previewRevivePollInterval is how often the bridge asks the platform for
-// preview revive requests raised while this device was offline, busy, or
+// preview revive requests raised while this machine was offline, busy, or
 // simply between merges. Revives are user-initiated and not time-critical
 // (the mission detail page shows an explicit "regenerate" action), so a
 // slow cadence is fine and keeps this well clear of the account-wide
@@ -4002,7 +4002,7 @@ func (b *Bridge) pollPreviewRevives() {
 
 // deploySourcePollInterval: deploy clicks wait on this, so it is a full
 // minute faster than the revive cadence and still only one Workers GET per
-// device per tick (rows are rare — whitelist users only).
+// machine per tick (rows are rare — whitelist users only).
 const deploySourcePollInterval = time.Minute
 
 // deploySourcePollLoop periodically asks the platform for pending deploy
@@ -4197,7 +4197,7 @@ func (b *Bridge) handleSessionExit(sessionID string, exitCode int, output []byte
 			commitHash = hash
 			b.logInfo("[%s] Committed worktree for task %s: %s", logger.ModWorkflow, meta.TaskID, hash)
 
-			// Push branch to remote for cross-device merging
+			// Push branch to remote for cross-machine merging
 			branchName := workflows.GetBranchName(meta.JobID, meta.TaskID)
 			if err := wm.PushBranch(meta.WorkDir, branchName); err != nil {
 				b.logInfo("[%s] Push failed for task %s branch %s: %v", logger.ModWorkflow, meta.TaskID, branchName, err)
@@ -4316,7 +4316,7 @@ func (b *Bridge) handleQuestionMarker(sessionID string, sess *session.Session, c
 			"missionId":    jobID,
 			"taskId":       taskID,
 			"question":     question,
-			"deviceId":     b.config.DeviceID,
+			"machineId":     b.config.MachineID,
 			"executorKind": ExecutorKindBridge,
 		},
 		Timestamp: time.Now().UnixMilli(),
@@ -4464,7 +4464,7 @@ func (b *Bridge) handleACPQueryStatus(msg Message) {
 	b.sendMessage(Message{
 		Type: "acp:status",
 		Payload: map[string]interface{}{
-			"deviceId":    b.config.DeviceID,
+			"machineId":    b.config.MachineID,
 			"supportsAcp": hasACP,
 			"sessions":    sessionInfos,
 		},
@@ -4522,7 +4522,7 @@ func (b *Bridge) handleMCPSync(msg Message) {
 	b.sendMessage(Message{
 		Type: "mcp:synced",
 		Payload: map[string]interface{}{
-			"deviceId": b.config.DeviceID,
+			"machineId": b.config.MachineID,
 			"count":    len(servers),
 		},
 		Timestamp: time.Now().UnixMilli(),
@@ -4535,7 +4535,7 @@ func (b *Bridge) handleMCPList(msg Message) {
 		b.sendMessage(Message{
 			Type: "mcp:list_response",
 			Payload: map[string]interface{}{
-				"deviceId": b.config.DeviceID,
+				"machineId": b.config.MachineID,
 				"servers":  map[string]interface{}{},
 			},
 			Timestamp: time.Now().UnixMilli(),
@@ -4547,7 +4547,7 @@ func (b *Bridge) handleMCPList(msg Message) {
 	b.sendMessage(Message{
 		Type: "mcp:list_response",
 		Payload: map[string]interface{}{
-			"deviceId": b.config.DeviceID,
+			"machineId": b.config.MachineID,
 			"servers":  servers,
 		},
 		Timestamp: time.Now().UnixMilli(),
@@ -4574,7 +4574,7 @@ func (b *Bridge) handleWorkflowGetState(msg Message) {
 
 	url := fmt.Sprintf("%s/api/workflows/jobs/%s/state/%s", apiURL, jobId, key)
 	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "Bearer "+b.config.DeviceToken)
+	req.Header.Set("Authorization", "Bearer "+b.config.MachineToken)
 
 	resp, err := b.httpClient.Do(req)
 	if err != nil {
@@ -4632,7 +4632,7 @@ func (b *Bridge) handleWorkflowSetState(msg Message) {
 	}
 	bodyBytes, _ := json.Marshal(body)
 	req, _ := http.NewRequest("PUT", url, bytes.NewReader(bodyBytes))
-	req.Header.Set("Authorization", "Bearer "+b.config.DeviceToken)
+	req.Header.Set("Authorization", "Bearer "+b.config.MachineToken)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := b.httpClient.Do(req)

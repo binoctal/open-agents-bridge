@@ -237,7 +237,7 @@ func (s *replaySink) sendPermissionResponse(id interface{}, optionID string, app
 		Type: "permission:response",
 		Payload: map[string]interface{}{
 			"id":       id,
-			"deviceId": "device-replay",
+			"machineId": "machine-replay",
 			"approved": approved,
 			"optionId": optionID,
 		},
@@ -406,8 +406,8 @@ func startReplayBridge(t *testing.T, sink *replaySink, scriptPath string, maxCon
 
 	cfg := &config.Config{
 		UserID:      "user-replay",
-		DeviceID:    "device-replay",
-		DeviceToken: "token-replay",
+		MachineID:    "machine-replay",
+		MachineToken: "token-replay",
 		ServerURL:   sink.url,
 		// No E2EE keys: uplink stays plaintext, which is what the sink parses.
 	}

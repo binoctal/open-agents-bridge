@@ -219,6 +219,6 @@ func PermissionCacheKey(permissionID string) string {
 }
 
 // ConfigCacheKey generates a cache key for config
-func ConfigCacheKey(deviceID string) string {
-	return fmt.Sprintf("config:%s", deviceID)
+func ConfigCacheKey(machineID string) string {
+	return fmt.Sprintf("config:%s", machineID)
 }

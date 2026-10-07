@@ -28,9 +28,9 @@ const unitPath = "/etc/systemd/system/open-agents-bridge.service"
 
 type LinuxService struct{}
 
-func (s *LinuxService) Install(device string) error {
-	if device == "" {
-		return fmt.Errorf("device name is required: -d <device>")
+func (s *LinuxService) Install(machine string) error {
+	if machine == "" {
+		return fmt.Errorf("machine name is required: -d <machine>")
 	}
 
 	exePath, err := os.Executable()
@@ -39,7 +39,7 @@ func (s *LinuxService) Install(device string) error {
 	}
 	exePath, _ = filepath.Abs(exePath)
 
-	content := fmt.Sprintf(systemdUnit, exePath, device, os.Getenv("HOME"))
+	content := fmt.Sprintf(systemdUnit, exePath, machine, os.Getenv("HOME"))
 
 	if err := os.WriteFile(unitPath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("failed to write unit file (try with sudo): %w", err)

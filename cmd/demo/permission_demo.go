@@ -27,8 +27,8 @@ func main() {
 	}
 
 	// Connect to server
-	url := fmt.Sprintf("%s/ws/%s?type=bridge&deviceId=%s&token=%s",
-		cfg.ServerURL, cfg.UserID, cfg.DeviceID, cfg.DeviceToken)
+	url := fmt.Sprintf("%s/ws/%s?type=bridge&machineId=%s&token=%s",
+		cfg.ServerURL, cfg.UserID, cfg.MachineID, cfg.MachineToken)
 
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
@@ -43,7 +43,7 @@ func main() {
 		Type: "permission:request",
 		Payload: map[string]interface{}{
 			"id":             "perm_test_" + fmt.Sprint(time.Now().Unix()),
-			"deviceId":       cfg.DeviceID,
+			"machineId":       cfg.MachineID,
 			"sessionId":      "session_test",
 			"permissionType": "file:write",
 			"description":    "Write to file: /tmp/test.txt",

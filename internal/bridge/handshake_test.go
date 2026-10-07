@@ -155,7 +155,7 @@ func TestSendCapabilityReportNoAPIDoesNotPanic(t *testing.T) {
 	// No API, no connection: the probe classifies unreachable and the
 	// send lands in the offline buffer (nil conn is not an error path).
 	// The whole report must complete without panicking or hanging.
-	b := &Bridge{config: &config.Config{ServerURL: "ws://127.0.0.1:1", DeviceToken: "tok"}, done: make(chan struct{})}
+	b := &Bridge{config: &config.Config{ServerURL: "ws://127.0.0.1:1", MachineToken: "tok"}, done: make(chan struct{})}
 
 	done := make(chan struct{})
 	go func() {

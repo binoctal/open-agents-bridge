@@ -439,9 +439,9 @@ func AddGlobalHook(hook Hook) {
 	globalCollector.AddHook(hook)
 }
 
-// Init initializes the metrics system with device info
-func Init(deviceID, version string) {
-	SetGlobalTag("deviceId", deviceID)
+// Init initializes the metrics system with machine info
+func Init(machineID, version string) {
+	SetGlobalTag("machineId", machineID)
 	SetGlobalTag("version", version)
 	SetGlobalTag("hostname", getHostname())
 }

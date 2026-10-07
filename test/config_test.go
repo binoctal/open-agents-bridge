@@ -12,8 +12,8 @@ import (
 func TestConfigStruct(t *testing.T) {
 	cfg := &config.Config{
 		UserID:      "user_123",
-		DeviceID:    "device_456",
-		DeviceToken: "token_789",
+		MachineID:    "machine_456",
+		MachineToken: "token_789",
 		ServerURL:   "wss://test.example.com",
 		PublicKey:   "pubkey_base64",
 		PrivateKey:  "privkey_base64",
@@ -33,8 +33,8 @@ func TestConfigStruct(t *testing.T) {
 	if loaded.UserID != cfg.UserID {
 		t.Errorf("UserID = %s, want %s", loaded.UserID, cfg.UserID)
 	}
-	if loaded.DeviceID != cfg.DeviceID {
-		t.Errorf("DeviceID = %s, want %s", loaded.DeviceID, cfg.DeviceID)
+	if loaded.MachineID != cfg.MachineID {
+		t.Errorf("MachineID = %s, want %s", loaded.MachineID, cfg.MachineID)
 	}
 	if loaded.ServerURL != cfg.ServerURL {
 		t.Errorf("ServerURL = %s, want %s", loaded.ServerURL, cfg.ServerURL)
@@ -61,7 +61,7 @@ func TestConfigLoadNotExist(t *testing.T) {
 	os.Setenv("HOME", "/nonexistent/path/that/does/not/exist")
 	defer os.Setenv("HOME", origHome)
 
-	_, err := config.LoadDevice("default")
+	_, err := config.LoadMachine("default")
 	if err == nil {
 		t.Error("Expected error when config doesn't exist")
 	}

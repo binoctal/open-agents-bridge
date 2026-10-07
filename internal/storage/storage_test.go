@@ -18,8 +18,8 @@ func TestStore_CreateAndGetSession(t *testing.T) {
 	if h.SessionID != "s1" {
 		t.Errorf("expected s1, got %s", h.SessionID)
 	}
-	if h.DeviceID != "d1" {
-		t.Errorf("expected d1, got %s", h.DeviceID)
+	if h.MachineID != "d1" {
+		t.Errorf("expected d1, got %s", h.MachineID)
 	}
 	if h.CLIType != "claude" {
 		t.Errorf("expected claude, got %s", h.CLIType)

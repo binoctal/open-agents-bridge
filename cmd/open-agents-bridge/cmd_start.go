@@ -19,41 +19,41 @@ import (
 var (
 	logLevel        string
 	headless        bool
-	deviceName      string
+	machineName      string
 	recordReplayDir string
 )
 
 var startCmd = &cobra.Command{
-	Use:   "start -d <device>",
+	Use:   "start -d <machine>",
 	Short: "Start the bridge daemon",
 	Long: `Start the Open Agents bridge daemon. This connects your
 local CLI tools to the cloud and enables remote monitoring
 and control.
 
-You must specify a device name with --device.
+You must specify a machine name with --machine.
 
 Examples:
-  # Start a specific device
+  # Start a specific machine
   open-agents-bridge start -d work-pc
 
   # Start with debug logging
   open-agents-bridge start -d work-pc --log-level debug`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// Determine which device to use
-		targetDevice := deviceName
-		if targetDevice == "" {
-			targetDevice = os.Getenv("OPEN_AGENTS_DEVICE")
+		// Determine which machine to use
+		targetMachine := machineName
+		if targetMachine == "" {
+			targetMachine = os.Getenv("OPEN_AGENTS_MACHINE")
 		}
 
-		if targetDevice == "" && !config.SessionEnvActive() {
-			fmt.Fprintln(os.Stderr, "Error: device name is required.")
-			fmt.Fprintln(os.Stderr, "Usage: open-agents-bridge start -d <device>")
+		if targetMachine == "" && !config.SessionEnvActive() {
+			fmt.Fprintln(os.Stderr, "Error: machine name is required.")
+			fmt.Fprintln(os.Stderr, "Usage: open-agents-bridge start -d <machine>")
 			fmt.Fprintln(os.Stderr)
-			names, _ := config.ListDevices()
+			names, _ := config.ListMachines()
 			if len(names) == 0 {
-				fmt.Fprintln(os.Stderr, "No devices paired yet. Run 'open-agents-bridge pair' first.")
+				fmt.Fprintln(os.Stderr, "No machines paired yet. Run 'open-agents-bridge pair' first.")
 			} else {
-				fmt.Fprintln(os.Stderr, "Available devices:")
+				fmt.Fprintln(os.Stderr, "Available machines:")
 				for _, n := range names {
 					fmt.Fprintf(os.Stderr, "  - %s\n", n)
 				}
@@ -85,36 +85,36 @@ Examples:
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
-			targetDevice = cfg.DeviceID
+			targetMachine = cfg.MachineID
 		} else {
-			cfg, err = config.LoadDevice(targetDevice)
+			cfg, err = config.LoadMachine(targetMachine)
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: device '%s' not found.\n", targetDevice)
-			fmt.Fprintln(os.Stderr, "Run 'open-agents-bridge devices' to see available devices.")
+			fmt.Fprintf(os.Stderr, "Error: machine '%s' not found.\n", targetMachine)
+			fmt.Fprintln(os.Stderr, "Run 'open-agents-bridge machines' to see available machines.")
 			os.Exit(1)
 		}
 
-		deviceDisplay := cfg.DeviceName
-		if deviceDisplay == "" {
-			deviceDisplay = targetDevice
+		machineDisplay := cfg.MachineName
+		if machineDisplay == "" {
+			machineDisplay = targetMachine
 		}
 
-		// One bridge per device on this machine: take the kernel lock before any
+		// One bridge per machine on this machine: take the kernel lock before any
 		// network call so a second launch (service + manual start, a stray
 		// terminal) exits instead of fighting the first over the connection.
-		instLock, err := instancelock.Acquire(instancelock.PathFor(config.ConfigDir(), cfg.DeviceID))
+		instLock, err := instancelock.Acquire(instancelock.PathFor(config.ConfigDir(), cfg.MachineID))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v.\n", err)
-			fmt.Fprintf(os.Stderr, "Stop the other bridge for '%s' first (open-agents-bridge status).\n", deviceDisplay)
+			fmt.Fprintf(os.Stderr, "Stop the other bridge for '%s' first (open-agents-bridge status).\n", machineDisplay)
 			os.Exit(1)
 		}
 		defer instLock.Close()
 
 		fmt.Printf("Starting Open Agents Bridge...\n")
-		fmt.Printf("  Device:   %s\n", deviceDisplay)
+		fmt.Printf("  Machine:   %s\n", machineDisplay)
 		fmt.Printf("  Server:   %s\n", cfg.ServerURL)
-		fmt.Printf("  DeviceID: %s\n", cfg.DeviceID)
+		fmt.Printf("  MachineID: %s\n", cfg.MachineID)
 		fmt.Printf("  📋 Logs:    %s\n", filepath.Join(logger.GetLogDir(), "bridge.log"))
 		fmt.Println()
 
@@ -137,12 +137,12 @@ Examples:
 
 		// Setup system tray notification
 		trayTitle := "Open Agents"
-		if cfg.DeviceName != "" {
-			trayTitle = fmt.Sprintf("Open Agents (%s)", cfg.DeviceName)
+		if cfg.MachineName != "" {
+			trayTitle = fmt.Sprintf("Open Agents (%s)", cfg.MachineName)
 		}
 		t := tray.New(trayTitle)
 		t.SetRunning(true)
-		t.ShowNotification("Open Agents", fmt.Sprintf("Bridge started (%s)", deviceDisplay))
+		t.ShowNotification("Open Agents", fmt.Sprintf("Bridge started (%s)", machineDisplay))
 
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -167,6 +167,6 @@ Examples:
 func init() {
 	startCmd.Flags().StringVarP(&logLevel, "log-level", "l", "info", "Log level (error, warn, info, debug)")
 	startCmd.Flags().BoolVarP(&headless, "headless", "H", false, "Run in headless mode (no system tray)")
-	startCmd.Flags().StringVarP(&deviceName, "device", "d", "", "Device name to start (required)")
+	startCmd.Flags().StringVarP(&machineName, "machine", "d", "", "Machine name to start (required)")
 	startCmd.Flags().StringVar(&recordReplayDir, "record-replay-dir", "", "Record ACP wire frames of every session to <dir>/<sessionID>.jsonl (replay fixture production)")
 }

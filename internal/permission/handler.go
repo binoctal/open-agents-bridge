@@ -9,7 +9,7 @@ import (
 type Request struct {
 	ID             string `json:"id"`
 	SessionID      string `json:"sessionId"`
-	DeviceID       string `json:"deviceId"`
+	MachineID       string `json:"machineId"`
 	PermissionType string `json:"permissionType"` // file:read | file:write | command:exec
 	// ToolName is the CLI's own name for the tool (fs_read, execute_bash, …).
 	// PermissionType above is a coarser label built for display, and the rules

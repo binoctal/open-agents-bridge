@@ -53,7 +53,7 @@ func TestProfileStoreDropCacheOnReconnect(t *testing.T) {
 }
 
 func TestConfigSyncDoesNotTouchProcessEnv(t *testing.T) {
-	b := &Bridge{config: &config.Config{DeviceID: "dev-1"}}
+	b := &Bridge{config: &config.Config{MachineID: "dev-1"}}
 	t.Setenv("OA_PROFILE_PROBE", "")
 	os.Unsetenv("OA_PROFILE_PROBE")
 	b.handleConfigSync(Message{Payload: map[string]interface{}{"envVars": map[string]interface{}{"OA_PROFILE_PROBE": "leak"}}})

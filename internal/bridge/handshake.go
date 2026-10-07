@@ -51,18 +51,18 @@ func apiBaseURL(serverURL string) string {
 	return serverURL
 }
 
-// classifyCallbackProbe hits a device-token-authenticated API route and
+// classifyCallbackProbe hits a machine-token-authenticated API route and
 // reduces the outcome to the three-state conclusion the handshake spec
 // defines. A dedicated client keeps the transport error (unreachable)
 // distinguishable from an HTTP error status (reachable but rejected) —
 // the shared api.Client collapses both into one error type.
-func classifyCallbackProbe(client *http.Client, apiURL, deviceToken string) (result, detail string) {
+func classifyCallbackProbe(client *http.Client, apiURL, machineToken string) (result, detail string) {
 	url := strings.TrimRight(apiURL, "/") + "/api/bridge/permission-rules"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return probeUnreachable, fmt.Sprintf("build request: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+deviceToken)
+	req.Header.Set("Authorization", "Bearer "+machineToken)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -112,7 +112,7 @@ func (b *Bridge) e2eeActive() bool {
 // break the connection loop.
 func (b *Bridge) sendCapabilityReport() {
 	client := &http.Client{Timeout: probeTimeout}
-	probeResult, probeDetail := classifyCallbackProbe(client, apiBaseURL(b.config.ServerURL), b.config.DeviceToken)
+	probeResult, probeDetail := classifyCallbackProbe(client, apiBaseURL(b.config.ServerURL), b.config.MachineToken)
 
 	report := buildCapabilityReport(updater.Version, probeResult, probeDetail, b.e2eeActive())
 
@@ -149,7 +149,7 @@ func (b *Bridge) deliverCapabilityReport(report map[string]interface{}, probeRes
 }
 
 // handleHandshakeMismatch reacts to the server's pairing verdict: the
-// device is degraded (logged server-side, shown in the web UI) and the
+// machine is degraded (logged server-side, shown in the web UI) and the
 // human at this machine needs to know why their tasks may not run.
 func (b *Bridge) handleHandshakeMismatch(msg Message) {
 	payload, _ := msg.Payload.(map[string]interface{})

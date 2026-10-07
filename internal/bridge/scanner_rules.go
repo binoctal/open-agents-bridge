@@ -7,7 +7,7 @@ import (
 	"github.com/binoctal/open-agents-bridge/internal/scanner"
 )
 
-// Custom scanner rules reach this device from two places: the admin panel
+// Custom scanner rules reach this machine from two places: the admin panel
 // pushes organization-wide rules through the API, and the user maintains their
 // own set from the settings page. The scanner has a single "custom" plugin and
 // ReplaceCustomRules swaps it out entirely, so the two sets are held here
@@ -58,7 +58,7 @@ func (b *Bridge) loadUserScannerRules() {
 }
 
 // syncOrgScannerRulesFromAPI fetches the organization rules. A failure
-// degrades to an empty organization set: the device keeps scanning with the
+// degrades to an empty organization set: the machine keeps scanning with the
 // builtin plugins and the user's own rules, and the next sync restores the
 // rest. Carrying a stale set forward would instead keep enforcing a rule an
 // admin has already deleted.

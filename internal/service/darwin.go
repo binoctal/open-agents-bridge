@@ -45,9 +45,9 @@ func (s *DarwinService) logDir() string {
 	return filepath.Join(os.Getenv("HOME"), "Library", "Logs", "open-agents-bridge")
 }
 
-func (s *DarwinService) Install(device string) error {
-	if device == "" {
-		return fmt.Errorf("device name is required: -d <device>")
+func (s *DarwinService) Install(machine string) error {
+	if machine == "" {
+		return fmt.Errorf("machine name is required: -d <machine>")
 	}
 
 	exePath, err := os.Executable()
@@ -60,7 +60,7 @@ func (s *DarwinService) Install(device string) error {
 	os.MkdirAll(logDir, 0755)
 	os.MkdirAll(filepath.Dir(s.plistPath()), 0755)
 
-	content := fmt.Sprintf(launchdPlist, exePath, device, logDir, logDir)
+	content := fmt.Sprintf(launchdPlist, exePath, machine, logDir, logDir)
 	return os.WriteFile(s.plistPath(), []byte(content), 0644)
 }
 

@@ -1,5 +1,5 @@
 // Package instancelock gives a bridge process exclusive ownership of one
-// device on this machine. The lock is a kernel-level file lock, so it is
+// machine on this machine. The lock is a kernel-level file lock, so it is
 // released automatically when the process dies (including kill -9) and never
 // leaves a stale lock behind the way a pid file would.
 package instancelock
@@ -13,23 +13,23 @@ import (
 )
 
 // ErrHeld is returned when another process already owns the lock.
-var ErrHeld = errors.New("another bridge instance is already running for this device")
+var ErrHeld = errors.New("another bridge instance is already running for this machine")
 
 // Lock is a held instance lock. Close releases it.
 type Lock struct {
 	f *os.File
 }
 
-// PathFor returns the lock file path for a device inside dir. The device id is
+// PathFor returns the lock file path for a machine inside dir. The machine id is
 // sanitized because it ends up in a file name.
-func PathFor(dir, deviceID string) string {
+func PathFor(dir, machineID string) string {
 	safe := strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
 			return r
 		}
 		return '_'
-	}, deviceID)
+	}, machineID)
 	return filepath.Join(dir, "bridge-"+safe+".lock")
 }
 

@@ -6,7 +6,7 @@
 // Unlike the preview package there is no auto path at all — the only trigger
 // is a `pending` hosted_deployments row the user created with an explicit
 // deploy click, discovered through the bridge's poll. Task completion and
-// merges never reach this package, so zero source leaves the device unless
+// merges never reach this package, so zero source leaves the machine unless
 // the user asked for it (task 4.3's hard requirement).
 package deploysource
 

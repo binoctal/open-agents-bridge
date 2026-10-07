@@ -9,7 +9,7 @@ import (
 // signal was workflow:task_progress {progress:0, step:"started"}; the
 // workflow:task_started emitters were echoes of web-origin commands. The
 // dispatch path must emit task_started too, with the same payload fields the
-// dispatch family carries (jobId, taskId, deviceId).
+// dispatch family carries (jobId, taskId, machineId).
 //
 // add-executor-abstraction: every task-lifecycle frame also carries
 // executorKind — the web client renders the 执行方 badge from live WS
@@ -23,7 +23,7 @@ func TestTaskStartedMessage(t *testing.T) {
 	if err := json.Unmarshal(mustJSON(t, msg.Payload), &p); err != nil {
 		t.Fatalf("payload not JSON object: %v", err)
 	}
-	for _, k := range []string{"jobId", "taskId", "deviceId"} {
+	for _, k := range []string{"jobId", "taskId", "machineId"} {
 		if _, ok := p[k]; !ok {
 			t.Fatalf("payload missing %q: %v", k, p)
 		}

@@ -14,7 +14,7 @@ func (b *Bridge) sendSessionStartFailed(sessionID, reason string) {
 		Type: "session:error",
 		Payload: map[string]interface{}{
 			"sessionId": sessionID,
-			"deviceId":  b.config.DeviceID,
+			"machineId":  b.config.MachineID,
 			"error":     reason,
 			"code":      "SESSION_START_FAILED",
 		},

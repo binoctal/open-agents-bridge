@@ -54,7 +54,7 @@ func (s *Scanner) SetPluginEnabled(name string, enabled bool) {
 	s.mu.Unlock()
 }
 
-// LoadCustomRuleDefs reads the rules the user saved on this device. A missing
+// LoadCustomRuleDefs reads the rules the user saved on this machine. A missing
 // or unreadable file is not an error: it means the user has no rules of their
 // own, which is the common case.
 func LoadCustomRuleDefs(configDir string) []CustomRuleDef {

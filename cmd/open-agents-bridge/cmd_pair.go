@@ -23,7 +23,7 @@ var (
 	pairStagingMode bool
 	pairDevEmail    string
 	pairDevPassword string
-	pairDeviceName  string
+	pairMachineName  string
 )
 
 // Default server URLs
@@ -36,11 +36,11 @@ const (
 
 var pairCmd = &cobra.Command{
 	Use:   "pair",
-	Short: "Pair this device with your Open Agents account",
-	Long: `Pair this device with your Open Agents account using a pairing code.
+	Short: "Pair this machine with your Open Agents account",
+	Long: `Pair this machine with your Open Agents account using a pairing code.
 
-1. Go to the dashboard at https://openagents.top/dashboard/devices
-2. Click "Add Device" to get a pairing code
+1. Go to the dashboard at https://openagents.top/dashboard/machines
+2. Click "Add Machine" to get a pairing code
 3. Enter the code when prompted
 
 Examples:
@@ -50,7 +50,7 @@ Examples:
   # Local development
   open-agents-bridge pair --server http://localhost:8787
 
-  # Dev mode: auto-create test user and device (localhost only)
+  # Dev mode: auto-create test user and machine (localhost only)
   open-agents-bridge pair --dev --server http://localhost:8787`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// --staging and --server are mutually exclusive
@@ -77,7 +77,7 @@ Examples:
 
 		reader := bufio.NewReader(os.Stdin)
 
-		fmt.Println("Open Agents Device Pairing")
+		fmt.Println("Open Agents Machine Pairing")
 		fmt.Println("==========================")
 		fmt.Println()
 		fmt.Printf("Using API server: %s\n", pairServerURL)
@@ -85,17 +85,17 @@ Examples:
 		// Determine dashboard URL based on server
 		var dashboardURL string
 		if pairServerURL == defaultAPIURL {
-			dashboardURL = defaultWebURL + "/dashboard/devices"
+			dashboardURL = defaultWebURL + "/dashboard/machines"
 		} else if pairServerURL == stagingAPIURL {
-			dashboardURL = stagingWebURL + "/dashboard/devices"
+			dashboardURL = stagingWebURL + "/dashboard/machines"
 		} else if strings.Contains(pairServerURL, "localhost") {
-			dashboardURL = "http://localhost:5173/dashboard/devices"
+			dashboardURL = "http://localhost:5173/dashboard/machines"
 		} else {
-			dashboardURL = strings.TrimSuffix(pairServerURL, "/") + "/dashboard/devices"
+			dashboardURL = strings.TrimSuffix(pairServerURL, "/") + "/dashboard/machines"
 		}
 
 		fmt.Printf("1. Go to %s\n", dashboardURL)
-		fmt.Println("2. Click 'Add Device' to get a pairing code")
+		fmt.Println("2. Click 'Add Machine' to get a pairing code")
 		fmt.Println()
 		fmt.Print("Enter pairing code: ")
 
@@ -119,7 +119,7 @@ Examples:
 		fmt.Println("Pairing...")
 
 		// Call pairing API
-		cfg, err := pairDevice(code, keyPair)
+		cfg, err := pairMachine(code, keyPair)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Pairing failed: %v\n", err)
 			os.Exit(1)
@@ -133,18 +133,18 @@ Examples:
 		}
 
 		// Save config - use server-provided name when --name is not set
-		saveName := pairDeviceName
-		if saveName == "" && cfg.DeviceName != "" {
-			saveName = cfg.DeviceName
+		saveName := pairMachineName
+		if saveName == "" && cfg.MachineName != "" {
+			saveName = cfg.MachineName
 		}
 
 		if saveName != "" {
-			cfg.DeviceName = saveName
-			if err := config.SaveDevice(saveName, cfg); err != nil {
+			cfg.MachineName = saveName
+			if err := config.SaveMachine(saveName, cfg); err != nil {
 				fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
 				os.Exit(1)
 			}
-			// Switch to the newly paired device
+			// Switch to the newly paired machine
 
 		} else {
 			if err := config.Save(cfg); err != nil {
@@ -154,13 +154,13 @@ Examples:
 		}
 
 		fmt.Println()
-		fmt.Println("✓ Device paired successfully!")
+		fmt.Println("✓ Machine paired successfully!")
 		displayName := saveName
 		if displayName == "" {
-			displayName = cfg.DeviceID
+			displayName = cfg.MachineID
 		}
-		fmt.Printf("  Device Name: %s\n", displayName)
-		fmt.Printf("  Device ID: %s\n", cfg.DeviceID)
+		fmt.Printf("  Machine Name: %s\n", displayName)
+		fmt.Printf("  Machine ID: %s\n", cfg.MachineID)
 		fmt.Printf("  Server: %s\n", cfg.ServerURL)
 		fmt.Println("  E2EE: Enabled")
 		fmt.Println()
@@ -169,7 +169,7 @@ Examples:
 		if pairAutoStart {
 			fmt.Println("Starting bridge automatically...")
 			fmt.Println()
-			deviceName = displayName
+			machineName = displayName
 			startCmd.Run(cmd, args)
 		} else {
 			fmt.Printf("Run 'open-agents-bridge start -d %s' to start the bridge.\n", displayName)
@@ -201,7 +201,7 @@ func runDevPair(cmd *cobra.Command, args []string) {
 		password = "dev123456"
 	}
 
-	fmt.Printf("Setting up device for: %s\n", email)
+	fmt.Printf("Setting up machine for: %s\n", email)
 
 	// Call dev setup API
 	cfg, err := devSetup(email, password)
@@ -226,9 +226,9 @@ func runDevPair(cmd *cobra.Command, args []string) {
 	cfg.PrivateKey = base64.StdEncoding.EncodeToString(keyPair.PrivateKey[:])
 
 	// Save config
-	if pairDeviceName != "" {
-		cfg.DeviceName = pairDeviceName
-		if err := config.SaveDevice(pairDeviceName, cfg); err != nil {
+	if pairMachineName != "" {
+		cfg.MachineName = pairMachineName
+		if err := config.SaveMachine(pairMachineName, cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
 			os.Exit(1)
 		}
@@ -242,10 +242,10 @@ func runDevPair(cmd *cobra.Command, args []string) {
 	fmt.Println()
 	fmt.Println("✓ Dev environment ready!")
 	fmt.Printf("  User: %s\n", email)
-	if pairDeviceName != "" {
-		fmt.Printf("  Device Name: %s\n", pairDeviceName)
+	if pairMachineName != "" {
+		fmt.Printf("  Machine Name: %s\n", pairMachineName)
 	}
-	fmt.Printf("  Device ID: %s\n", cfg.DeviceID)
+	fmt.Printf("  Machine ID: %s\n", cfg.MachineID)
 	fmt.Printf("  Server: %s\n", cfg.ServerURL)
 	fmt.Println()
 
@@ -255,7 +255,7 @@ func runDevPair(cmd *cobra.Command, args []string) {
 		fmt.Println()
 		startCmd.Run(cmd, args)
 	} else {
-		devName := pairDeviceName
+		devName := pairMachineName
 		if devName == "" {
 			devName = "default"
 		}
@@ -267,22 +267,22 @@ func init() {
 	pairCmd.Flags().StringVarP(&pairServerURL, "server", "s", "", "API server URL (default: production server)")
 	pairCmd.Flags().BoolVarP(&pairAutoStart, "auto-start", "a", false, "Automatically start bridge after pairing")
 	pairCmd.Flags().BoolVarP(&pairStagingMode, "staging", "S", false, "Use staging server (api-staging.openagents.top)")
-	pairCmd.Flags().BoolVarP(&pairDevMode, "dev", "d", false, "Development mode: auto-create test user and device (localhost only)")
+	pairCmd.Flags().BoolVarP(&pairDevMode, "dev", "d", false, "Development mode: auto-create test user and machine (localhost only)")
 	pairCmd.Flags().StringVar(&pairDevEmail, "email", "", "Dev mode: custom email (default: dev@openagents.local)")
 	pairCmd.Flags().StringVar(&pairDevPassword, "password", "", "Dev mode: custom password (default: dev123456)")
-	pairCmd.Flags().StringVarP(&pairDeviceName, "name", "n", "", "Device name (for multi-device support)")
+	pairCmd.Flags().StringVarP(&pairMachineName, "name", "n", "", "Machine name (for multi-machine support)")
 }
 
 type PairResponse struct {
 	Success     bool   `json:"success"`
 	UserID      string `json:"userId"`
-	DeviceID    string `json:"deviceId"`
-	DeviceName  string `json:"deviceName"`
-	DeviceToken string `json:"deviceToken"`
+	MachineID    string `json:"machineId"`
+	MachineName  string `json:"machineName"`
+	MachineToken string `json:"machineToken"`
 	ServerURL   string `json:"serverUrl"`
 	WebPubKey   string `json:"webPubKey,omitempty"`
 	// DuplicateFingerprint is the server's hint that this machine looks already
-	// paired (device-model-ia D3). Informational only.
+	// paired (machine-model-ia D3). Informational only.
 	DuplicateFingerprint bool           `json:"duplicate_fingerprint,omitempty"`
 	Error                *ErrorResponse `json:"error,omitempty"`
 }
@@ -292,8 +292,8 @@ type ErrorResponse struct {
 	Message string `json:"message"`
 }
 
-func pairDevice(code string, keyPair *crypto.KeyPair) (*config.Config, error) {
-	apiURL := strings.TrimSuffix(pairServerURL, "/") + "/api/devices/pair/verify"
+func pairMachine(code string, keyPair *crypto.KeyPair) (*config.Config, error) {
+	apiURL := strings.TrimSuffix(pairServerURL, "/") + "/api/machines/pair/verify"
 
 	body := map[string]string{
 		"pairCode":    code,
@@ -334,9 +334,9 @@ func pairDevice(code string, keyPair *crypto.KeyPair) (*config.Config, error) {
 
 	return &config.Config{
 		UserID:      result.UserID,
-		DeviceID:    result.DeviceID,
-		DeviceName:  result.DeviceName,
-		DeviceToken: result.DeviceToken,
+		MachineID:    result.MachineID,
+		MachineName:  result.MachineName,
+		MachineToken: result.MachineToken,
 		ServerURL:   result.ServerURL,
 		PublicKey:   keyPair.PublicKeyBase64(),
 		PrivateKey:  base64.StdEncoding.EncodeToString(keyPair.PrivateKey[:]),
@@ -352,15 +352,15 @@ type DevSetupResponse struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	} `json:"user"`
-	Device struct {
+	Machine struct {
 		ID    string `json:"id"`
 		Name  string `json:"name"`
 		Token string `json:"token"`
-	} `json:"device"`
+	} `json:"machine"`
 	Config struct {
 		UserID      string `json:"userId"`
-		DeviceID    string `json:"deviceId"`
-		DeviceToken string `json:"deviceToken"`
+		MachineID    string `json:"machineId"`
+		MachineToken string `json:"machineToken"`
 		ServerURL   string `json:"serverUrl"`
 	} `json:"config"`
 	Error *ErrorResponse `json:"error,omitempty"`
@@ -406,7 +406,7 @@ func devSetup(email, password string) (*config.Config, error) {
 
 	return &config.Config{
 		UserID:      result.Config.UserID,
-		DeviceID:    result.Config.DeviceID,
-		DeviceToken: result.Config.DeviceToken,
+		MachineID:    result.Config.MachineID,
+		MachineToken: result.Config.MachineToken,
 	}, nil
 }

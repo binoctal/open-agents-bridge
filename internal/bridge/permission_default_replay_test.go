@@ -65,7 +65,7 @@ func TestReplayDefaultModePermissionFlow(t *testing.T) {
 	}
 }
 
-// cloud-session-shadow-device staging e2e 2026-10-07: a permission answer
+// cloud-session-shadow-machine staging e2e 2026-10-07: a permission answer
 // that carries only `approved` (the web auto-approve path and probe clients —
 // no optionId) used to be dropped before the ACP forwarding branch, wedging
 // the agent in permission_pending until the idle watchdog killed the turn.

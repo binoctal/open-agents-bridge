@@ -25,9 +25,9 @@ import (
 // Config for demo
 type DemoConfig struct {
 	ServerURL   string
-	DeviceID    string
+	MachineID    string
 	UserID      string
-	DeviceToken string
+	MachineToken string
 	WorkDir     string
 	Command     string
 	Args        []string
@@ -43,18 +43,18 @@ type Message struct {
 // WebForwarder handles forwarding messages to Web UI via WebSocket
 type WebForwarder struct {
 	conn      *websocket.Conn
-	deviceID  string
+	machineID  string
 	sessionID string
 	pending   map[string]chan bool // permission ID -> response channel
 	mu        sync.Mutex
 }
 
 // NewWebForwarder creates a new forwarder
-func NewWebForwarder(serverURL, deviceID, userID, deviceToken string) (*WebForwarder, error) {
+func NewWebForwarder(serverURL, machineID, userID, machineToken string) (*WebForwarder, error) {
 	// Build WebSocket URL
 	wsURL := strings.Replace(serverURL, "https://", "wss://", 1)
 	wsURL = strings.Replace(wsURL, "http://", "ws://", 1)
-	wsURL = fmt.Sprintf("%s/ws/%s?type=demo&deviceId=%s&token=%s", wsURL, userID, deviceID, deviceToken)
+	wsURL = fmt.Sprintf("%s/ws/%s?type=demo&machineId=%s&token=%s", wsURL, userID, machineID, machineToken)
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
@@ -63,7 +63,7 @@ func NewWebForwarder(serverURL, deviceID, userID, deviceToken string) (*WebForwa
 
 	f := &WebForwarder{
 		conn:     conn,
-		deviceID: deviceID,
+		machineID: machineID,
 		pending:  make(map[string]chan bool),
 	}
 
@@ -140,7 +140,7 @@ func (f *WebForwarder) ForwardPermission(permReq protocol.PermissionRequest) boo
 		Type: "permission:request",
 		Payload: map[string]interface{}{
 			"sessionId":   f.sessionID,
-			"deviceId":    f.deviceID,
+			"machineId":    f.machineID,
 			"id":          id,
 			"toolName":    permReq.ToolName,
 			"toolInput":   permReq.ToolInput,
@@ -202,9 +202,9 @@ func (f *WebForwarder) Close() {
 func main() {
 	// Parse command line flags
 	serverURL := flag.String("server", "", "WebSocket server URL (e.g., wss://api.example.com)")
-	deviceID := flag.String("device-id", "demo-device", "Device ID")
+	machineID := flag.String("machine-id", "demo-machine", "Machine ID")
 	userID := flag.String("user-id", "", "User ID")
-	deviceToken := flag.String("token", "", "Device token")
+	machineToken := flag.String("token", "", "Machine token")
 	workDir := flag.String("workdir", ".", "Working directory")
 	cliType := flag.String("cli", "claude", "CLI type (claude, cline, codex, gemini)")
 	headless := flag.Bool("headless", false, "Run without Web UI forwarding")
@@ -212,9 +212,9 @@ func main() {
 
 	config := &DemoConfig{
 		ServerURL:   *serverURL,
-		DeviceID:    *deviceID,
+		MachineID:    *machineID,
 		UserID:      *userID,
-		DeviceToken: *deviceToken,
+		MachineToken: *machineToken,
 		WorkDir:     *workDir,
 		Command:     *cliType,
 	}
@@ -226,7 +226,7 @@ func main() {
 	var forwarder *WebForwarder
 	if !*headless && config.ServerURL != "" && config.UserID != "" {
 		var err error
-		forwarder, err = NewWebForwarder(config.ServerURL, config.DeviceID, config.UserID, config.DeviceToken)
+		forwarder, err = NewWebForwarder(config.ServerURL, config.MachineID, config.UserID, config.MachineToken)
 		if err != nil {
 			log.Printf("Warning: Could not connect to Web UI: %v", err)
 			log.Println("Running in standalone mode...")
@@ -251,7 +251,7 @@ func main() {
 			if forwarder != nil {
 				forwarder.SendMessage("chat:response", map[string]interface{}{
 					"sessionId": sessionID,
-					"deviceId":  config.DeviceID,
+					"machineId":  config.MachineID,
 					"content":   content,
 					"protocol":  manager.GetProtocolName(),
 				})
@@ -263,7 +263,7 @@ func main() {
 			if forwarder != nil {
 				forwarder.SendMessage("chat:thought", map[string]interface{}{
 					"sessionId": sessionID,
-					"deviceId":  config.DeviceID,
+					"machineId":  config.MachineID,
 					"content":   thought,
 					"protocol":  manager.GetProtocolName(),
 				})
@@ -285,7 +285,7 @@ func main() {
 			if forwarder != nil {
 				forwarder.SendMessage("tool:call", map[string]interface{}{
 					"sessionId": sessionID,
-					"deviceId":  config.DeviceID,
+					"machineId":  config.MachineID,
 					"toolCall":  toolCall,
 					"protocol":  manager.GetProtocolName(),
 				})
@@ -345,7 +345,7 @@ func main() {
 			if forwarder != nil {
 				forwarder.SendMessage("agent:status", map[string]interface{}{
 					"sessionId": sessionID,
-					"deviceId":  config.DeviceID,
+					"machineId":  config.MachineID,
 					"status":    status,
 					"protocol":  manager.GetProtocolName(),
 				})
@@ -357,7 +357,7 @@ func main() {
 				if forwarder != nil {
 					forwarder.SendMessage("session:usage", map[string]interface{}{
 						"sessionId": sessionID,
-						"deviceId":  config.DeviceID,
+						"machineId":  config.MachineID,
 						"usage": map[string]interface{}{
 							"inputTokens":   usage.InputTokens,
 							"outputTokens":  usage.OutputTokens,
@@ -375,7 +375,7 @@ func main() {
 			if forwarder != nil {
 				forwarder.SendMessage("session:error", map[string]interface{}{
 					"sessionId": sessionID,
-					"deviceId":  config.DeviceID,
+					"machineId":  config.MachineID,
 					"error":     msg.Content,
 					"protocol":  manager.GetProtocolName(),
 				})
@@ -417,7 +417,7 @@ func main() {
 	if forwarder != nil {
 		forwarder.SendMessage("session:started", map[string]interface{}{
 			"sessionId": sessionID,
-			"deviceId":  config.DeviceID,
+			"machineId":  config.MachineID,
 			"cliType":   config.Command,
 			"workDir":   config.WorkDir,
 		})
@@ -448,7 +448,7 @@ func main() {
 			if forwarder != nil {
 				forwarder.SendMessage("chat:send", map[string]interface{}{
 					"sessionId": sessionID,
-					"deviceId":  config.DeviceID,
+					"machineId":  config.MachineID,
 					"content":   input,
 				})
 			}
@@ -466,7 +466,7 @@ func main() {
 	if forwarder != nil {
 		forwarder.SendMessage("session:stopped", map[string]interface{}{
 			"sessionId": sessionID,
-			"deviceId":  config.DeviceID,
+			"machineId":  config.MachineID,
 		})
 	}
 

@@ -7,7 +7,7 @@ import (
 
 func setSessionEnv(t *testing.T, kv map[string]string) {
 	t.Helper()
-	for _, k := range []string{envSessionToken, envSessionID, envUserID, envShadowDevice, envAPIBaseURL} {
+	for _, k := range []string{envSessionToken, envSessionID, envUserID, envShadowMachine, envAPIBaseURL} {
 		t.Setenv(k, kv[k])
 	}
 }
@@ -15,7 +15,7 @@ func setSessionEnv(t *testing.T, kv map[string]string) {
 func TestFromSessionEnvBuildsConfigAndGatewayCredential(t *testing.T) {
 	setSessionEnv(t, map[string]string{
 		envSessionToken: "sst_abc", envSessionID: "s1", envUserID: "u1",
-		envShadowDevice: "cse_1", envAPIBaseURL: "https://api.example/",
+		envShadowMachine: "cse_1", envAPIBaseURL: "https://api.example/",
 	})
 	if !SessionEnvActive() {
 		t.Fatal("expected session mode")
@@ -24,7 +24,7 @@ func TestFromSessionEnvBuildsConfigAndGatewayCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.DeviceID != "cse_1" || cfg.UserID != "u1" || cfg.DeviceToken != "sst_abc" || cfg.ServerURL != "wss://api.example" {
+	if cfg.MachineID != "cse_1" || cfg.UserID != "u1" || cfg.MachineToken != "sst_abc" || cfg.ServerURL != "wss://api.example" {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 	if got := os.Getenv("ANTHROPIC_BASE_URL"); got != "https://api.example/api/sandbox/llm" {
@@ -38,7 +38,7 @@ func TestFromSessionEnvBuildsConfigAndGatewayCredential(t *testing.T) {
 func TestFromSessionEnvPinsCatalogModelWhenProvided(t *testing.T) {
 	setSessionEnv(t, map[string]string{
 		envSessionToken: "sst_abc", envSessionID: "s1", envUserID: "u1",
-		envShadowDevice: "cse_1", envAPIBaseURL: "https://api.example",
+		envShadowMachine: "cse_1", envAPIBaseURL: "https://api.example",
 	})
 	t.Setenv(envModel, "deepseek-flash")
 	for _, k := range []string{"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"} {
@@ -60,7 +60,7 @@ func TestFromSessionEnvFailsLoudlyWhenIncomplete(t *testing.T) {
 		t.Fatal("expected error for incomplete environment")
 	}
 	setSessionEnv(t, map[string]string{
-		envSessionToken: "not-sst", envSessionID: "s", envUserID: "u", envShadowDevice: "d", envAPIBaseURL: "https://x",
+		envSessionToken: "not-sst", envSessionID: "s", envUserID: "u", envShadowMachine: "d", envAPIBaseURL: "https://x",
 	})
 	if _, err := FromSessionEnv(); err == nil {
 		t.Fatal("expected error for non-session token")

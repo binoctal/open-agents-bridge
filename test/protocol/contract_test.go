@@ -20,10 +20,10 @@ type WireMessage struct {
 
 func TestWireMessageJSON(t *testing.T) {
 	msg := WireMessage{
-		Type: "device:online",
+		Type: "machine:online",
 		Payload: map[string]interface{}{
-			"deviceId":   "dev_1",
-			"deviceName": "Test Device",
+			"machineId":   "dev_1",
+			"machineName": "Test Machine",
 		},
 		Timestamp: 1716643200000,
 	}
@@ -38,8 +38,8 @@ func TestWireMessageJSON(t *testing.T) {
 		t.Fatalf("Unmarshal failed: %v", err)
 	}
 
-	if decoded.Type != "device:online" {
-		t.Errorf("Type = %s, want device:online", decoded.Type)
+	if decoded.Type != "machine:online" {
+		t.Errorf("Type = %s, want machine:online", decoded.Type)
 	}
 	if decoded.Timestamp != 1716643200000 {
 		t.Errorf("Timestamp = %d, want 1716643200000", decoded.Timestamp)
@@ -369,7 +369,7 @@ func TestPermissionResponseWirePayload(t *testing.T) {
 	// This is the payload the frontend sends for permission:response
 	payload := map[string]interface{}{
 		"id":       "perm_1",
-		"deviceId": "dev_1",
+		"machineId": "dev_1",
 		"approved": true,
 	}
 

@@ -67,7 +67,7 @@ func newDecisionBridge(t *testing.T, sink *decisionSink, autoRules []config.Auto
 	t.Helper()
 	h := permission.NewHandler()
 	b := &Bridge{
-		config:      &config.Config{DeviceID: "dev-1", ServerURL: sink.URL},
+		config:      &config.Config{MachineID: "dev-1", ServerURL: sink.URL},
 		permHandler: h,
 		rulesEngine: rules.NewEngine(autoRules),
 		msgBuffer:   NewMessageBuffer(DefaultBufferCapacity),

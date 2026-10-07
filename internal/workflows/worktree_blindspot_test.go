@@ -171,7 +171,7 @@ func TestSendTaskResultPayloadCarriesChangedFiles(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cm := NewCallbackManager(CallbackConfig{APIURL: srv.URL, DeviceID: "dev-1", UserID: "user-1", DeviceToken: "devtok"})
+	cm := NewCallbackManager(CallbackConfig{APIURL: srv.URL, MachineID: "dev-1", UserID: "user-1", MachineToken: "devtok"})
 
 	if err := cm.SendTaskResult(TaskResult{JobID: "j1", TaskID: "t1", Success: true, ChangedFiles: []string{"apps/api/solar.txt"}}); err != nil {
 		t.Fatalf("SendTaskResult: %v", err)

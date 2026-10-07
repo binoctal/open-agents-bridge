@@ -4,7 +4,7 @@ import "runtime"
 
 // Manager provides cross-platform service management
 type Manager interface {
-	Install(device string) error
+	Install(machine string) error
 	Uninstall() error
 	Start() error
 	Stop() error

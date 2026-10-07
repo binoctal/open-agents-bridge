@@ -120,7 +120,7 @@ func TestOrgSyncFailureLeavesUserRulesScanning(t *testing.T) {
 	b.syncOrgScannerRulesFromAPI()
 
 	if got := hits(b, "MYTOKEN"); !got["custom_mine"] {
-		t.Errorf("a failed org sync must not stop the device scanning, got %v", got)
+		t.Errorf("a failed org sync must not stop the machine scanning, got %v", got)
 	}
 }
 
@@ -151,7 +151,7 @@ func TestScannerRulesSyncMessageKeepsOrgRules(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // SaveScannerRules writes under the config dir
 
 	b := newRuleBridge()
-	b.config = &config.Config{DeviceID: "dev-1"}
+	b.config = &config.Config{MachineID: "dev-1"}
 	b.setOrgScannerRules([]scanner.CustomRuleDef{rule("org_secret", "ORGTOKEN")})
 
 	b.handleScannerRulesSync(Message{

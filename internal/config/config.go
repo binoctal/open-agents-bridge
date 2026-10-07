@@ -10,18 +10,18 @@ import (
 	"strings"
 )
 
-// Config represents a single device's configuration.
+// Config represents a single machine's configuration.
 // Used by bridge.go at runtime.
 type Config struct {
 	UserID      string `json:"userId"`
-	DeviceID    string `json:"deviceId"`
-	DeviceToken string `json:"deviceToken"`
+	MachineID    string `json:"machineId"`
+	MachineToken string `json:"machineToken"`
 	ServerURL   string `json:"serverUrl"`
 	PublicKey   string `json:"publicKey,omitempty"`
 	PrivateKey  string `json:"privateKey,omitempty"`
 	WebPubKey   string `json:"webPubKey,omitempty"`
 
-	// v1.1: Device config synced from Web
+	// v1.1: Machine config synced from Web
 	EnvVars     map[string]string `json:"envVars,omitempty"`
 	CLIEnabled  map[string]bool   `json:"cliEnabled,omitempty"`
 	CLIDetected map[string]bool   `json:"cliDetected,omitempty"` // auto-detected installed CLIs
@@ -53,8 +53,8 @@ type Config struct {
 	// v2.4: Environment setting (optional, auto-detected if not set)
 	Environment string `json:"environment,omitempty"`
 
-	// v2.5: Device name (key in the devices map)
-	DeviceName string `json:"-"`
+	// v2.5: Machine name (key in the machines map)
+	MachineName string `json:"-"`
 
 	// v2.6: I/O Logging for debugging and auditing
 	IOLogging *IOLoggingConfig `json:"ioLogging,omitempty"`
@@ -77,7 +77,7 @@ func (c *Config) PreviewBuildEffective() bool {
 
 // fileConfig is the top-level structure of ~/.open-agents-bridge/config.json
 type fileConfig struct {
-	Devices map[string]*Config `json:"devices"`
+	Machines map[string]*Config `json:"machines"`
 }
 
 // GetEnvironment returns the environment setting.
@@ -178,7 +178,7 @@ func loadFile() (*fileConfig, error) {
 	data, err := os.ReadFile(ConfigPath())
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &fileConfig{Devices: make(map[string]*Config)}, nil
+			return &fileConfig{Machines: make(map[string]*Config)}, nil
 		}
 		return nil, err
 	}
@@ -188,24 +188,24 @@ func loadFile() (*fileConfig, error) {
 	// Best-effort — a chmod failure never blocks startup.
 	_ = os.Chmod(ConfigPath(), 0600)
 
-	// Detect format: check if "devices" key exists
+	// Detect format: check if "machines" key exists
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
 
-	if _, ok := raw["devices"]; ok {
+	if _, ok := raw["machines"]; ok {
 		// New unified format
 		var fc fileConfig
 		if err := json.Unmarshal(data, &fc); err != nil {
 			return nil, err
 		}
-		if fc.Devices == nil {
-			fc.Devices = make(map[string]*Config)
+		if fc.Machines == nil {
+			fc.Machines = make(map[string]*Config)
 		}
-		// Set DeviceName on each device
-		for name, cfg := range fc.Devices {
-			cfg.DeviceName = name
+		// Set MachineName on each machine
+		for name, cfg := range fc.Machines {
+			cfg.MachineName = name
 		}
 		return &fc, nil
 	}
@@ -216,14 +216,14 @@ func loadFile() (*fileConfig, error) {
 		return nil, err
 	}
 
-	name := cfg.DeviceName
+	name := cfg.MachineName
 	if name == "" {
 		name = "default"
 	}
-	cfg.DeviceName = name
+	cfg.MachineName = name
 
 	fc := &fileConfig{
-		Devices: map[string]*Config{name: &cfg},
+		Machines: map[string]*Config{name: &cfg},
 	}
 
 	// Auto-save in new format
@@ -273,65 +273,65 @@ func initConfig(cfg *Config) {
 // Public API
 // ============================================
 
-// Save persists a device's config into the unified file.
-// Uses cfg.DeviceName as the key.
+// Save persists a machine's config into the unified file.
+// Uses cfg.MachineName as the key.
 func Save(cfg *Config) error {
 	fc, err := loadFile()
 	if err != nil {
-		fc = &fileConfig{Devices: make(map[string]*Config)}
+		fc = &fileConfig{Machines: make(map[string]*Config)}
 	}
-	if fc.Devices == nil {
-		fc.Devices = make(map[string]*Config)
+	if fc.Machines == nil {
+		fc.Machines = make(map[string]*Config)
 	}
 
-	name := cfg.DeviceName
+	name := cfg.MachineName
 	if name == "" {
 		name = "default"
 	}
-	cfg.DeviceName = name
+	cfg.MachineName = name
 
-	fc.Devices[name] = cfg
+	fc.Machines[name] = cfg
 
 	return saveFile(fc)
 }
 
-// LoadDevice loads a specific device's config.
-func LoadDevice(name string) (*Config, error) {
+// LoadMachine loads a specific machine's config.
+func LoadMachine(name string) (*Config, error) {
 	fc, err := loadFile()
 	if err != nil {
 		return nil, err
 	}
 
-	cfg, ok := fc.Devices[name]
+	cfg, ok := fc.Machines[name]
 	if !ok {
-		return nil, fmt.Errorf("device '%s' not found", name)
+		return nil, fmt.Errorf("machine '%s' not found", name)
 	}
 
-	cfg.DeviceName = name
+	cfg.MachineName = name
 	initConfig(cfg)
 	return cfg, nil
 }
 
-// SaveDevice saves a device's config with an explicit name.
-func SaveDevice(name string, cfg *Config) error {
-	cfg.DeviceName = name
+// SaveMachine saves a machine's config with an explicit name.
+func SaveMachine(name string, cfg *Config) error {
+	cfg.MachineName = name
 	return Save(cfg)
 }
 
-// DeleteDevice removes a device from the config file.
-func DeleteDevice(name string) error {
+// DeleteMachine removes a machine from the config file.
+func DeleteMachine(name string) error {
 	fc, err := loadFile()
 	if err != nil {
 		return err
 	}
 
-	delete(fc.Devices, name)
+	delete(fc.Machines, name)
 
 	return saveFile(fc)
 }
 
-// ListDevices returns all device names, sorted.
-func ListDevices() ([]string, error) {
+// ListMachines returns all machine names, sorted.
+func ListMachines() ([]string, error) {
 	fc, err := loadFile()
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -340,21 +340,21 @@ func ListDevices() ([]string, error) {
 		return nil, err
 	}
 
-	names := make([]string, 0, len(fc.Devices))
-	for name := range fc.Devices {
+	names := make([]string, 0, len(fc.Machines))
+	for name := range fc.Machines {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	return names, nil
 }
 
-// DeviceExists checks if a device config exists.
-func DeviceExists(name string) bool {
+// MachineExists checks if a machine config exists.
+func MachineExists(name string) bool {
 	fc, err := loadFile()
 	if err != nil {
 		return false
 	}
-	_, ok := fc.Devices[name]
+	_, ok := fc.Machines[name]
 	return ok
 }
 

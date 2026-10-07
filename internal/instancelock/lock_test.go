@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func TestSecondAcquireOnSameDeviceFails(t *testing.T) {
+func TestSecondAcquireOnSameMachineFails(t *testing.T) {
 	path := PathFor(t.TempDir(), "dev-a")
 	l1, err := Acquire(path)
 	if err != nil {
@@ -32,7 +32,7 @@ func TestSecondAcquireOnSameDeviceFails(t *testing.T) {
 	}
 }
 
-func TestDifferentDevicesDoNotExclude(t *testing.T) {
+func TestDifferentMachinesDoNotExclude(t *testing.T) {
 	dir := t.TempDir()
 	a, err := Acquire(PathFor(dir, "dev-a"))
 	if err != nil {
@@ -41,7 +41,7 @@ func TestDifferentDevicesDoNotExclude(t *testing.T) {
 	defer a.Close()
 	b, err := Acquire(PathFor(dir, "dev-b"))
 	if err != nil {
-		t.Fatalf("different device must not be blocked: %v", err)
+		t.Fatalf("different machine must not be blocked: %v", err)
 	}
 	b.Close()
 }
@@ -61,10 +61,10 @@ func TestReleaseAllowsReacquire(t *testing.T) {
 	l2.Close()
 }
 
-func TestPathForSanitizesDeviceID(t *testing.T) {
+func TestPathForSanitizesMachineID(t *testing.T) {
 	p := PathFor("/cfg", "../evil/id")
 	if filepath.Dir(p) != "/cfg" {
-		t.Fatalf("device id escaped the config dir: %s", p)
+		t.Fatalf("machine id escaped the config dir: %s", p)
 	}
 }
 

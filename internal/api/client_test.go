@@ -27,7 +27,7 @@ func TestNewClient_WSConversion(t *testing.T) {
 }
 
 func TestNewClient_WSSuffixStripped(t *testing.T) {
-	cfg := &config.Config{ServerURL: "https://api.example.com/ws", DeviceToken: "tok123"}
+	cfg := &config.Config{ServerURL: "https://api.example.com/ws", MachineToken: "tok123"}
 	c := NewClient(cfg)
 	if c.baseURL != "https://api.example.com" {
 		t.Errorf("expected https://api.example.com, got %s", c.baseURL)
@@ -50,7 +50,7 @@ func TestClient_GetPermissionRules(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	cfg := &config.Config{ServerURL: server.URL, MachineToken: "tok123"}
 	c := NewClient(cfg)
 
 	rules, err := c.GetPermissionRules("")
@@ -74,7 +74,7 @@ func TestClient_GetAgentConfig(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok"}
+	cfg := &config.Config{ServerURL: server.URL, MachineToken: "tok"}
 	c := NewClient(cfg)
 
 	agentCfg, err := c.GetAgentConfig("agent1")
@@ -95,7 +95,7 @@ func TestClient_ReportSession(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok"}
+	cfg := &config.Config{ServerURL: server.URL, MachineToken: "tok"}
 	c := NewClient(cfg)
 
 	err := c.ReportSession(SessionReport{SessionID: "s1", CLIType: "claude"})
@@ -111,7 +111,7 @@ func TestClient_ApiError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "bad"}
+	cfg := &config.Config{ServerURL: server.URL, MachineToken: "bad"}
 	c := NewClient(cfg)
 
 	_, err := c.GetPermissionRules("")
@@ -156,7 +156,7 @@ func TestClient_CreatePreview(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	cfg := &config.Config{ServerURL: server.URL, MachineToken: "tok123"}
 	c := NewClient(cfg)
 
 	resp, err := c.CreatePreview("mission-1", []PreviewFile{{Path: "index.html", SHA256: "abc", Size: 5}}, &DeclarePreviewMeta{HTMLRewrites: 2, FileCount: 1})
@@ -180,7 +180,7 @@ func TestClient_CreatePreview_QuotaError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	cfg := &config.Config{ServerURL: server.URL, MachineToken: "tok123"}
 	c := NewClient(cfg)
 
 	_, err := c.CreatePreview("mission-1", []PreviewFile{{Path: "index.html", SHA256: "abc", Size: 5}}, nil)
@@ -212,7 +212,7 @@ func TestClient_CompletePreview(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	cfg := &config.Config{ServerURL: server.URL, MachineToken: "tok123"}
 	c := NewClient(cfg)
 
 	if err := c.CompletePreview("mission-1", "p1", CompletePreviewBody{TaskID: "merge", Kind: "static"}); err != nil {
@@ -236,7 +236,7 @@ func TestClient_CompletePreview_EmptyBodySendsNoJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	cfg := &config.Config{ServerURL: server.URL, MachineToken: "tok123"}
 	c := NewClient(cfg)
 
 	if err := c.CompletePreview("mission-1", "p1", CompletePreviewBody{}); err != nil {
@@ -263,7 +263,7 @@ func TestClient_ReportArtifactKind(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	cfg := &config.Config{ServerURL: server.URL, MachineToken: "tok123"}
 	c := NewClient(cfg)
 
 	if err := c.ReportArtifactKind("mission-1", "runtime"); err != nil {
@@ -284,7 +284,7 @@ func TestClient_GetPendingRevives(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	cfg := &config.Config{ServerURL: server.URL, MachineToken: "tok123"}
 	c := NewClient(cfg)
 
 	revives, err := c.GetPendingRevives()
@@ -309,7 +309,7 @@ func TestClient_UploadPreviewFile(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	cfg := &config.Config{ServerURL: server.URL, MachineToken: "tok123"}
 	c := NewClient(cfg)
 
 	if err := c.UploadPreviewFile(server.URL+"/put-target", []byte("hello world")); err != nil {
@@ -326,7 +326,7 @@ func TestClient_UploadPreviewFile_NonSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := &config.Config{ServerURL: server.URL, DeviceToken: "tok123"}
+	cfg := &config.Config{ServerURL: server.URL, MachineToken: "tok123"}
 	c := NewClient(cfg)
 
 	if err := c.UploadPreviewFile(server.URL, []byte("data")); err == nil {

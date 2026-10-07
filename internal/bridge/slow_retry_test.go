@@ -8,7 +8,7 @@ import (
 // Known-issue #22: when the reconnect time budget was exhausted the readLoop
 // returned, but Start() blocks on <-b.done — the process stayed alive with no
 // WS, no heartbeats, and no exit, holding task sessions, worktrees, and the
-// device slot as a half-live zombie. The fix: never give up; fall back to a
+// machine slot as a half-live zombie. The fix: never give up; fall back to a
 // slow keep-alive cadence (one attempt every slowRetryInterval) so the bridge
 // self-recovers when the server returns.
 func TestSlowRetryMode(t *testing.T) {

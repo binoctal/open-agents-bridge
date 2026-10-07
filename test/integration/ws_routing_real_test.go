@@ -23,12 +23,12 @@ type devSetupResponse struct {
 	User *struct {
 		ID string `json:"id"`
 	} `json:"user"`
-	Device *struct {
+	Machine *struct {
 		ID    string `json:"id"`
 		Token string `json:"token"`
-	} `json:"device"`
+	} `json:"machine"`
 	UserID   string `json:"userId"`
-	DeviceID string `json:"deviceId"`
+	MachineID string `json:"machineId"`
 }
 
 // loginResponse mirrors the API response from POST /api/auth/login
@@ -53,7 +53,7 @@ func isAPIRunning() bool {
 	return resp.StatusCode == 200
 }
 
-func createRealTestUser(t *testing.T, suffix int64) (userID, deviceID, deviceToken, jwt string) {
+func createRealTestUser(t *testing.T, suffix int64) (userID, machineID, machineToken, jwt string) {
 	t.Helper()
 
 	// POST /api/dev/setup
@@ -79,11 +79,11 @@ func createRealTestUser(t *testing.T, suffix int64) (userID, deviceID, deviceTok
 	if userID == "" {
 		userID = setup.User.ID
 	}
-	deviceID = setup.DeviceID
-	if deviceID == "" {
-		deviceID = setup.Device.ID
+	machineID = setup.MachineID
+	if machineID == "" {
+		machineID = setup.Machine.ID
 	}
-	deviceToken = setup.Device.Token
+	machineToken = setup.Machine.Token
 
 	// POST /api/auth/login
 	loginPayload, _ := json.Marshal(map[string]string{"email": email, "password": "testpassword123"})
@@ -102,9 +102,9 @@ func createRealTestUser(t *testing.T, suffix int64) (userID, deviceID, deviceTok
 	return
 }
 
-func connectBridgeWS(t *testing.T, userID, deviceToken, deviceID string) *websocket.Conn {
+func connectBridgeWS(t *testing.T, userID, machineToken, machineID string) *websocket.Conn {
 	t.Helper()
-	url := fmt.Sprintf("%s/ws/%s?type=bridge&token=%s&deviceId=%s", wsBase, userID, deviceToken, deviceID)
+	url := fmt.Sprintf("%s/ws/%s?type=bridge&token=%s&machineId=%s", wsBase, userID, machineToken, machineID)
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		t.Fatalf("Bridge WS connect failed: %v", err)
@@ -145,16 +145,16 @@ func waitForWSType(t *testing.T, conn *websocket.Conn, msgType string, timeout t
 
 // ─── Tests ───
 
-func TestBridgeWSConnectBroadcastsDeviceOnline(t *testing.T) {
+func TestBridgeWSConnectBroadcastsMachineOnline(t *testing.T) {
 	if !isAPIRunning() {
 		t.Skip("API server not running on :8989")
 	}
 
 	suffix := time.Now().UnixNano()
-	userID, deviceID, deviceToken, jwt := createRealTestUser(t, suffix)
+	userID, machineID, machineToken, jwt := createRealTestUser(t, suffix)
 
 	// Connect bridge
-	bridgeWS := connectBridgeWS(t, userID, deviceToken, deviceID)
+	bridgeWS := connectBridgeWS(t, userID, machineToken, machineID)
 	defer bridgeWS.Close()
 
 	time.Sleep(300 * time.Millisecond)
@@ -163,40 +163,40 @@ func TestBridgeWSConnectBroadcastsDeviceOnline(t *testing.T) {
 	webWS := connectWebWS(t, userID, jwt)
 	defer webWS.Close()
 
-	// Web should receive devices:sync containing the bridge device
-	msg := waitForWSType(t, webWS, "devices:sync", 5*time.Second)
+	// Web should receive machines:sync containing the bridge machine
+	msg := waitForWSType(t, webWS, "machines:sync", 5*time.Second)
 
 	payloadBytes, _ := json.Marshal(msg.Payload)
 	var payload struct {
-		Devices []struct {
-			DeviceID string `json:"deviceId"`
-		} `json:"devices"`
+		Machines []struct {
+			MachineID string `json:"machineId"`
+		} `json:"machines"`
 	}
 	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-		t.Fatalf("Failed to parse devices:sync payload: %v", err)
+		t.Fatalf("Failed to parse machines:sync payload: %v", err)
 	}
 
 	found := false
-	for _, d := range payload.Devices {
-		if d.DeviceID == deviceID {
+	for _, d := range payload.Machines {
+		if d.MachineID == machineID {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("devices:sync does not contain device %s", deviceID)
+		t.Errorf("machines:sync does not contain machine %s", machineID)
 	}
 }
 
-func TestBridgeDisconnectBroadcastsDeviceOffline(t *testing.T) {
+func TestBridgeDisconnectBroadcastsMachineOffline(t *testing.T) {
 	if !isAPIRunning() {
 		t.Skip("API server not running on :8989")
 	}
 
 	suffix := time.Now().UnixNano()
-	userID, deviceID, deviceToken, jwt := createRealTestUser(t, suffix)
+	userID, machineID, machineToken, jwt := createRealTestUser(t, suffix)
 
-	bridgeWS := connectBridgeWS(t, userID, deviceToken, deviceID)
+	bridgeWS := connectBridgeWS(t, userID, machineToken, machineID)
 	defer bridgeWS.Close()
 
 	time.Sleep(300 * time.Millisecond)
@@ -204,25 +204,25 @@ func TestBridgeDisconnectBroadcastsDeviceOffline(t *testing.T) {
 	webWS := connectWebWS(t, userID, jwt)
 	defer webWS.Close()
 
-	// Consume devices:sync
-	waitForWSType(t, webWS, "devices:sync", 5*time.Second)
+	// Consume machines:sync
+	waitForWSType(t, webWS, "machines:sync", 5*time.Second)
 
 	// Disconnect bridge
 	bridgeWS.WriteMessage(websocket.CloseMessage,
 		websocket.FormatCloseMessage(1000, "test cleanup"))
 	bridgeWS.Close()
 
-	// Web should get device:offline
-	msg := waitForWSType(t, webWS, "device:offline", 5*time.Second)
+	// Web should get machine:offline
+	msg := waitForWSType(t, webWS, "machine:offline", 5*time.Second)
 	payloadBytes, _ := json.Marshal(msg.Payload)
 	var payload struct {
-		DeviceID string `json:"deviceId"`
+		MachineID string `json:"machineId"`
 	}
 	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-		t.Fatalf("Failed to parse device:offline payload: %v", err)
+		t.Fatalf("Failed to parse machine:offline payload: %v", err)
 	}
-	if payload.DeviceID != deviceID {
-		t.Errorf("device:offline deviceId = %s, want %s", payload.DeviceID, deviceID)
+	if payload.MachineID != machineID {
+		t.Errorf("machine:offline machineId = %s, want %s", payload.MachineID, machineID)
 	}
 }
 
@@ -232,22 +232,22 @@ func TestMessageRoutingsessionOutput(t *testing.T) {
 	}
 
 	suffix := time.Now().UnixNano()
-	userID, deviceID, deviceToken, jwt := createRealTestUser(t, suffix)
+	userID, machineID, machineToken, jwt := createRealTestUser(t, suffix)
 
-	bridgeWS := connectBridgeWS(t, userID, deviceToken, deviceID)
+	bridgeWS := connectBridgeWS(t, userID, machineToken, machineID)
 	defer bridgeWS.Close()
 	time.Sleep(300 * time.Millisecond)
 
 	webWS := connectWebWS(t, userID, jwt)
 	defer webWS.Close()
-	waitForWSType(t, webWS, "devices:sync", 5*time.Second)
+	waitForWSType(t, webWS, "machines:sync", 5*time.Second)
 
 	// Bridge sends session:output
 	msg := wsMessage{
 		Type: "session:output",
 		Payload: map[string]interface{}{
 			"sessionId":  "sess_go_1",
-			"deviceId":   deviceID,
+			"machineId":   machineID,
 			"outputType": "stdout",
 			"content":    "Hello from Go bridge",
 		},
@@ -286,15 +286,15 @@ func TestPermissionRoundTrip(t *testing.T) {
 	}
 
 	suffix := time.Now().UnixNano()
-	userID, deviceID, deviceToken, jwt := createRealTestUser(t, suffix)
+	userID, machineID, machineToken, jwt := createRealTestUser(t, suffix)
 
-	bridgeWS := connectBridgeWS(t, userID, deviceToken, deviceID)
+	bridgeWS := connectBridgeWS(t, userID, machineToken, machineID)
 	defer bridgeWS.Close()
 	time.Sleep(300 * time.Millisecond)
 
 	webWS := connectWebWS(t, userID, jwt)
 	defer webWS.Close()
-	waitForWSType(t, webWS, "devices:sync", 5*time.Second)
+	waitForWSType(t, webWS, "machines:sync", 5*time.Second)
 
 	// Bridge sends permission:request
 	reqMsg := wsMessage{
@@ -302,7 +302,7 @@ func TestPermissionRoundTrip(t *testing.T) {
 		Payload: map[string]interface{}{
 			"id":          "perm_go_1",
 			"sessionId":   "sess_perm",
-			"deviceId":    deviceID,
+			"machineId":    machineID,
 			"toolName":    "Bash",
 			"description": "Run bash command",
 			"risk":        "high",
@@ -320,7 +320,7 @@ func TestPermissionRoundTrip(t *testing.T) {
 		Type: "permission:response",
 		Payload: map[string]interface{}{
 			"id":       "perm_go_1",
-			"deviceId": deviceID,
+			"machineId": machineID,
 			"approved": true,
 		},
 		Timestamp: time.Now().UnixMilli(),

@@ -305,7 +305,7 @@ func GetBranchName(jobID, taskID string) string {
 	return fmt.Sprintf("task-%s-%s", jobID, taskID)
 }
 
-// BranchSpec defines a branch to merge in multi-device workflows
+// BranchSpec defines a branch to merge in multi-machine workflows
 type BranchSpec struct {
 	TaskID     string
 	BranchName string

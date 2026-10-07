@@ -6,16 +6,16 @@ import (
 	"strings"
 )
 
-// Cloud interactive session mode (cloud-session-shadow-device §5): the runner
+// Cloud interactive session mode (cloud-session-shadow-machine §5): the runner
 // container has no config.json and no pairing. Its whole identity arrives as
 // environment variables set by the hosting-agent, and the sst_ session token
-// plays the role of the device token on the WS URL and every Bearer call
+// plays the role of the machine token on the WS URL and every Bearer call
 // (the API recognises the prefix and binds it to exactly one session).
 const (
 	envSessionToken = "SESSION_TOKEN"
 	envSessionID    = "SESSION_ID"
 	envUserID       = "USER_ID"
-	envShadowDevice = "SHADOW_DEVICE_ID"
+	envShadowMachine = "SHADOW_MACHINE_ID"
 	envAPIBaseURL   = "API_BASE_URL"
 	// envModel is the catalog model the platform picked for this session. The
 	// gateway refuses any model outside its catalog, and Claude Code's own
@@ -25,7 +25,7 @@ const (
 
 // SessionEnvActive reports whether the process was launched as a cloud
 // session container. SESSION_TOKEN alone decides: a half-configured container
-// must fail loudly in FromSessionEnv rather than fall back to a device login.
+// must fail loudly in FromSessionEnv rather than fall back to a machine login.
 func SessionEnvActive() bool {
 	return os.Getenv(envSessionToken) != ""
 }
@@ -57,7 +57,7 @@ func FromSessionEnv() (*Config, error) {
 	}
 	token := get(envSessionToken)
 	userID := get(envUserID)
-	deviceID := get(envShadowDevice)
+	machineID := get(envShadowMachine)
 	apiBase := strings.TrimRight(get(envAPIBaseURL), "/")
 	get(envSessionID)
 	if len(missing) > 0 {
@@ -88,9 +88,9 @@ func FromSessionEnv() (*Config, error) {
 
 	return &Config{
 		UserID:      userID,
-		DeviceID:    deviceID,
-		DeviceToken: token,
+		MachineID:    machineID,
+		MachineToken: token,
 		ServerURL:   wsBaseURL(apiBase),
-		DeviceName:  "cloud-session",
+		MachineName:  "cloud-session",
 	}, nil
 }

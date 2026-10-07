@@ -59,7 +59,7 @@ func TestSendSessionRestoreOnlyFetchesAndForwards(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	b := &Bridge{
-		config:            &config.Config{ServerURL: srv.URL, DeviceID: "dev-restore", DeviceToken: "token-restore"},
+		config:            &config.Config{ServerURL: srv.URL, MachineID: "dev-restore", MachineToken: "token-restore"},
 		sessions:          session.NewManager(),
 		reconnectStrategy: reconnect.NewStrategy(),
 		stateManager:      NewStateManager(),
@@ -70,7 +70,7 @@ func TestSendSessionRestoreOnlyFetchesAndForwards(t *testing.T) {
 	b.sendSessionRestore()
 
 	if gotPath != "/api/bridge/sessions?limit=20" {
-		t.Fatalf("restore fetched %q, want /api/bridge/sessions?limit=20 (device-token endpoint, no deviceId param)", gotPath)
+		t.Fatalf("restore fetched %q, want /api/bridge/sessions?limit=20 (machine-token endpoint, no machineId param)", gotPath)
 	}
 	if got := b.stateManager.GetState(); got != StateConnected {
 		t.Fatalf("sendSessionRestore() changed state to %v; it must not touch connection state", got)

@@ -1,4 +1,4 @@
 {"adapterVersion":"fixture","cliType":"bridge","kind":"header","recipe":"success-path (see test/fixtures/replay/README.md)","recordedAt":"2026-09-01T00:00:00Z"}
-{"channel":"ws","kind":"event","payload":{"deviceId":"device-replay","executorKind":"bridge","jobId":"job-success","taskId":"task-success"},"seq":0,"type":"workflow:task_started"}
-{"channel":"ws","kind":"event","payload":{"deviceId":"device-replay","executorKind":"bridge","jobId":"job-success","progress":0,"step":"started","taskId":"task-success"},"seq":1,"type":"workflow:task_progress"}
+{"channel":"ws","kind":"event","payload":{"machineId":"machine-replay","executorKind":"bridge","jobId":"job-success","taskId":"task-success"},"seq":0,"type":"workflow:task_started"}
+{"channel":"ws","kind":"event","payload":{"machineId":"machine-replay","executorKind":"bridge","jobId":"job-success","progress":0,"step":"started","taskId":"task-success"},"seq":1,"type":"workflow:task_progress"}
 {"channel":"callback","kind":"event","payload":{"artifacts":"Fixture task output: wrote greeting.txt.\n","attempt":1,"commitHash":"","jobId":"job-success","missionId":"job-success","summary":"Fixture task output: wrote greeting.txt.\n","taskId":"task-success","userId":"user-replay"},"seq":2,"type":"workflow:task_result"}

@@ -238,7 +238,7 @@ func credentialHealthDetail(h session.CredentialHealth) (string, bool) {
 // an optional structured error code (engine-explicit-auth) riding alongside
 // the status for auth_required renderings.
 func (b *Bridge) sendStatus(sessionID, protocolName string, status protocol.AgentStatus, detail, code string) {
-	payload := statusPayload(b.config.DeviceID, sessionID, protocolName, status, detail, code)
+	payload := statusPayload(b.config.MachineID, sessionID, protocolName, status, detail, code)
 	b.sendMessage(Message{
 		Type:      "agent:status",
 		Payload:   payload,
@@ -249,10 +249,10 @@ func (b *Bridge) sendStatus(sessionID, protocolName string, status protocol.Agen
 
 // statusPayload builds the agent:status payload. Pure so the field contract
 // (enum-only status, optional detail/code) is unit-testable without a WS.
-func statusPayload(deviceID, sessionID, protocolName string, status protocol.AgentStatus, detail, code string) map[string]interface{} {
+func statusPayload(machineID, sessionID, protocolName string, status protocol.AgentStatus, detail, code string) map[string]interface{} {
 	payload := map[string]interface{}{
 		"sessionId": sessionID,
-		"deviceId":  deviceID,
+		"machineId":  machineID,
 		"status":    status,
 		"protocol":  protocolName,
 	}

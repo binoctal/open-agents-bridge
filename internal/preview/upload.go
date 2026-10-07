@@ -307,7 +307,7 @@ func uploadStaticTree(client Uploader, cache *Cache, jobID, outputDir, taskID, k
 
 // RunRevive re-uploads a mission's cached artifact without rebuilding —
 // the bridge's response to a GET .../pending-revives entry (task 4.4). If
-// nothing is cached (never built on this device, or the cache was cleared),
+// nothing is cached (never built on this machine, or the cache was cleared),
 // it logs and skips: the user gets no preview until the mission runs (and
 // merges) again.
 //

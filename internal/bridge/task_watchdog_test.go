@@ -21,7 +21,7 @@ func (f *sendErrorAdapter) SendMessage(protocol.Message) error {
 func newWatchdogBridge(t *testing.T) *Bridge {
 	t.Helper()
 	return &Bridge{
-		config:         &config.Config{DeviceID: "device-wd"},
+		config:         &config.Config{MachineID: "machine-wd"},
 		sessions:       session.NewManager(),
 		statusTrackers: make(map[string]*statusTracker),
 		taskMeta:       make(map[string]*taskMeta),

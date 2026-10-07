@@ -13,7 +13,7 @@ import (
 
 // updateLastSeen must treat a non-2xx response as a heartbeat failure. It
 // used to reset the failure counter before looking at the status, so a
-// persistent 401 (stale device token) only DEBUG-logged and the 5-failure
+// persistent 401 (stale machine token) only DEBUG-logged and the 5-failure
 // reconnect never fired — the bridge sat on a dead credential forever.
 
 func newHeartbeatBridge(t *testing.T, status int) (*Bridge, *httptest.Server) {
@@ -27,8 +27,8 @@ func newHeartbeatBridge(t *testing.T, status int) (*Bridge, *httptest.Server) {
 		config: &config.Config{
 			// updateLastSeen derives the API base from the WS URL (ws->http).
 			ServerURL:   "ws" + strings.TrimPrefix(srv.URL, "http"),
-			DeviceID:    "device-hb",
-			DeviceToken: "token-hb",
+			MachineID:    "machine-hb",
+			MachineToken: "token-hb",
 		},
 		sessions:          session.NewManager(),
 		httpClient:        &http.Client{},

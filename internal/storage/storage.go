@@ -20,7 +20,7 @@ type Message struct {
 // SessionHistory stores messages for a session
 type SessionHistory struct {
 	SessionID string    `json:"sessionId"`
-	DeviceID  string    `json:"deviceId"`
+	MachineID  string    `json:"machineId"`
 	CLIType   string    `json:"cliType"`
 	WorkDir   string    `json:"workDir"`
 	Messages  []Message `json:"messages"`
@@ -49,13 +49,13 @@ func NewStore(dir string) (*Store, error) {
 }
 
 // CreateSession creates a new session
-func (s *Store) CreateSession(sessionID, deviceID, cliType, workDir string) *SessionHistory {
+func (s *Store) CreateSession(sessionID, machineID, cliType, workDir string) *SessionHistory {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	h := &SessionHistory{
 		SessionID: sessionID,
-		DeviceID:  deviceID,
+		MachineID:  machineID,
 		CLIType:   cliType,
 		WorkDir:   workDir,
 		Messages:  []Message{},

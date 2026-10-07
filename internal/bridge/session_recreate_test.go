@@ -25,7 +25,7 @@ import (
 func newSendBridge(t *testing.T) *Bridge {
 	t.Helper()
 	return &Bridge{
-		config:         &config.Config{DeviceID: "dev-recreate"},
+		config:         &config.Config{MachineID: "dev-recreate"},
 		scanner:        scannerpkg.New(),
 		sessions:       sessionpkg.NewManager(),
 		msgBuffer:      NewMessageBuffer(DefaultBufferCapacity),
@@ -70,7 +70,7 @@ func TestSessionSendAutoRecreateNoWorkDirRefused(t *testing.T) {
 		Type: "session:send",
 		Payload: map[string]interface{}{
 			"sessionId": "sess-noparams",
-			"deviceId":  "dev-recreate",
+			"machineId":  "dev-recreate",
 			"content":   "hello",
 		},
 		Timestamp: time.Now().UnixMilli(),
@@ -107,7 +107,7 @@ func TestSessionSendAutoRecreateWithParamsLandsInWorkDir(t *testing.T) {
 		Type: "session:send",
 		Payload: map[string]interface{}{
 			"sessionId":      "sess-withparams",
-			"deviceId":       "dev-recreate",
+			"machineId":       "dev-recreate",
 			"content":        "hello",
 			"cliType":        "replay",
 			"workDir":        dir,
@@ -143,7 +143,7 @@ func TestSessionSendAutoRecreateWithParamsLandsInWorkDir(t *testing.T) {
 // code field (the web branch reads payload.code).
 func TestSessionRecreateErrorPayloadShape(t *testing.T) {
 	_, err := json.Marshal(map[string]interface{}{
-		"sessionId": "s", "deviceId": "d", "error": "boom", "code": "PARAM_MISSING",
+		"sessionId": "s", "machineId": "d", "error": "boom", "code": "PARAM_MISSING",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -165,7 +165,7 @@ func TestSessionResumeControlledRecreate(t *testing.T) {
 		Type: "session:resume",
 		Payload: map[string]interface{}{
 			"sessionId":      "sess-resume",
-			"deviceId":       "dev-recreate",
+			"machineId":       "dev-recreate",
 			"cliType":        "replay",
 			"workDir":        dir,
 			"permissionMode": "default",
@@ -204,7 +204,7 @@ func TestSessionResumeNoParamsStillFails(t *testing.T) {
 		Type: "session:resume",
 		Payload: map[string]interface{}{
 			"sessionId": "sess-resume-bare",
-			"deviceId":  "dev-recreate",
+			"machineId":  "dev-recreate",
 		},
 		Timestamp: time.Now().UnixMilli(),
 	})

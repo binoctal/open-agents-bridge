@@ -28,7 +28,7 @@ func main() {
 
 	// Connect as web client
 	url := fmt.Sprintf("ws://localhost:8787/ws/%s?type=web&token=%s",
-		cfg.UserID, cfg.DeviceToken)
+		cfg.UserID, cfg.MachineToken)
 
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
@@ -42,7 +42,7 @@ func main() {
 	msg := Message{
 		Type: "session:start",
 		Payload: map[string]interface{}{
-			"deviceId": cfg.DeviceID,
+			"machineId": cfg.MachineID,
 			"cliType":  "claude",
 			"workDir":  ".",
 			"command":  "chat \"Hello, what's 2+2?\"",

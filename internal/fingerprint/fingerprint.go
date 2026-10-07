@@ -1,5 +1,5 @@
 // Package fingerprint derives the machine hint sent at pairing time
-// (device-model-ia D3). It is only a duplicate-pairing hint for the user: the
+// (machine-model-ia D3). It is only a duplicate-pairing hint for the user: the
 // server never uses it for quota or access decisions, and only a hash leaves
 // the machine.
 package fingerprint

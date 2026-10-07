@@ -85,7 +85,7 @@ func TestConnectQueryAndKeepAliveCarryInstanceID(t *testing.T) {
 	defer srv.Close()
 
 	b := &Bridge{
-		config:     &config.Config{ServerURL: "ws" + strings.TrimPrefix(srv.URL, "http"), UserID: "u1", DeviceID: "d1", DeviceToken: "t"},
+		config:     &config.Config{ServerURL: "ws" + strings.TrimPrefix(srv.URL, "http"), UserID: "u1", MachineID: "d1", MachineToken: "t"},
 		instanceID: newInstanceID(),
 		done:       make(chan struct{}),
 	}
@@ -124,7 +124,7 @@ func TestKeepAliveSkippedWhileStandbyOrRecentTraffic(t *testing.T) {
 	defer srv.Close()
 
 	b := &Bridge{
-		config:        &config.Config{ServerURL: "ws" + strings.TrimPrefix(srv.URL, "http"), UserID: "u1", DeviceID: "d1"},
+		config:        &config.Config{ServerURL: "ws" + strings.TrimPrefix(srv.URL, "http"), UserID: "u1", MachineID: "d1"},
 		instanceID:    "x",
 		done:          make(chan struct{}),
 		keepAliveDone: make(chan struct{}),

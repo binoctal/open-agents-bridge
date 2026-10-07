@@ -1,6 +1,6 @@
 {
   "_comment": "Open Agents Bridge 配置文件示例",
-  "_docs": "运行 'open-agents pair --name <device-name>' 添加设备",
+  "_docs": "运行 'open-agents pair --name <machine-name>' 添加设备",
 
   "_serverUrl_comment": "服务器地址，根据环境选择",
   "serverUrl": "wss://api.openagents.top",

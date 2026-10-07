@@ -7,7 +7,7 @@ import (
 )
 
 // fix-session-workdir-tilde: the default workDir sent by web is `~`, which
-// bridge must expand to the device home before spawn — otherwise cmd.Dir
+// bridge must expand to the machine home before spawn — otherwise cmd.Dir
 // chdirs into a literal "~" directory and creation always fails with a
 // misleading "fork/exec <cmd>: no such file or directory".
 //
@@ -29,7 +29,7 @@ func TestSessionStartExpandsTildeWorkDir(t *testing.T) {
 		Type: "session:start",
 		Payload: map[string]interface{}{
 			"sessionId": "sess-tilde",
-			"deviceId":  "dev-recreate",
+			"machineId":  "dev-recreate",
 			"cliType":   "replay",
 			"workDir":   "~",
 		},

@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// TestApplyUpdateFromDifferentDirectory covers the cross-device failure mode:
+// TestApplyUpdateFromDifferentDirectory covers the cross-machine failure mode:
 // the downloaded binary lands in os.TempDir(), which may sit on a different
 // filesystem than the install path. ApplyUpdate must stage the new binary in
 // the target's own directory before renaming, so the rename never crosses a
