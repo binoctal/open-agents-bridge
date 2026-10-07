@@ -4,7 +4,7 @@
 # surface stays minimal. No credential may be baked into this image -- the
 # per-task token arrives only as container env at docker run.
 #
-# Cloud interactive session (cloud-session-shadow-device): SESSION_TOKEN (sst_)
+# Cloud interactive session (cloud-session-shadow-machine): SESSION_TOKEN (sst_)
 # in the env means this container serves one session; the bridge builds its
 # whole identity from the env, so there is nothing to pair or mount.
 set -eu

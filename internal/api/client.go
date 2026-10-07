@@ -136,11 +136,11 @@ type WorkItem struct {
 	Attempt    int    `json:"attempt,omitempty"`
 	Model      string `json:"model,omitempty"`
 
-	// Interactive cloud-session fields (cloud-session-shadow-device). Empty
+	// Interactive cloud-session fields (cloud-session-shadow-machine). Empty
 	// LifecycleMode means a task sandbox. SessionToken is the plaintext sst_
 	// credential: like TaskToken it lives only in this poll response and the
 	// container env, never on disk or in logs. ExecutorID (above) is the shadow
-	// device id the container's bridge connects as.
+	// machine id the container's bridge connects as.
 	LifecycleMode      string `json:"lifecycleMode,omitempty"`
 	SessionID          string `json:"sessionId,omitempty"`
 	SessionToken       string `json:"sessionToken,omitempty"`
@@ -307,7 +307,7 @@ func (c *Client) ReportSandbox(ctx context.Context, sandboxID, event, containerI
 }
 
 // ReportSandboxOpts is ReportSandbox plus the workspace-export outcome
-// (cloud-session-shadow-device 4.5). artifactsStatus is "available" or
+// (cloud-session-shadow-machine 4.5). artifactsStatus is "available" or
 // "failed" on an interactive session's sandbox_destroy; empty omits the field
 // (task sandboxes, and every non-destroy event).
 func (c *Client) ReportSandboxOpts(ctx context.Context, sandboxID, event, containerID, detail, artifactsStatus string) error {

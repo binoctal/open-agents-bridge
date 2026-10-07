@@ -451,7 +451,7 @@ func TestHandleSandboxDestroyFailure(t *testing.T) {
 	dk := &fakeDocker{outcomes: map[string]struct {
 		stdout string
 		err    error
-	}{"rm -f": {"", errors.New("docker rm: device or resource busy")}}}
+	}{"rm -f": {"", errors.New("docker rm: machine or resource busy")}}}
 	a := &Agent{Client: client, dockerRun: dk.run}
 	item := api.WorkItem{Action: api.ActionSandboxDestroy, SandboxID: "sbx-1", ContainerName: "sbx-abc123"}
 	if err := a.handleSandboxDestroy(context.Background(), a.endpoints()[0], item); err != nil {
@@ -507,7 +507,7 @@ func TestSandboxUpArgsInteractiveSessionCarriesOnlySessionCredential(t *testing.
 		TaskToken: "must-not-leak", TaskPrompt: "must-not-leak",
 	}
 	joined := strings.Join(sandboxUpArgs(item, "runner"), "\n")
-	for _, want := range []string{"SESSION_TOKEN=sst_secret", "SESSION_ID=sess1", "USER_ID=u1", "SHADOW_DEVICE_ID=cse_abc", "IDLE_RECLAIM_SECONDS=1800", "MAX_LIFETIME_SECONDS=14400"} {
+	for _, want := range []string{"SESSION_TOKEN=sst_secret", "SESSION_ID=sess1", "USER_ID=u1", "SHADOW_MACHINE_ID=cse_abc", "IDLE_RECLAIM_SECONDS=1800", "MAX_LIFETIME_SECONDS=14400"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q in args", want)
 		}
@@ -519,7 +519,7 @@ func TestSandboxUpArgsInteractiveSessionCarriesOnlySessionCredential(t *testing.
 	}
 }
 
-// --- workspace artifact export (cloud-session-shadow-device 4.5) -------------
+// --- workspace artifact export (cloud-session-shadow-machine 4.5) -------------
 
 // uploadServer accepts artifact PUTs and records what landed.
 type uploadServer struct {

@@ -124,7 +124,7 @@ func sandboxUpArgs(item api.WorkItem, imageName string) []string {
 			"-e", "SESSION_TOKEN="+item.SessionToken,
 			"-e", "SESSION_ID="+item.SessionID,
 			"-e", "USER_ID="+item.UserID,
-			"-e", "SHADOW_DEVICE_ID="+item.ExecutorID,
+			"-e", "SHADOW_MACHINE_ID="+item.ExecutorID,
 		)
 		if item.IdleReclaimSeconds > 0 {
 			args = append(args, "-e", "IDLE_RECLAIM_SECONDS="+strconv.Itoa(item.IdleReclaimSeconds))
@@ -281,7 +281,7 @@ func (a *Agent) handleSandboxUp(ctx context.Context, ep APIEndpoint, item api.Wo
 	return report(api.EventSandboxUp, containerID, "")
 }
 
-// Workspace artifact export (cloud-session-shadow-device 4.5). The container's
+// Workspace artifact export (cloud-session-shadow-machine 4.5). The container's
 // workspace is the only user data a session sandbox holds; everything under
 // HOME=/tmp is a noexec tmpfs that dies with it by design. The export runs
 // BEFORE `docker rm` and streams `docker cp` through gzip into a capped temp
