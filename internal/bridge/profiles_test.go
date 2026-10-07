@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/binoctal/open-agents-bridge/internal/config"
 )
@@ -81,5 +82,35 @@ func TestNoOsSetenvInBridgeSources(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A mission task's session id is its task id: task_assign must bind that id to
+// the dispatched profile so the env resolver hands the task the profile's env
+// instead of silently falling back to CLI login. A non-git project fails the
+// task right after the bind, which keeps this test free of a real CLI.
+func TestTaskAssignBindsTaskSessionToProfile(t *testing.T) {
+	b := newSendBridge(t)
+	b.profileStore().put("prof-1", map[string]string{"ANTHROPIC_API_KEY": "sk-task"})
+
+	assign := func(taskID string, extra map[string]interface{}) {
+		payload := map[string]interface{}{
+			"jobId": "job-p", "taskId": taskID, "agent": "replay", "title": "t",
+			"worktreeBranch": "oa/job-p/" + taskID, "projectPath": t.TempDir(),
+		}
+		for k, v := range extra {
+			payload[k] = v
+		}
+		b.handleWorkflowTaskAssign(Message{Type: "workflow:task_assign", Payload: payload, Timestamp: time.Now().UnixMilli()})
+	}
+
+	assign("task-with", map[string]interface{}{"profileId": "prof-1"})
+	if env := b.profileStore().resolve("task-with"); env["ANTHROPIC_API_KEY"] != "sk-task" {
+		t.Errorf("task bound to prof-1 resolved env = %v, want its key", env)
+	}
+
+	assign("task-without", nil)
+	if env := b.profileStore().resolve("task-without"); env != nil {
+		t.Errorf("task without profileId must resolve no env, got %v", env)
 	}
 }

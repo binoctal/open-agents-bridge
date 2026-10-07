@@ -3484,6 +3484,14 @@ func (b *Bridge) handleWorkflowTaskAssign(msg Message) {
 	// → the legacy launch-directory manager.
 	wm := b.getWorktreeManager(getString(payload, "projectPath"))
 	b.rememberJobManager(jobId, wm)
+	// engine-profiles: the task session id IS the task id, so binding it here
+	// (before the session is created) makes the env resolver hand this task
+	// its profile's env. The API pushes profile:sync on this same socket ahead
+	// of the assign. Absent profileId (old API / no profile) → CLI login.
+	b.bindSessionProfile(taskId, payload)
+	if pid := getString(payload, "profileId"); pid != "" && b.profileStore().resolve(taskId) == nil {
+		b.logWarn("[%s] Task %s bound to profile %s but its env was not synced; running with CLI login", logger.ModWorkflow, taskId, pid)
+	}
 
 	b.logInfo("[%s] Workflow task assign: %s (agent: %s) in job %s", logger.ModWorkflow, taskId, agent, jobId)
 
