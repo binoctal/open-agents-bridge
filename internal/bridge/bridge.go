@@ -150,8 +150,11 @@ type Bridge struct {
 	goldenMu sync.Mutex
 	golden   *replay.GoldenRecorder
 
-	// Permission ID -> Session ID mapping for precise routing
+	// Permission ID -> Session ID mapping for precise routing, plus the
+	// request's option ids so an approved-only answer (no optionId) can be
+	// synthesized into a real option below.
 	permSessionMap map[string]string
+	permOptionsMap map[string][]string
 	specs          *specTracker
 	specsOnce      sync.Once
 	permSessionMu  sync.RWMutex
@@ -328,6 +331,7 @@ func New(cfg *config.Config) (*Bridge, error) {
 		loopDetectors:    make(map[string]*loopdetect.Detector),
 		statusTrackers:   make(map[string]*statusTracker),
 		permSessionMap:   make(map[string]string),
+		permOptionsMap:   make(map[string][]string),
 		specs:            newSpecTracker(),
 		pendingQuestions: make(map[string]chan string),
 		lineBoundary:     make(map[string]bool),
@@ -1091,6 +1095,7 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 		permIDStr := fmt.Sprintf("%v", permReq.ID)
 		b.permSessionMu.Lock()
 		b.permSessionMap[permIDStr] = sessionID
+		b.permOptionsMap[permIDStr] = permReq.Options
 		b.permSessionMu.Unlock()
 
 		b.sendMessage(Message{
@@ -2179,8 +2184,29 @@ func (b *Bridge) handleSessionChangeDir(msg Message) {
 	})
 }
 
-func (b *Bridge) handlePermissionResponse(msg Message) {
-	payload, ok := msg.Payload.(map[string]interface{})
+// synthesizeOptionID maps a plain approved/denied answer onto a real option
+// id from the pending request. An ACP agent validates the optionId against
+// the options it offered, so prefer the request's own allow/reject option
+// and fall back to the generic wire tokens only when it carried none.
+func (b *Bridge) synthesizeOptionID(permID string, approved bool) string {
+	b.permSessionMu.RLock()
+	options := b.permOptionsMap[permID]
+	b.permSessionMu.RUnlock()
+	for _, o := range options {
+		if approved && strings.Contains(o, "allow") {
+			return o
+		}
+		if !approved && (strings.Contains(o, "reject") || strings.Contains(o, "deny")) {
+			return o
+		}
+	}
+	if approved {
+		return "allow"
+	}
+	return "reject"
+}
+
+func (b *Bridge) handlePermissionResponse(msg Message) {	payload, ok := msg.Payload.(map[string]interface{})
 	if !ok {
 		b.logDebug("[%s] Invalid permission response payload", logger.ModPermission)
 		return
@@ -2191,10 +2217,8 @@ func (b *Bridge) handlePermissionResponse(msg Message) {
 	if idVal, ok := payload["id"]; ok {
 		id = idVal
 	}
-	approved, _ := payload["approved"].(bool)
+	approved, hasApproved := payload["approved"].(bool)
 	optionID, _ := payload["optionId"].(string)
-
-	b.logDebug("[%s] Permission response: id=%v, approved=%v, optionId=%s", logger.ModPermission, id, approved, optionID)
 
 	// Convert ID to string for internal permission handler
 	var idStr string
@@ -2204,6 +2228,18 @@ func (b *Bridge) handlePermissionResponse(msg Message) {
 	case float64:
 		idStr = fmt.Sprintf("%d", int(v))
 	}
+
+	// Synthesize an optionId from `approved` when the caller sent a plain
+	// boolean (web auto-approve path, probe clients): an ACP agent's
+	// session/request_permission is only answered by a JSON-RPC result
+	// carrying an optionId, so an approved-only answer used to be silently
+	// dropped and the agent wedged in permission_pending until the idle
+	// watchdog killed the turn (live staging e2e 2026-10-07).
+	if optionID == "" && hasApproved && idStr != "" {
+		optionID = b.synthesizeOptionID(idStr, approved)
+	}
+
+	b.logDebug("[%s] Permission response: id=%v, approved=%v, optionId=%s", logger.ModPermission, id, approved, optionID)
 
 	// First resolve internal permission handler
 	b.permHandler.Resolve(permission.Response{
@@ -2238,6 +2274,7 @@ func (b *Bridge) handlePermissionResponse(msg Message) {
 			// Clean up mapping
 			b.permSessionMu.Lock()
 			delete(b.permSessionMap, idStr)
+			delete(b.permOptionsMap, idStr)
 			b.permSessionMu.Unlock()
 		} else {
 			// Fallback: send to all ACP sessions (backward compatibility)

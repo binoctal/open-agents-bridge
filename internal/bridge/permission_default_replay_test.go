@@ -64,3 +64,43 @@ func TestReplayDefaultModePermissionFlow(t *testing.T) {
 		}
 	}
 }
+
+// cloud-session-shadow-device staging e2e 2026-10-07: a permission answer
+// that carries only `approved` (the web auto-approve path and probe clients —
+// no optionId) used to be dropped before the ACP forwarding branch, wedging
+// the agent in permission_pending until the idle watchdog killed the turn.
+// The bridge must synthesize an option from the request's own options.
+func TestReplayApprovedOnlyResponseUnwedgesAgent(t *testing.T) {
+	sink := newReplaySink(t)
+	// The await-reply fixture holds its continuation frames until the
+	// bridge's JSON-RPC reply to request_permission actually arrives — a
+	// dropped reply means no terminal event and this test times out red.
+	startReplayBridge(t, sink, fixtureScript(t, "perm-await-reply.script.jsonl"), 1)
+
+	sink.sendTaskAssign("job-perm2", "task-perm2", "replay", 1)
+
+	req := sink.waitFor(20*time.Second, "WS permission:request for task-perm2",
+		func(ev sinkEvent) bool {
+			return ev.Channel == sinkChannelWS && ev.Type == "permission:request"
+		})
+	var p struct {
+		ID      interface{} `json:"id"`
+		Options []string    `json:"options"`
+	}
+	if err := json.Unmarshal(req.Payload, &p); err != nil {
+		t.Fatalf("unmarshal permission:request: %v (%s)", err, req.Payload)
+	}
+	if len(p.Options) == 0 {
+		t.Fatal("fixture request carries no options — the synthesis has nothing to pick from")
+	}
+
+	// Approved-only: no optionId, exactly what the auto-approve path sends.
+	sink.sendPermissionResponse(p.ID, "", true)
+
+	// The turn must complete: if the reply never reached the adapter the
+	// fixture's turn stalls and no terminal event ever fires.
+	terminal := sink.assertExactlyOneTerminal(t, "task-perm2")
+	if terminal.Type != "workflow:task_result" {
+		t.Fatalf("terminal = %s, want workflow:task_result", terminal.Type)
+	}
+}

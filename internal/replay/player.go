@@ -61,13 +61,25 @@ func (p *Player) run(ctx context.Context) error {
 		defer close(readerDone)
 		for p.in.Scan() {
 			var probe struct {
-				Method string `json:"method"`
+				Method string          `json:"method"`
+				ID     json.RawMessage `json:"id"`
 			}
-			if err := json.Unmarshal(p.in.Bytes(), &probe); err != nil || probe.Method == "" {
+			if err := json.Unmarshal(p.in.Bytes(), &probe); err != nil {
+				continue
+			}
+			// Requests/notifications gate by method; JSON-RPC responses
+			// (a reply to request_permission carries only an id) gate by
+			// "response:<id>" so a fixture can hold its continuation until
+			// the bridge actually answered the agent.
+			key := probe.Method
+			if key == "" && len(probe.ID) > 0 {
+				key = "response:" + string(probe.ID)
+			}
+			if key == "" {
 				continue
 			}
 			p.mu.Lock()
-			p.seen[probe.Method]++
+			p.seen[key]++
 			close(p.gateChan)
 			p.gateChan = make(chan struct{})
 			p.mu.Unlock()
