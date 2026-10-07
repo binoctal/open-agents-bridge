@@ -119,7 +119,7 @@ type ACPAdapter struct {
 	lastActivity atomic.Int64 // unix nano of last frame sent or received
 	// activeTools holds tool_call ids not yet completed/failed in the current
 	// turn; the watchdog grants them a longer idle budget.
-	activeTools   map[string]struct{}
+	activeTools   map[string]time.Time // tool_call id -> first seen
 	activeToolsMu sync.Mutex
 	// permMode is the session's bridge-level permission mode, frozen at
 	// Connect. Modes without explicit auto-approval gate terminal/create
@@ -1829,6 +1829,8 @@ func (a *ACPAdapter) promptIDInFlight() string {
 }
 
 // trackTool records a tool call as in flight until it reaches a terminal status.
+// Start and end are logged with the elapsed time so a lost or late tool result
+// can be reconciled against the bridge log.
 func (a *ACPAdapter) trackTool(id, status string) {
 	if id == "" {
 		return
@@ -1837,12 +1839,23 @@ func (a *ACPAdapter) trackTool(id, status string) {
 	defer a.activeToolsMu.Unlock()
 	switch status {
 	case "completed", "failed", "cancelled", "canceled", "error":
+		started, ok := a.activeTools[id]
 		delete(a.activeTools, id)
+		if ok {
+			logger.Info("[%s] tool_call %s finished status=%s elapsed=%s",
+				logger.ModACP, id, status, time.Since(started).Round(time.Millisecond))
+		} else {
+			logger.Warn("[%s] tool_call %s finished status=%s without a recorded start (late or orphan result)",
+				logger.ModACP, id, status)
+		}
 	default:
 		if a.activeTools == nil {
-			a.activeTools = make(map[string]struct{})
+			a.activeTools = make(map[string]time.Time)
 		}
-		a.activeTools[id] = struct{}{}
+		if _, ok := a.activeTools[id]; !ok {
+			a.activeTools[id] = time.Now()
+			logger.Info("[%s] tool_call %s started status=%s", logger.ModACP, id, status)
+		}
 	}
 }
 
