@@ -290,16 +290,20 @@ const (
 	artifactMaxBytes = 1 << 30 // 1 GiB compressed cap
 )
 
-// dockerCpTar is the streaming seam for `docker cp <c>:/workspace -`. It is
-// NOT the dockerRunner seam: cp must stream megabytes to disk, never buffer
-// them in a (string, error).
-var dockerCpTar = func(ctx context.Context, containerName string, w io.Writer) error {
-	cmd := exec.CommandContext(ctx, "docker", "cp", containerName+":/workspace", "-")
+// dockerWorkspaceTar is the streaming seam for the workspace export. It packs
+// from INSIDE the container (`docker exec <c> tar cf - workspace`), not with
+// `docker cp <c>:/workspace -`: the sandboxes run under gVisor (runsc), where
+// docker cp reads only the image layers and cannot see the container's
+// writable layer -- a cp-based export silently yields the pristine (empty)
+// WORKDIR instead of the user's files. It is NOT the dockerRunner seam: the
+// tar must stream megabytes to disk, never buffer them in a (string, error).
+var dockerWorkspaceTar = func(ctx context.Context, containerName string, w io.Writer) error {
+	cmd := exec.CommandContext(ctx, "docker", "exec", containerName, "tar", "cf", "-", "-C", "/", "workspace")
 	cmd.Stdout = w
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("docker cp: %v: %s", err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("docker exec tar: %v: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }
@@ -339,7 +343,7 @@ func (a *Agent) exportWorkspaceArtifact(ctx context.Context, item api.WorkItem) 
 
 	capped := &cappedWriter{w: f, max: artifactMaxBytes}
 	gz := gzip.NewWriter(capped)
-	cpErr := dockerCpTar(ctx, item.ContainerName, gz)
+	cpErr := dockerWorkspaceTar(ctx, item.ContainerName, gz)
 	gzErr := gz.Close()
 	if cpErr != nil || gzErr != nil || capped.exceeded {
 		a.logf("sandbox %s: artifact export failed: cp=%v gzip=%v capped=%v",

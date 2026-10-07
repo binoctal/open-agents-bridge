@@ -570,15 +570,15 @@ func interactiveDestroyItem(uploadURL string) api.WorkItem {
 
 func stubCpTar(t *testing.T, tarErr error, content string) {
 	t.Helper()
-	orig := dockerCpTar
-	dockerCpTar = func(ctx context.Context, containerName string, w io.Writer) error {
+	orig := dockerWorkspaceTar
+	dockerWorkspaceTar = func(ctx context.Context, containerName string, w io.Writer) error {
 		if tarErr != nil {
 			return tarErr
 		}
 		_, err := w.Write([]byte(content))
 		return err
 	}
-	t.Cleanup(func() { dockerCpTar = orig })
+	t.Cleanup(func() { dockerWorkspaceTar = orig })
 }
 
 // Destroy of an interactive session with an artifact URL: export BEFORE rm,
