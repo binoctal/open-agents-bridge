@@ -346,8 +346,16 @@ func (a *Agent) exportWorkspaceArtifact(ctx context.Context, item api.WorkItem) 
 			item.SandboxID, cpErr, gzErr, capped.exceeded)
 		return "failed"
 	}
-	size, err := f.Seek(0, io.SeekStart)
+	// Stat for the size, then rewind: Seek's return value is the new offset,
+	// so Seek(0) yields 0 and a zero ContentLength makes the PUT chunked,
+	// which R2 rejects with 411 MissingContentLength.
+	fi, err := f.Stat()
 	if err != nil {
+		a.logf("sandbox %s: artifact stat: %v", item.SandboxID, err)
+		return "failed"
+	}
+	size := fi.Size()
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		a.logf("sandbox %s: artifact seek: %v", item.SandboxID, err)
 		return "failed"
 	}

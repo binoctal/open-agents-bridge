@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -526,6 +527,8 @@ type uploadServer struct {
 	mu     sync.Mutex
 	puts   []int // body sizes
 	bodies []string
+	// contentLength[i] is the Content-Length header of puts[i]; -1 = chunked.
+	contentLength []int
 }
 
 func newUploadServer(t *testing.T) *uploadServer {
@@ -538,9 +541,14 @@ func newUploadServer(t *testing.T) *uploadServer {
 			return
 		}
 		b, _ := io.ReadAll(r.Body)
+		cl := -1
+		if v := r.Header.Get("Content-Length"); v != "" {
+			cl, _ = strconv.Atoi(v)
+		}
 		u.mu.Lock()
 		u.puts = append(u.puts, len(b))
 		u.bodies = append(u.bodies, string(b))
+		u.contentLength = append(u.contentLength, cl)
 		u.mu.Unlock()
 		w.WriteHeader(200)
 	}))
@@ -596,6 +604,11 @@ func TestDestroyExportsWorkspaceArtifact(t *testing.T) {
 	// gzip magic: the upload must be compressed, not a raw tar copy.
 	if !strings.HasPrefix(up.bodies[0], "\x1f\x8b") {
 		t.Errorf("uploaded body is not gzip (starts %q)", up.bodies[0][:min(2, len(up.bodies[0]))])
+	}
+	// R2 rejects a chunked PUT with 411 MissingContentLength: the upload
+	// must carry an exact Content-Length matching the body.
+	if up.contentLength[0] != len(up.bodies[0]) {
+		t.Errorf("Content-Length = %d, want %d (chunked uploads get 411 from R2)", up.contentLength[0], len(up.bodies[0]))
 	}
 	if sink.lastArtifactsStatus(api.EventSandboxDestroy) != "available" {
 		t.Errorf("want artifactsStatus=available on destroy report, got %q", sink.lastArtifactsStatus(api.EventSandboxDestroy))
