@@ -40,6 +40,29 @@ const defaultInitTimeout = 30 * time.Second
 // workflow task idle watchdog budget.
 const turnIdleTimeout = 5 * time.Minute
 
+// turnIdleTimeoutWithTools is the budget while at least one tool call is still
+// in flight. A long build or full test run emits no wire traffic for minutes;
+// that silence is expected, not a stall.
+const turnIdleTimeoutWithTools = 30 * time.Minute
+
+// turnIdleTimeoutEnv overrides turnIdleTimeout (Go duration, e.g. "10m").
+// The longer in-flight-tool budget is never shorter than the override.
+const turnIdleTimeoutEnv = "OPEN_AGENTS_TURN_IDLE_TIMEOUT"
+
+// turnIdleLimit returns the idle budget for the current turn state.
+func turnIdleLimit(toolsInFlight bool) time.Duration {
+	base := turnIdleTimeout
+	if v := os.Getenv(turnIdleTimeoutEnv); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			base = d
+		}
+	}
+	if toolsInFlight && turnIdleTimeoutWithTools > base {
+		return turnIdleTimeoutWithTools
+	}
+	return base
+}
+
 // defaultPermissionPromptTimeout bounds how long a gated terminal command
 // waits for the user's approval. It must stay BELOW turnIdleTimeout: the
 // rejection reply itself is wire traffic that resets the idle watchdog, so a
@@ -94,6 +117,10 @@ type ACPAdapter struct {
 	// the final reply never arrived, every later prompt timed out quietly).
 	lastPromptID atomic.Value // string; "" when no prompt is in flight
 	lastActivity atomic.Int64 // unix nano of last frame sent or received
+	// activeTools holds tool_call ids not yet completed/failed in the current
+	// turn; the watchdog grants them a longer idle budget.
+	activeTools   map[string]struct{}
+	activeToolsMu sync.Mutex
 	// permMode is the session's bridge-level permission mode, frozen at
 	// Connect. Modes without explicit auto-approval gate terminal/create
 	// commands on a user permission round-trip — the ACP agent delegates
@@ -463,6 +490,7 @@ ready:
 		promptID := a.nextRequestID()
 		a.isProcessing.Store(true)
 		a.lastPromptID.Store(promptID)
+		a.resetActiveTools()
 		req := map[string]interface{}{
 			"jsonrpc": "2.0",
 			"id":      promptID,
@@ -930,6 +958,7 @@ func (a *ACPAdapter) processSessionUpdate(update map[string]interface{}) {
 		if status == "" {
 			status = "pending"
 		}
+		a.trackTool(toolCallID, status)
 		a.emitMessage(Message{
 			Type: MessageTypeToolCall,
 			Content: ToolCall{
@@ -948,6 +977,7 @@ func (a *ACPAdapter) processSessionUpdate(update map[string]interface{}) {
 			toolCallID, _ = update["id"].(string) // fallback
 		}
 		status, _ := update["status"].(string)
+		a.trackTool(toolCallID, status)
 		a.emitMessage(Message{
 			Type: MessageTypeToolCall,
 			Content: ToolCall{
@@ -1798,6 +1828,36 @@ func (a *ACPAdapter) promptIDInFlight() string {
 	return ""
 }
 
+// trackTool records a tool call as in flight until it reaches a terminal status.
+func (a *ACPAdapter) trackTool(id, status string) {
+	if id == "" {
+		return
+	}
+	a.activeToolsMu.Lock()
+	defer a.activeToolsMu.Unlock()
+	switch status {
+	case "completed", "failed", "cancelled", "canceled", "error":
+		delete(a.activeTools, id)
+	default:
+		if a.activeTools == nil {
+			a.activeTools = make(map[string]struct{})
+		}
+		a.activeTools[id] = struct{}{}
+	}
+}
+
+func (a *ACPAdapter) hasActiveTools() bool {
+	a.activeToolsMu.Lock()
+	defer a.activeToolsMu.Unlock()
+	return len(a.activeTools) > 0
+}
+
+func (a *ACPAdapter) resetActiveTools() {
+	a.activeToolsMu.Lock()
+	a.activeTools = nil
+	a.activeToolsMu.Unlock()
+}
+
 // turnWatchdog reports and unblocks turns that stall with zero wire traffic.
 // A dead agent (or one that lost the prompt response) used to leave
 // isProcessing latched forever: the session looked alive, but every later
@@ -1815,13 +1875,14 @@ func (a *ACPAdapter) turnWatchdog() {
 			continue
 		}
 		idle := time.Since(time.Unix(0, a.lastActivity.Load()))
-		if idle <= turnIdleTimeout {
+		if idle <= turnIdleLimit(a.hasActiveTools()) {
 			continue
 		}
 		logger.Warn("[%s] Turn idle watchdog fired: no protocol activity in %s while prompt %q is in flight; unblocking and reporting",
 			logger.ModACP, idle.Round(time.Second), a.promptIDInFlight())
 		a.isProcessing.Store(false)
 		a.lastPromptID.Store("")
+		a.resetActiveTools()
 		a.emitMessage(Message{
 			Type: MessageTypeError,
 			Content: fmt.Sprintf("agent turn stalled: no protocol activity for %s; if the session stays unresponsive, stop and restart it",
