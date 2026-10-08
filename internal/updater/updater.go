@@ -3,8 +3,11 @@ package updater
 import (
 	"archive/tar"
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +24,12 @@ const (
 	RepoOwner     = "binoctal"
 	RepoName      = "open-agents-bridge"
 	CheckInterval = 24 * time.Hour
+
+	// ChecksumsAsset is goreleaser's checksum.name_template.
+	ChecksumsAsset = "checksums.txt"
+	// Ceilings on what an update may download; a release archive is a few MB.
+	maxArchiveBytes   = 256 << 20
+	maxChecksumsBytes = 64 << 10
 )
 
 // Release builds get these from goreleaser's -X ldflags. The defaults are what
@@ -66,7 +75,11 @@ type UpdateResult struct {
 	LatestVersion  string
 	ReleaseNotes   string
 	DownloadURL    string
+	AssetName      string
 	AssetSize      int64
+	// ChecksumsURL is the same release's checksums.txt; empty means the
+	// release has none and the update must be refused, not installed blind.
+	ChecksumsURL string
 }
 
 // compareSemver compares two semver strings. Returns -1, 0, or 1.
@@ -145,11 +158,14 @@ func CheckUpdate() (*UpdateResult, error) {
 	}
 
 	if hasUpdate {
-		downloadURL := GetAssetForPlatform(&release)
-		result.DownloadURL = downloadURL
+		if asset := platformAsset(&release); asset != nil {
+			result.DownloadURL = asset.DownloadURL
+			result.AssetName = asset.Name
+			result.AssetSize = asset.Size
+		}
 		for _, asset := range release.Assets {
-			if asset.DownloadURL == downloadURL {
-				result.AssetSize = asset.Size
+			if asset.Name == ChecksumsAsset {
+				result.ChecksumsURL = asset.DownloadURL
 				break
 			}
 		}
@@ -163,28 +179,84 @@ func CheckUpdate() (*UpdateResult, error) {
 // (or .zip on Windows), so the platform token is matched against the archive
 // stem — not a bare binary suffix, which never matched any asset.
 func GetAssetForPlatform(release *Release) string {
-	token := fmt.Sprintf("_%s_%s.", runtime.GOOS, runtime.GOARCH)
-
-	for _, asset := range release.Assets {
-		if strings.Contains(asset.Name, token) {
-			return asset.DownloadURL
-		}
+	if asset := platformAsset(release); asset != nil {
+		return asset.DownloadURL
 	}
 	return ""
 }
 
-// DownloadUpdate downloads the release archive and extracts the bridge
-// binary from it, returning the path of the extracted executable.
-func DownloadUpdate(url string) (string, error) {
-	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Get(url)
+func platformAsset(release *Release) *Asset {
+	token := fmt.Sprintf("_%s_%s.", runtime.GOOS, runtime.GOARCH)
+
+	for i := range release.Assets {
+		if strings.Contains(release.Assets[i].Name, token) {
+			return &release.Assets[i]
+		}
+	}
+	return nil
+}
+
+// DownloadVerified downloads the update described by res and installs nothing
+// unless the archive matches the SHA256 that the same release's checksums.txt
+// lists for it. A release without checksums.txt is refused rather than
+// skipped: whoever can swap an asset can also make checksums.txt disappear.
+//
+// This proves the archive is the one the release published, not who published
+// the release; signature verification of checksums.txt is a separate step.
+func DownloadVerified(res *UpdateResult) (string, error) {
+	if res.ChecksumsURL == "" {
+		return "", fmt.Errorf("release has no %s; refusing an unverified update", ChecksumsAsset)
+	}
+	if res.AssetName == "" || res.DownloadURL == "" {
+		return "", fmt.Errorf("no release archive for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	want, err := fetchChecksum(res.ChecksumsURL, res.AssetName)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	return DownloadUpdate(res.DownloadURL, want)
+}
 
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("download returned %d", resp.StatusCode)
+// fetchChecksum returns the hex SHA256 that checksums.txt lists for name.
+func fetchChecksum(url, name string) (string, error) {
+	body, err := httpGetLimited(url, maxChecksumsBytes, 30*time.Second)
+	if err != nil {
+		return "", fmt.Errorf("fetch %s: %w", ChecksumsAsset, err)
+	}
+	return parseChecksum(body, name)
+}
+
+// parseChecksum finds name in sha256sum-format text ("<hex>  <name>").
+func parseChecksum(body []byte, name string) (string, error) {
+	sc := bufio.NewScanner(bytes.NewReader(body))
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) != 2 || strings.TrimPrefix(fields[1], "*") != name {
+			continue
+		}
+		sum := strings.ToLower(fields[0])
+		if decoded, err := hex.DecodeString(sum); err != nil || len(decoded) != sha256.Size {
+			return "", fmt.Errorf("%s has a malformed entry for %s", ChecksumsAsset, name)
+		}
+		return sum, nil
+	}
+	return "", fmt.Errorf("%s has no entry for %s", ChecksumsAsset, name)
+}
+
+// DownloadUpdate downloads the release archive, refuses it unless its SHA256
+// equals wantSHA256, and only then extracts the bridge binary, returning the
+// path of the extracted executable. An empty wantSHA256 is an error.
+func DownloadUpdate(url, wantSHA256 string) (string, error) {
+	if wantSHA256 == "" {
+		return "", fmt.Errorf("no expected checksum; refusing an unverified update")
+	}
+	data, err := httpGetLimited(url, maxArchiveBytes, 5*time.Minute)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	if got := hex.EncodeToString(sum[:]); got != strings.ToLower(wantSHA256) {
+		return "", fmt.Errorf("checksum mismatch for downloaded archive: got %s, want %s", got, wantSHA256)
 	}
 
 	binaryName := "open-agents-bridge"
@@ -194,11 +266,32 @@ func DownloadUpdate(url string) (string, error) {
 
 	switch {
 	case strings.HasSuffix(url, ".zip"):
-		return extractFromZip(resp.Body, binaryName)
+		return extractFromZip(bytes.NewReader(data), binaryName)
 	default:
 		// goreleaser ships .tar.gz for non-Windows platforms
-		return extractFromTarGz(resp.Body, binaryName)
+		return extractFromTarGz(bytes.NewReader(data), binaryName)
 	}
+}
+
+func httpGetLimited(url string, limit int64, timeout time.Duration) ([]byte, error) {
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("download returned %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("download exceeds %d bytes", limit)
+	}
+	return data, nil
 }
 
 func extractFromTarGz(r io.Reader, binaryName string) (string, error) {

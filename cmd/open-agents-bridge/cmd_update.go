@@ -33,8 +33,8 @@ var updateCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		fmt.Println("Downloading update...")
-		tmpPath, err := updater.DownloadUpdate(result.DownloadURL)
+		fmt.Println("Downloading and verifying update...")
+		tmpPath, err := updater.DownloadVerified(result)
 		if err != nil {
 			fmt.Printf("Failed to download: %v\n", err)
 			os.Exit(1)
