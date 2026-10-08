@@ -88,7 +88,7 @@ Examples:
 			dashboardURL = defaultWebURL + "/dashboard/machines"
 		} else if pairServerURL == stagingAPIURL {
 			dashboardURL = stagingWebURL + "/dashboard/machines"
-		} else if strings.Contains(pairServerURL, "localhost") {
+		} else if config.IsLoopbackURL(pairServerURL) {
 			dashboardURL = "http://localhost:5173/dashboard/machines"
 		} else {
 			dashboardURL = strings.TrimSuffix(pairServerURL, "/") + "/dashboard/machines"
@@ -180,7 +180,7 @@ Examples:
 // runDevPair handles --dev mode for quick local development setup
 func runDevPair(cmd *cobra.Command, args []string) {
 	// Safety check: only allow dev mode with localhost
-	if !strings.Contains(pairServerURL, "localhost") && !strings.Contains(pairServerURL, "127.0.0.1") {
+	if !config.IsLoopbackURL(pairServerURL) {
 		fmt.Fprintln(os.Stderr, "Error: --dev mode is only allowed with localhost servers")
 		fmt.Fprintln(os.Stderr, "Use: open-agents-bridge pair --dev --server http://localhost:8787")
 		os.Exit(1)

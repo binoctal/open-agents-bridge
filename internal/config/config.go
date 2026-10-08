@@ -3,6 +3,8 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -88,16 +90,52 @@ func (c *Config) GetEnvironment() string {
 	if c.ServerURL == "" {
 		return "unknown"
 	}
-	if strings.Contains(c.ServerURL, "staging") ||
-		strings.Contains(c.ServerURL, "preview") ||
-		strings.Contains(c.ServerURL, "-staging") {
-		return "staging"
+	return EnvironmentForURL(c.ServerURL)
+}
+
+// officialHosts maps the official control-plane hosts to their environment.
+// Detection matches the parsed host exactly: a substring test let
+// "https://evil.com/?staging" read as staging and anything else as
+// production.
+var officialHosts = map[string]string{
+	"api.openagents.top":         "production",
+	"api-staging.openagents.top": "staging",
+}
+
+// EnvironmentForURL classifies a server URL: an official host maps to its
+// environment, a loopback host to "development", and anything else to
+// "custom" (a self-hosted or unofficial control plane).
+func EnvironmentForURL(raw string) string {
+	host := urlHost(raw)
+	if env, ok := officialHosts[host]; ok {
+		return env
 	}
-	if strings.Contains(c.ServerURL, "localhost") ||
-		strings.Contains(c.ServerURL, "127.0.0.1") {
+	if isLoopbackHost(host) {
 		return "development"
 	}
-	return "production"
+	return "custom"
+}
+
+// IsLoopbackURL reports whether the URL's host is this machine (localhost or
+// a loopback IP), so "https://localhost.evil.com" does not qualify.
+func IsLoopbackURL(raw string) bool {
+	return isLoopbackHost(urlHost(raw))
+}
+
+func urlHost(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // GetEffectiveFallbacks returns custom ModelFallbacks if fallback is enabled

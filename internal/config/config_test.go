@@ -53,3 +53,54 @@ func TestPreviewBuildEnabledJSONSemantics(t *testing.T) {
 		t.Fatal("explicit false must unmarshal to a false pointer")
 	}
 }
+
+// 5c.3: environment detection matches official hosts exactly, so a URL that
+// merely contains "staging" or "localhost" is not mistaken for one.
+func TestEnvironmentForURL(t *testing.T) {
+	cases := map[string]string{
+		"https://api.openagents.top":                  "production",
+		"https://API.openagents.top/":                 "production",
+		"https://api-staging.openagents.top":          "staging",
+		"http://localhost:8989":                       "development",
+		"http://127.0.0.1:8989":                       "development",
+		"http://[::1]:8989":                           "development",
+		"https://evil.com/?staging":                   "custom",
+		"https://staging.evil.com":                    "custom",
+		"https://api-staging.openagents.top.evil.com": "custom",
+		"https://evil.com/api.openagents.top":         "custom",
+		"https://localhost.evil.com":                  "custom",
+		"https://preview-x.example.com":               "custom",
+		"not a url":                                   "custom",
+	}
+	for raw, want := range cases {
+		if got := EnvironmentForURL(raw); got != want {
+			t.Errorf("EnvironmentForURL(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestIsLoopbackURL(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"http://localhost:8787":       true,
+		"http://127.0.0.1":            true,
+		"http://[::1]:8989":           true,
+		"https://localhost.evil.com":  false,
+		"https://evil.com/?127.0.0.1": false,
+		"https://api.openagents.top":  false,
+	} {
+		if got := IsLoopbackURL(raw); got != want {
+			t.Errorf("IsLoopbackURL(%q) = %v, want %v", raw, got, want)
+		}
+	}
+}
+
+func TestGetEnvironmentExplicitWins(t *testing.T) {
+	c := &Config{ServerURL: "https://evil.com/?staging"}
+	if got := c.GetEnvironment(); got != "custom" {
+		t.Errorf("got %q, want custom", got)
+	}
+	c.Environment = "staging"
+	if got := c.GetEnvironment(); got != "staging" {
+		t.Errorf("explicit environment ignored: got %q", got)
+	}
+}
