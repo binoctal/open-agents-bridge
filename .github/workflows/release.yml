@@ -79,6 +79,11 @@ jobs:
           # is missing. Publishing a package whose postinstall cannot complete
           # is worse than not publishing at all, so require both.
           echo "$assets" | grep -q "^checksums.txt$"
+          # 5e.2: install.js refuses a release without a signature over
+          # checksums.txt. The private key is offline (never in CI), so the
+          # maintainer signs and uploads checksums.txt.sig by hand
+          # (docs/release-signing.md), then re-runs this workflow.
+          echo "$assets" | grep -q "^checksums.txt.sig$"
           echo "$assets" | grep -q "^open-agents-bridge_${VERSION}_linux_amd64.tar.gz$"
 
       - name: Skip if this version is already on the registry

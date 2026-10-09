@@ -5,7 +5,10 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -186,6 +189,10 @@ func TestDownloadVerifiedEndToEnd(t *testing.T) {
 	checksums = sha256Hex([]byte("other")) + "  open-agents-bridge_0.99.0_other_arch.tar.gz\n" +
 		sha256Hex(archive) + "  " + name + "\n"
 	path, err := DownloadVerified(res)
+	if err == nil {
+		t.Fatal("unsigned release accepted by the default policy")
+	}
+	path, err = downloadVerified(res, nil, false) // signature policy off: checksum logic only
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,18 +202,18 @@ func TestDownloadVerifiedEndToEnd(t *testing.T) {
 	}
 
 	checksums = sha256Hex([]byte("swapped")) + "  " + name + "\n"
-	if _, err := DownloadVerified(res); err == nil {
+	if _, err := downloadVerified(res, nil, false); err == nil {
 		t.Fatal("archive not matching checksums.txt accepted")
 	}
 
 	checksums = sha256Hex(archive) + "  some-other-file.tar.gz\n"
-	if _, err := DownloadVerified(res); err == nil {
+	if _, err := downloadVerified(res, nil, false); err == nil {
 		t.Fatal("archive absent from checksums.txt accepted")
 	}
 
 	noSums := *res
 	noSums.ChecksumsURL = ""
-	if _, err := DownloadVerified(&noSums); err == nil {
+	if _, err := downloadVerified(&noSums, nil, false); err == nil {
 		t.Fatal("release without checksums.txt accepted")
 	}
 }
@@ -217,5 +224,121 @@ func TestPlatformAssetNeverPicksChecksums(t *testing.T) {
 	}}
 	if a := platformAsset(release); a != nil {
 		t.Fatalf("checksums.txt matched as a platform archive: %+v", a)
+	}
+}
+
+func signedKey(t *testing.T) (ed25519.PrivateKey, string) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return priv, base64.StdEncoding.EncodeToString(pub)
+}
+
+func sigB64(priv ed25519.PrivateKey, data string) string {
+	return base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte(data)))
+}
+
+// releaseServer serves one archive plus attacker-controllable checksums/sig.
+type releaseServer struct {
+	archive        []byte
+	checksums, sig string
+	hasSig         bool
+}
+
+func (rs *releaseServer) start(t *testing.T, name string) *UpdateResult {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/checksums.txt":
+			w.Write([]byte(rs.checksums))
+		case "/checksums.txt.sig":
+			w.Write([]byte(rs.sig))
+		default:
+			w.Write(rs.archive)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	res := &UpdateResult{DownloadURL: srv.URL + "/" + name, AssetName: name, ChecksumsURL: srv.URL + "/checksums.txt"}
+	if rs.hasSig {
+		res.SignatureURL = srv.URL + "/checksums.txt.sig"
+	}
+	return res
+}
+
+func TestDownloadVerifiedAcceptsValidSignature(t *testing.T) {
+	priv, pub := signedKey(t)
+	archive := tarGzArchive(t, []byte("genuine"))
+	name := "open-agents-bridge_1.0.0_linux_amd64.tar.gz"
+	sums := sha256Hex(archive) + "  " + name + "\n"
+	rs := &releaseServer{archive: archive, checksums: sums, sig: sigB64(priv, sums), hasSig: true}
+	res := rs.start(t, name)
+	path, err := downloadVerified(res, []string{pub}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(path)
+}
+
+// 5e.2/5e.7: the attacker controls the Release, so replaces the binary AND
+// checksums.txt with a consistent pair. Without a valid signature by a
+// trusted key nothing is extracted.
+func TestDownloadVerifiedRejectsBinaryAndChecksumsBothReplaced(t *testing.T) {
+	_, trustedPub := signedKey(t)
+	attackerPriv, _ := signedKey(t)
+	evil := tarGzArchive(t, []byte("backdoored"))
+	name := "open-agents-bridge_1.0.0_linux_amd64.tar.gz"
+	evilSums := sha256Hex(evil) + "  " + name + "\n"
+
+	cases := map[string]*releaseServer{
+		"no signature asset":     {archive: evil, checksums: evilSums},
+		"signed by attacker key": {archive: evil, checksums: evilSums, sig: sigB64(attackerPriv, evilSums), hasSig: true},
+		"garbage signature":      {archive: evil, checksums: evilSums, sig: "not-base64!!", hasSig: true},
+		"old sig over old sums":  {archive: evil, checksums: evilSums, sig: sigB64(attackerPriv, "other"), hasSig: true},
+	}
+	for label, rs := range cases {
+		res := rs.start(t, name)
+		path, err := downloadVerified(res, []string{trustedPub}, true)
+		if err == nil {
+			os.Remove(path)
+			t.Errorf("%s: tampered release accepted", label)
+		}
+	}
+}
+
+func TestDownloadVerifiedUnsignedAllowedOnlyWhenPolicyOff(t *testing.T) {
+	archive := tarGzArchive(t, []byte("x"))
+	name := "open-agents-bridge_1.0.0_linux_amd64.tar.gz"
+	rs := &releaseServer{archive: archive, checksums: sha256Hex(archive) + "  " + name + "\n"}
+	res := rs.start(t, name)
+	if _, err := downloadVerified(res, nil, true); err == nil {
+		t.Fatal("unsigned release accepted while RequireSignature is on")
+	}
+	path, err := downloadVerified(res, nil, false)
+	if err != nil {
+		t.Fatalf("transitional policy off must allow unsigned: %v", err)
+	}
+	os.Remove(path)
+}
+
+func TestRequireSignatureDefaultsOn(t *testing.T) {
+	if !RequireSignature() {
+		t.Fatal("RequireSignature must default to true")
+	}
+}
+
+func TestTrustedKeysAreWellFormed(t *testing.T) {
+	if len(trustedKeys) == 0 || len(parseKeys(trustedKeys)) != len(trustedKeys) {
+		t.Fatal("embedded trusted key list contains a malformed key")
+	}
+}
+
+func TestVerifySignatureKeyRotationList(t *testing.T) {
+	oldPriv, oldPub := signedKey(t)
+	_, newPub := signedKey(t)
+	data := "sums"
+	if err := verifySignature([]byte(data), []byte(sigB64(oldPriv, data)), []string{newPub, oldPub}); err != nil {
+		t.Fatalf("a signature by any listed key must verify: %v", err)
 	}
 }

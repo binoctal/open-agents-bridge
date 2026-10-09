@@ -64,19 +64,19 @@ function fetchJSON(url) {
   });
 }
 
-function fetchText(url) {
+function fetchBuffer(url) {
   return new Promise((resolve, reject) => {
     https
       .get(url, { headers: { "User-Agent": "open-agents-bridge-npm" } }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          return fetchText(res.headers.location).then(resolve, reject);
+          return fetchBuffer(res.headers.location).then(resolve, reject);
         }
         if (res.statusCode !== 200) {
           return reject(new Error(`HTTP ${res.statusCode} from ${url}`));
         }
-        let data = "";
-        res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => resolve(data));
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => resolve(Buffer.concat(chunks)));
       })
       .on("error", reject);
   });
@@ -86,7 +86,72 @@ function sha256(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
-// Verify the download against the release's own checksums.txt. A missing
+// Release signing keys (5e.2): base64 raw Ed25519 public keys. A list so a
+// key can be rotated; keep in sync with trustedKeys in
+// internal/updater/signature.go. See docs/release-signing.md.
+const TRUSTED_KEYS = ["NTmWyMB+MN8QmQ+R0TXJ3t3cwuqki1Cxld9HzHzc4Vw="];
+
+// Transitional policy: a release without checksums.txt.sig is refused while
+// this is true.
+const REQUIRE_SIGNATURE = true;
+
+const SIGNATURE_ASSET = "checksums.txt.sig";
+
+// DER SubjectPublicKeyInfo prefix for a raw Ed25519 public key.
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+
+function verifySignature(checksumsBuf, sigText, keys) {
+  const sig = Buffer.from(String(sigText).trim(), "base64");
+  if (sig.length !== 64) {
+    throw new Error(`malformed ${SIGNATURE_ASSET}`);
+  }
+  for (const k of keys) {
+    const raw = Buffer.from(k, "base64");
+    if (raw.length !== 32) continue;
+    const key = crypto.createPublicKey({
+      key: Buffer.concat([ED25519_SPKI_PREFIX, raw]),
+      format: "der",
+      type: "spki",
+    });
+    if (crypto.verify(null, checksumsBuf, key, sig)) return;
+  }
+  throw new Error(`${SIGNATURE_ASSET} does not verify against any trusted release key`);
+}
+
+// Pure verification core. Order matters: the signature over checksums.txt is
+// checked FIRST, then the archive hash against the authenticated checksums.
+// Otherwise an attacker who can replace release assets replaces the archive
+// and checksums.txt together. Throws on any failure; never deletes anything.
+function verifyDownload({ checksumsBuf, sigText, assetName, filePath, keys, requireSignature }) {
+  if (sigText == null) {
+    if (requireSignature) {
+      throw new Error(`Release has no ${SIGNATURE_ASSET}; refusing to install an unsigned binary`);
+    }
+  } else {
+    verifySignature(checksumsBuf, sigText, keys);
+  }
+
+  const line = checksumsBuf
+    .toString("utf8")
+    .split("\n")
+    .map((l) => l.trim().split(/\s+/))
+    .find((parts) => parts[1] === assetName || parts[1] === `*${assetName}`);
+
+  if (!line) {
+    throw new Error(`checksums.txt does not list ${assetName}`);
+  }
+
+  const expected = line[0].toLowerCase();
+  const actual = sha256(filePath);
+  if (expected !== actual) {
+    throw new Error(
+      `Checksum mismatch for ${assetName}\n  expected: ${expected}\n  actual:   ${actual}`
+    );
+  }
+  return actual;
+}
+
+// Verify the download against the release's signed checksums.txt. A missing
 // checksums.txt aborts rather than skipping the check: whoever can swap an
 // asset can also make checksums.txt 404, so "skip when absent" verifies
 // nothing at all. The bridge is a long-lived daemon that takes commands from
@@ -100,28 +165,24 @@ async function verifyChecksum(release, asset, filePath) {
       `Release ${release.tag_name} has no checksums.txt; refusing to install an unverified binary`
     );
   }
+  const sigAsset = release.assets.find((a) => a.name === SIGNATURE_ASSET);
 
-  const text = await fetchText(checksums.browser_download_url);
-  const line = text
-    .split("\n")
-    .map((l) => l.trim().split(/\s+/))
-    .find((parts) => parts[1] === asset.name || parts[1] === `*${asset.name}`);
-
-  if (!line) {
+  try {
+    const checksumsBuf = await fetchBuffer(checksums.browser_download_url);
+    const sigText = sigAsset ? (await fetchBuffer(sigAsset.browser_download_url)).toString("utf8") : null;
+    const actual = verifyDownload({
+      checksumsBuf,
+      sigText,
+      assetName: asset.name,
+      filePath,
+      keys: TRUSTED_KEYS,
+      requireSignature: REQUIRE_SIGNATURE,
+    });
+    console.log(`Signature and checksum verified (sha256 ${actual.slice(0, 16)}…)`);
+  } catch (err) {
     fs.unlinkSync(filePath);
-    throw new Error(`checksums.txt does not list ${asset.name}`);
+    throw err;
   }
-
-  const expected = line[0].toLowerCase();
-  const actual = sha256(filePath);
-  if (expected !== actual) {
-    fs.unlinkSync(filePath);
-    throw new Error(
-      `Checksum mismatch for ${asset.name}\n  expected: ${expected}\n  actual:   ${actual}`
-    );
-  }
-
-  console.log(`Checksum verified (sha256 ${actual.slice(0, 16)}…)`);
 }
 
 function downloadFile(url, destPath) {
@@ -249,7 +310,11 @@ async function install() {
   console.log(`Successfully installed open-agents-bridge ${release.tag_name}`);
 }
 
-install().catch((err) => {
-  console.error("Installation failed:", err.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  install().catch((err) => {
+    console.error("Installation failed:", err.message);
+    process.exit(1);
+  });
+}
+
+module.exports = { verifySignature, verifyDownload, TRUSTED_KEYS };

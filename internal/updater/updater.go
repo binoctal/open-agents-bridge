@@ -30,6 +30,7 @@ const (
 	// Ceilings on what an update may download; a release archive is a few MB.
 	maxArchiveBytes   = 256 << 20
 	maxChecksumsBytes = 64 << 10
+	maxSignatureBytes = 4 << 10
 )
 
 // Release builds get these from goreleaser's -X ldflags. The defaults are what
@@ -80,6 +81,8 @@ type UpdateResult struct {
 	// ChecksumsURL is the same release's checksums.txt; empty means the
 	// release has none and the update must be refused, not installed blind.
 	ChecksumsURL string
+	// SignatureURL is checksums.txt.sig of the same release (5e.2).
+	SignatureURL string
 }
 
 // compareSemver compares two semver strings. Returns -1, 0, or 1.
@@ -166,7 +169,9 @@ func CheckUpdate() (*UpdateResult, error) {
 		for _, asset := range release.Assets {
 			if asset.Name == ChecksumsAsset {
 				result.ChecksumsURL = asset.DownloadURL
-				break
+			}
+			if asset.Name == SignatureAsset {
+				result.SignatureURL = asset.DownloadURL
 			}
 		}
 	}
@@ -201,29 +206,43 @@ func platformAsset(release *Release) *Asset {
 // lists for it. A release without checksums.txt is refused rather than
 // skipped: whoever can swap an asset can also make checksums.txt disappear.
 //
-// This proves the archive is the one the release published, not who published
-// the release; signature verification of checksums.txt is a separate step.
+// Order matters: the signature over checksums.txt is verified FIRST, then the
+// archive hash against the (now authenticated) checksums. Without the first
+// step an attacker who can replace release assets replaces the archive and
+// checksums.txt together. Any failure leaves the installed binary untouched.
 func DownloadVerified(res *UpdateResult) (string, error) {
+	return downloadVerified(res, trustedKeys, RequireSignature())
+}
+
+func downloadVerified(res *UpdateResult, keys []string, requireSig bool) (string, error) {
 	if res.ChecksumsURL == "" {
 		return "", fmt.Errorf("release has no %s; refusing an unverified update", ChecksumsAsset)
 	}
 	if res.AssetName == "" || res.DownloadURL == "" {
 		return "", fmt.Errorf("no release archive for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
-	want, err := fetchChecksum(res.ChecksumsURL, res.AssetName)
+	body, err := httpGetLimited(res.ChecksumsURL, maxChecksumsBytes, 30*time.Second)
+	if err != nil {
+		return "", fmt.Errorf("fetch %s: %w", ChecksumsAsset, err)
+	}
+	if res.SignatureURL == "" {
+		if requireSig {
+			return "", fmt.Errorf("refusing update: %w", ErrNoSignature)
+		}
+	} else {
+		sig, err := httpGetLimited(res.SignatureURL, maxSignatureBytes, 30*time.Second)
+		if err != nil {
+			return "", fmt.Errorf("fetch %s: %w", SignatureAsset, err)
+		}
+		if err := verifySignature(body, sig, keys); err != nil {
+			return "", fmt.Errorf("refusing update: %w", err)
+		}
+	}
+	want, err := parseChecksum(body, res.AssetName)
 	if err != nil {
 		return "", err
 	}
 	return DownloadUpdate(res.DownloadURL, want)
-}
-
-// fetchChecksum returns the hex SHA256 that checksums.txt lists for name.
-func fetchChecksum(url, name string) (string, error) {
-	body, err := httpGetLimited(url, maxChecksumsBytes, 30*time.Second)
-	if err != nil {
-		return "", fmt.Errorf("fetch %s: %w", ChecksumsAsset, err)
-	}
-	return parseChecksum(body, name)
 }
 
 // parseChecksum finds name in sha256sum-format text ("<hex>  <name>").

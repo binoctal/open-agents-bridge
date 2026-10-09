@@ -6,7 +6,8 @@
     "open-agents-bridge": "./run.js"
   },
   "scripts": {
-    "postinstall": "node install.js"
+    "postinstall": "node install.js",
+    "test": "node --test"
   },
   "files": [
     "install.js",
