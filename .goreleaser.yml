@@ -16,6 +16,8 @@ builds:
       - -X github.com/binoctal/open-agents-bridge/internal/updater.version={{.Version}}
       - -X github.com/binoctal/open-agents-bridge/internal/updater.commit={{.Commit}}
       - -X github.com/binoctal/open-agents-bridge/internal/updater.date={{.Date}}
+      # 5c.2: marks the build official; official builds pin the server URL.
+      - -X github.com/binoctal/open-agents-bridge/internal/config.official=true
 
 archives:
   - formats: [tar.gz]

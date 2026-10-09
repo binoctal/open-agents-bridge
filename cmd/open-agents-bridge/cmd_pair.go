@@ -25,6 +25,7 @@ var (
 	pairDevEmail    string
 	pairDevPassword string
 	pairMachineName  string
+	pairUnsafe      bool
 )
 
 // Default server URLs
@@ -70,9 +71,13 @@ Examples:
 			pairServerURL = defaultAPIURL
 		}
 
+		// 5c.2/5e.6: pin the target before anything is sent. The domain is
+		// printed first so the user sees where credentials will go.
+		cp := requireAllowedServer(pairServerURL, pairUnsafe)
+
 		// Handle --dev mode
 		if pairDevMode {
-			runDevPair(cmd, args)
+			runDevPair(cmd, args, cp)
 			return
 		}
 
@@ -82,6 +87,7 @@ Examples:
 		fmt.Println("==========================")
 		fmt.Println()
 		fmt.Printf("Using API server: %s\n", pairServerURL)
+		fmt.Printf("Pairing target: %s (%s)\n", cp.Host, cp.Label())
 
 		// Determine dashboard URL based on server
 		var dashboardURL string
@@ -126,6 +132,16 @@ Examples:
 			os.Exit(1)
 		}
 
+		// The server hands back the URL the bridge will keep connecting to;
+		// it is held to the same policy as the one the user typed, so an
+		// unofficial server cannot redirect an official build elsewhere.
+		if cfg.ServerURL != "" {
+			if _, err := config.CheckServerURL(cfg.ServerURL, pairUnsafe); err != nil {
+				fmt.Fprintf(os.Stderr, "Pairing aborted: server returned a disallowed URL: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
 		// Use server-provided URL if available, otherwise compute from API URL
 		if cfg.ServerURL == "" {
 			wsURL := strings.Replace(pairServerURL, "http://", "ws://", 1)
@@ -163,6 +179,7 @@ Examples:
 		fmt.Printf("  Machine Name: %s\n", displayName)
 		fmt.Printf("  Machine ID: %s\n", cfg.MachineID)
 		fmt.Printf("  Server: %s\n", cfg.ServerURL)
+		fmt.Printf("  Control plane: %s\n", config.ClassifyControlPlane(cfg.ServerURL).Label())
 		fmt.Println("  E2EE: Enabled")
 		fmt.Println()
 
@@ -171,6 +188,7 @@ Examples:
 			fmt.Println("Starting bridge automatically...")
 			fmt.Println()
 			machineName = displayName
+			startUnsafe = pairUnsafe
 			startCmd.Run(cmd, args)
 		} else {
 			fmt.Printf("Run 'open-agents-bridge start -d %s' to start the bridge.\n", displayName)
@@ -179,7 +197,7 @@ Examples:
 }
 
 // runDevPair handles --dev mode for quick local development setup
-func runDevPair(cmd *cobra.Command, args []string) {
+func runDevPair(cmd *cobra.Command, args []string, cp config.ControlPlane) {
 	// Safety check: only allow dev mode with localhost
 	if !config.IsLoopbackURL(pairServerURL) {
 		fmt.Fprintln(os.Stderr, "Error: --dev mode is only allowed with localhost servers")
@@ -191,6 +209,7 @@ func runDevPair(cmd *cobra.Command, args []string) {
 	fmt.Println("=====================")
 	fmt.Println()
 	fmt.Printf("Using API server: %s\n", pairServerURL)
+	fmt.Printf("Pairing target: %s (%s)\n", cp.Host, cp.Label())
 
 	// Set defaults
 	email := pairDevEmail
@@ -254,6 +273,7 @@ func runDevPair(cmd *cobra.Command, args []string) {
 	if pairAutoStart {
 		fmt.Println("Starting bridge automatically...")
 		fmt.Println()
+		startUnsafe = pairUnsafe
 		startCmd.Run(cmd, args)
 	} else {
 		devName := pairMachineName
@@ -271,6 +291,7 @@ func init() {
 	pairCmd.Flags().BoolVarP(&pairDevMode, "dev", "d", false, "Development mode: auto-create test user and machine (localhost only)")
 	pairCmd.Flags().StringVar(&pairDevEmail, "email", "", "Dev mode: custom email (default: dev@openagents.local)")
 	pairCmd.Flags().StringVar(&pairDevPassword, "password", "", "Dev mode: custom password (default: dev123456)")
+	pairCmd.Flags().BoolVar(&pairUnsafe, "unsafe-server", false, "Allow a non-official server in an official build (your credentials go to that server)")
 	pairCmd.Flags().StringVarP(&pairMachineName, "name", "n", "", "Machine name (for multi-machine support)")
 }
 
@@ -420,4 +441,20 @@ func devSetup(email, password string) (*config.Config, error) {
 		MachineID:    result.Config.MachineID,
 		MachineToken: result.Config.MachineToken,
 	}, nil
+}
+
+// requireAllowedServer enforces the build's server-pinning policy and prints
+// a loud warning for any non-official control plane. It exits on refusal.
+func requireAllowedServer(raw string, unsafe bool) config.ControlPlane {
+	cp, err := config.CheckServerURL(raw, unsafe)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if !cp.Official {
+		fmt.Fprintln(os.Stderr, "WARNING: UNOFFICIAL CONTROL PLANE")
+		fmt.Fprintf(os.Stderr, "WARNING: %s is not an official Open Agents server.\n", cp.Host)
+		fmt.Fprintln(os.Stderr, "WARNING: It will receive your pairing credentials and can send commands to this machine.")
+	}
+	return cp
 }

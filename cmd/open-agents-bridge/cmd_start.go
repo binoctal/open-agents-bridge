@@ -21,6 +21,7 @@ var (
 	headless        bool
 	machineName      string
 	recordReplayDir string
+	startUnsafe     bool
 )
 
 var startCmd = &cobra.Command{
@@ -95,6 +96,14 @@ Examples:
 			os.Exit(1)
 		}
 
+		// 5c.2: a hand-edited config must not redirect an official build to
+		// an unofficial server (the machine token would go with it). Cloud
+		// session containers get their URL from the platform environment.
+		if !config.SessionEnvActive() {
+			cp := requireAllowedServer(cfg.ServerURL, startUnsafe)
+			fmt.Printf("  Control plane: %s (%s)\n", cp.Host, cp.Label())
+		}
+
 		machineDisplay := cfg.MachineName
 		if machineDisplay == "" {
 			machineDisplay = targetMachine
@@ -167,6 +176,7 @@ Examples:
 func init() {
 	startCmd.Flags().StringVarP(&logLevel, "log-level", "l", "info", "Log level (error, warn, info, debug)")
 	startCmd.Flags().BoolVarP(&headless, "headless", "H", false, "Run in headless mode (no system tray)")
+	startCmd.Flags().BoolVar(&startUnsafe, "unsafe-server", false, "Allow a non-official server in an official build")
 	startCmd.Flags().StringVarP(&machineName, "machine", "d", "", "Machine name to start (required)")
 	startCmd.Flags().StringVar(&recordReplayDir, "record-replay-dir", "", "Record ACP wire frames of every session to <dir>/<sessionID>.jsonl (replay fixture production)")
 }
