@@ -125,3 +125,7 @@ make build-all # Build for all platforms
 ## License
 
 GNU Affero General Public License v3.0 (AGPL-3.0). See [LICENSE](LICENSE).
+
+## Trademark and contributing
+
+The Open Agents name and logo are covered by the [Trademark Policy](TRADEMARK.md) (draft). Contributions require agreeing to the CLA described in [CONTRIBUTING.md](CONTRIBUTING.md) (draft). Release signing is described in [docs/release-signing.md](docs/release-signing.md).

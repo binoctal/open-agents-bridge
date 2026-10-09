@@ -125,3 +125,7 @@ make build-all # 构建所有平台
 ## 许可证
 
 GNU Affero General Public License v3.0 (AGPL-3.0)。详见 [LICENSE](LICENSE)。
+
+## 商标与贡献
+
+Open Agents 的名称与 logo 受[商标政策](TRADEMARK.md)约束（草案）。贡献须同意 [CONTRIBUTING.md](CONTRIBUTING.md) 中的 CLA（草案）。发布物签名见 [docs/release-signing.md](docs/release-signing.md)。

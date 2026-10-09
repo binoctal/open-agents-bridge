@@ -1,0 +1,3 @@
+# One "Name <email>" per line. Matches the commit author identity exactly.
+# The maintainer (copyright holder of all commits up to the CLA introduction).
+binoctal <binoctal@gmail.com>
