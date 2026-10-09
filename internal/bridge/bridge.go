@@ -680,6 +680,8 @@ func (b *Bridge) connect() error {
 	q.Set("machineId", b.config.MachineID)
 	q.Set("token", b.config.MachineToken)
 	q.Set("instanceId", b.instanceID)
+	// Telemetry only (5b.5): version + own binary digest; never gates anything.
+	addTelemetryParams(q, updater.Version, selfSHA256())
 	// Report CLI capabilities so the server knows which agents are available
 	if len(b.config.CLIEnabled) > 0 {
 		cliNames := make([]string, 0, len(b.config.CLIEnabled))
