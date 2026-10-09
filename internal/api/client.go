@@ -329,6 +329,23 @@ func (c *Client) ReportSession(report SessionReport) error {
 	return err
 }
 
+// Device-key challenge (bridge-abuse-hardening 4b.2): the nonce to sign for
+// the next WS upgrade. A null nonce means the server has no public key bound
+// for this machine (gray-allow posture) and the upgrade needs no signature.
+func (c *Client) GetWSChallenge() (string, error) {
+	data, err := c.request("POST", "/api/bridge/ws-challenge", nil)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Nonce string `json:"nonce"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", err
+	}
+	return resp.Nonce, nil
+}
+
 // Message Storage
 
 type MessageReport struct {

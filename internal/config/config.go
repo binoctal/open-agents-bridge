@@ -22,6 +22,12 @@ type Config struct {
 	PublicKey   string `json:"publicKey,omitempty"`
 	PrivateKey  string `json:"privateKey,omitempty"`
 	WebPubKey   string `json:"webPubKey,omitempty"`
+	// MachinePrivateKey is the base64 Ed25519 private key (bridge-abuse-
+	// hardening 4b): the token alone is not enough to connect once the
+	// server has the matching public half. Stored here rather than an OS
+	// keychain because the static (CGO_ENABLED=0) build cannot link one;
+	// the file is already 0600 (see loadFile).
+	MachinePrivateKey string `json:"machinePrivateKey,omitempty"`
 
 	// v1.1: Machine config synced from Web
 	EnvVars     map[string]string `json:"envVars,omitempty"`

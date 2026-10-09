@@ -12,6 +12,7 @@ import (
 
 	"github.com/binoctal/open-agents-bridge/internal/config"
 	"github.com/binoctal/open-agents-bridge/internal/crypto"
+	"github.com/binoctal/open-agents-bridge/internal/machinekey"
 	"github.com/binoctal/open-agents-bridge/internal/fingerprint"
 	"github.com/spf13/cobra"
 )
@@ -295,9 +296,18 @@ type ErrorResponse struct {
 func pairMachine(code string, keyPair *crypto.KeyPair) (*config.Config, error) {
 	apiURL := strings.TrimSuffix(pairServerURL, "/") + "/api/machines/pair/verify"
 
+	// 4b.1: the machine-bound signing key. Generated fresh per pairing so a
+	// re-pair also rotates the binding; the private half never leaves this
+	// host, the public half is bound server-side with the new token.
+	machinePrivB64, machinePubB64, err := machinekey.Generate()
+	if err != nil {
+		return nil, fmt.Errorf("machine key: %v", err)
+	}
+
 	body := map[string]string{
-		"pairCode":    code,
-		"fingerprint": fingerprint.Compute(),
+		"pairCode":        code,
+		"fingerprint":     fingerprint.Compute(),
+		"machinePublicKey": machinePubB64,
 	}
 	bodyJSON, _ := json.Marshal(body)
 
@@ -333,14 +343,15 @@ func pairMachine(code string, keyPair *crypto.KeyPair) (*config.Config, error) {
 	}
 
 	return &config.Config{
-		UserID:      result.UserID,
-		MachineID:    result.MachineID,
-		MachineName:  result.MachineName,
-		MachineToken: result.MachineToken,
-		ServerURL:   result.ServerURL,
-		PublicKey:   keyPair.PublicKeyBase64(),
-		PrivateKey:  base64.StdEncoding.EncodeToString(keyPair.PrivateKey[:]),
-		WebPubKey:   result.WebPubKey,
+		UserID:           result.UserID,
+		MachineID:        result.MachineID,
+		MachineName:      result.MachineName,
+		MachineToken:     result.MachineToken,
+		ServerURL:        result.ServerURL,
+		PublicKey:        keyPair.PublicKeyBase64(),
+		PrivateKey:       base64.StdEncoding.EncodeToString(keyPair.PrivateKey[:]),
+		MachinePrivateKey: machinePrivB64,
+		WebPubKey:        result.WebPubKey,
 	}, nil
 }
 

@@ -23,6 +23,7 @@ import (
 	"github.com/binoctal/open-agents-bridge/internal/config"
 	"github.com/binoctal/open-agents-bridge/internal/crypto"
 	"github.com/binoctal/open-agents-bridge/internal/deploysource"
+	"github.com/binoctal/open-agents-bridge/internal/machinekey"
 	"github.com/binoctal/open-agents-bridge/internal/logger"
 	"github.com/binoctal/open-agents-bridge/internal/loopdetect"
 	"github.com/binoctal/open-agents-bridge/internal/markdown"
@@ -706,9 +707,29 @@ func (b *Bridge) connect() error {
 	u.RawQuery = q.Encode()
 	u.Path = fmt.Sprintf("/ws/%s", b.config.UserID)
 
+	// Device-key challenge (4b.2): machines with a bound public key must sign
+	// a server-issued one-time nonce on every upgrade. No stored private key
+	// or a null nonce = pre-4b posture, connect unsigned (the server's gray
+	// path); a signature failure is fatal to this attempt by construction.
+	dialHeader := http.Header{}
+	if b.config.MachinePrivateKey != "" {
+		priv, keyErr := machinekey.ParsePrivate(b.config.MachinePrivateKey)
+		if keyErr != nil {
+			return fmt.Errorf("machine key: %v", keyErr)
+		}
+		nonce, chErr := b.apiClient.GetWSChallenge()
+		if chErr != nil {
+			return fmt.Errorf("ws challenge: %v", chErr)
+		}
+		if nonce != "" {
+			dialHeader.Set("X-Machine-Nonce", nonce)
+			dialHeader.Set("X-Machine-Signature", machinekey.Sign(priv, nonce, b.config.MachineID, b.instanceID))
+		}
+	}
+
 	b.logInfo("[%s] Connecting to %s", logger.ModBridge, u.String())
 
-	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	conn, _, err := websocket.DefaultDialer.Dial(u.String(), dialHeader)
 	if err != nil {
 		b.logInfo("[%s] Could not connect to server: %v", logger.ModBridge, err)
 		return err
