@@ -74,6 +74,17 @@ type Agent struct {
 	WorkPollInterval  time.Duration
 	WatermarkInterval time.Duration
 
+	// WorkIdleMax caps the idle backoff of the work poll: an endpoint that
+	// keeps answering "no items" is polled at base*2, base*4, ... up to this
+	// value, and snaps back to the base interval on the first item or error.
+	// Every poll is one billable Worker request (Workers Free is account-wide),
+	// and an idle node previously burned ~8.6k/day per environment. Zero (or
+	// <= the base interval) disables the backoff.
+	WorkIdleMax time.Duration
+
+	// now is the clock seam for the backoff; nil = time.Now.
+	now func() time.Time
+
 	// UsageInterval is the per-container memory sampling cadence
 	// (add-hosting-quota-guardrails design D2; RAM·h accuracy needs minutes,
 	// not seconds). Zero falls back to usageInterval()'s default.
@@ -111,6 +122,61 @@ type Agent struct {
 	// endpoint is skipped until process restart instead of exiting. Guarded
 	// by inFlightMu.
 	epDisabled map[*api.Client]bool
+
+	// epIdle / epNext hold the per-endpoint idle backoff state (see
+	// WorkIdleMax). Guarded by inFlightMu.
+	epIdle map[*api.Client]int
+	epNext map[*api.Client]time.Time
+}
+
+func (a *Agent) clock() time.Time {
+	if a.now != nil {
+		return a.now()
+	}
+	return time.Now()
+}
+
+// workDue reports whether ep should be polled on this tick.
+func (a *Agent) workDue(c *api.Client) bool {
+	if a.WorkIdleMax <= a.workInterval() {
+		return true
+	}
+	a.inFlightMu.Lock()
+	defer a.inFlightMu.Unlock()
+	next, ok := a.epNext[c]
+	return !ok || !a.clock().Before(next)
+}
+
+// noteWork records the outcome of a poll: an empty answer lengthens the next
+// gap, anything else (items, error) resets it so a pending deploy is picked up
+// at the base cadence.
+func (a *Agent) noteWork(c *api.Client, empty bool) {
+	base := a.workInterval()
+	if a.WorkIdleMax <= base {
+		return
+	}
+	a.inFlightMu.Lock()
+	defer a.inFlightMu.Unlock()
+	if a.epIdle == nil {
+		a.epIdle = map[*api.Client]int{}
+		a.epNext = map[*api.Client]time.Time{}
+	}
+	if !empty {
+		a.epIdle[c] = 0
+		delete(a.epNext, c)
+		return
+	}
+	if a.epIdle[c] < 8 {
+		a.epIdle[c]++
+	}
+	gap := base << a.epIdle[c]
+	if gap > a.WorkIdleMax {
+		gap = a.WorkIdleMax
+	}
+	// Half a base interval of slack: the ticker fires on a fixed grid, so
+	// without it a tick landing a few ms early would be skipped and the real
+	// gap would round up a whole extra interval.
+	a.epNext[c] = a.clock().Add(gap - base/2)
 }
 
 // endpoints resolves the served set: Endpoints when set, else the legacy
@@ -242,6 +308,9 @@ func (a *Agent) pollWork(ctx context.Context) error {
 		if a.endpointDisabled(ep.Client) {
 			continue
 		}
+		if !a.workDue(ep.Client) {
+			continue
+		}
 		items, err := ep.Client.GetWork(ctx)
 		if err != nil {
 			if api.Unauthorized(err) {
@@ -249,8 +318,10 @@ func (a *Agent) pollWork(ctx context.Context) error {
 				continue
 			}
 			a.logf("work poll failed (%s): %v", ep.BaseURL, err)
+			a.noteWork(ep.Client, false)
 			continue
 		}
+		a.noteWork(ep.Client, len(items) == 0)
 		for _, item := range items {
 			if err := a.handle(ctx, ep, item); err != nil {
 				return err

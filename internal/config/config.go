@@ -86,6 +86,10 @@ type Config struct {
 	// input: reject-new decisions live in the API).
 	WatermarkIntervalSec int
 
+	// WorkPollIdleMaxSec caps the idle backoff of the work poll (see
+	// agent.Agent.WorkIdleMax). <= WorkPollIntervalSec disables it.
+	WorkPollIdleMaxSec int
+
 	// CoolifyBaseURL is the Coolify API origin (default http://127.0.0.1:8000 —
 	// same-host Coolify on the ECS node). Empty disables runtime previews
 	// (local dev / tests have no Coolify).
@@ -136,6 +140,7 @@ func FromEnv() (*Config, error) {
 		GitPortMax:           envInt("GIT_HTTP_PORT_MAX", 24199),
 		WorkPollIntervalSec:  envInt("WORK_POLL_INTERVAL_SEC", 10),
 		WatermarkIntervalSec: envInt("WATERMARK_INTERVAL_SEC", 60),
+		WorkPollIdleMaxSec:   envInt("WORK_POLL_IDLE_MAX_SEC", 30),
 
 		CoolifyBaseURL:               strings.TrimRight(envOr("COOLIFY_BASE_URL", "http://127.0.0.1:8000"), "/"),
 		CoolifyAPIToken:              os.Getenv("COOLIFY_API_TOKEN"),

@@ -116,6 +116,7 @@ func run() error {
 		RT:                rt,
 		WorkPollInterval:  time.Duration(cfg.WorkPollIntervalSec) * time.Second,
 		WatermarkInterval: time.Duration(cfg.WatermarkIntervalSec) * time.Second,
+		WorkIdleMax:       time.Duration(cfg.WorkPollIdleMaxSec) * time.Second,
 		Logf: func(format string, args ...any) {
 			fmt.Printf(time.Now().UTC().Format(time.RFC3339)+" "+format+"\n", args...)
 		},
