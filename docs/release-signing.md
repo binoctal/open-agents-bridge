@@ -10,10 +10,12 @@ the archive hash, so an attacker who replaces both an archive and
 ## Key custody
 
 - Algorithm: Ed25519. Tooling: `scripts/release-sign` (`keygen`, `pubkey`, `sign`).
-- The private key is `~/.config/open-agents/release-signing/ed25519.key`
-  (directory 0700, file 0600) on the maintainer's machine. It is never in the
+- The private key is `.secrets/release-signing/ed25519.key` in the parent
+  monorepo (gitignored; `make release-sign` prefers it) with a fallback copy at
+  `~/.config/open-agents/release-signing/ed25519.key` (directory 0700, file
+  0600) on the maintainer's machine. It is never in the
   repository, never in CI secrets, never printed.
-- Keep an offline backup (encrypted USB / password manager attachment). Loss
+- Keep an offline backup (encrypted external storage). Loss
   of the only copy is handled by the rotation runbook below, but only with a
   working old key can rotation be seamless.
 - The public keys are embedded in two places that MUST stay identical:

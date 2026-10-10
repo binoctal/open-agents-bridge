@@ -47,10 +47,12 @@ deps:
 #   make release-sign TAG=v0.13.3
 # Downloads the Release's own checksums.txt (the file users will verify),
 # signs it, and uploads the signature. The private key is read from
-# ~/.config/open-agents/release-signing/ed25519.key.
+# SIGN_KEY: the monorepo's gitignored .secrets/release-signing/ed25519.key when
+# present, else ~/.config/open-agents/release-signing/ed25519.key.
+SIGN_KEY ?= $(firstword $(wildcard $(CURDIR)/../.secrets/release-signing/ed25519.key) $(HOME)/.config/open-agents/release-signing/ed25519.key)
 release-sign:
 	@test -n "$(TAG)" || (echo "usage: make release-sign TAG=vX.Y.Z" && exit 1)
 	@mkdir -p $(BUILD_DIR)/release-sign
 	gh release download $(TAG) --repo binoctal/open-agents-bridge --pattern checksums.txt --dir $(BUILD_DIR)/release-sign --clobber
-	go run ./scripts/release-sign sign -in $(BUILD_DIR)/release-sign/checksums.txt -out $(BUILD_DIR)/release-sign/checksums.txt.sig
+	go run ./scripts/release-sign sign -key $(SIGN_KEY) -in $(BUILD_DIR)/release-sign/checksums.txt -out $(BUILD_DIR)/release-sign/checksums.txt.sig
 	gh release upload $(TAG) --repo binoctal/open-agents-bridge $(BUILD_DIR)/release-sign/checksums.txt.sig --clobber
