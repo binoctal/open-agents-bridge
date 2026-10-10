@@ -1,5 +1,3 @@
-> **DRAFT - pending the owner's review. Not yet in force. 草案，待所有者审阅，尚未生效。**
-
 # Trademark Policy / 商标政策
 
 ## English

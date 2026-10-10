@@ -1,4 +1,3 @@
-> **DRAFT - pending the owner's review. Not yet in force. 草案，待所有者审阅，尚未生效。**
 > The CLA text below should be reviewed by a lawyer before external contributions are accepted.
 
 # Contributing / 贡献指南
