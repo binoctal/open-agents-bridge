@@ -33,7 +33,7 @@ not grant any right to use the Marks.
 ### Reporting and contact
 
 Suspected impersonation or confusingly similar names can be reported to the
-maintainer (contact channel to be filled in by the owner before publication).
+maintainer at binoctal@gmail.com.
 The maintainer may ask for removal of infringing names, domains and packages.
 
 ## 中文
@@ -66,5 +66,5 @@ The maintainer may ask for removal of infringing names, domains and packages.
 
 ### 举报与联系
 
-发现冒充或易混淆的名称，可向维护者举报（联系渠道由所有者在发布前补全）。
+发现冒充或易混淆的名称，可发送邮件至 binoctal@gmail.com 向维护者举报。
 维护者可要求移除侵权的名称、域名与软件包。
