@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/binoctal/open-agents-bridge/internal/config"
+	"github.com/binoctal/open-agents-bridge/internal/serverproof"
 	"github.com/binoctal/open-agents-bridge/internal/crypto"
 	"github.com/binoctal/open-agents-bridge/internal/machinekey"
 	"github.com/binoctal/open-agents-bridge/internal/fingerprint"
@@ -123,6 +124,10 @@ Examples:
 			os.Exit(1)
 		}
 
+		// 5e.1: the control plane must prove its identity before the pairing
+		// code (a credential) is sent.
+		requireServerProof(pairServerURL, pairUnsafe)
+
 		fmt.Println("Pairing...")
 
 		// Call pairing API
@@ -222,6 +227,8 @@ func runDevPair(cmd *cobra.Command, args []string, cp config.ControlPlane) {
 	}
 
 	fmt.Printf("Setting up machine for: %s\n", email)
+
+	requireServerProof(pairServerURL, pairUnsafe)
 
 	// Call dev setup API
 	cfg, err := devSetup(email, password)
@@ -457,4 +464,19 @@ func requireAllowedServer(raw string, unsafe bool) config.ControlPlane {
 		fmt.Fprintln(os.Stderr, "WARNING: It will receive your pairing credentials and can send commands to this machine.")
 	}
 	return cp
+}
+
+// requireServerProof verifies the control plane's identity (5e.1) before any
+// credential is sent. It exits on refusal; non-official builds and
+// --unsafe-server runs only get a warning.
+func requireServerProof(serverURL string, unsafe bool) {
+	serverproof.SetUnsafe(unsafe)
+	err := serverproof.Ensure(serverURL, func(f string, a ...interface{}) {
+		fmt.Fprintf(os.Stderr, f+"\n", a...)
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Refusing to send the pairing code: this server did not prove it is an official Open Agents control plane.")
+		os.Exit(1)
+	}
 }

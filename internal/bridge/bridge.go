@@ -36,6 +36,7 @@ import (
 	"github.com/binoctal/open-agents-bridge/internal/replay"
 	"github.com/binoctal/open-agents-bridge/internal/rules"
 	"github.com/binoctal/open-agents-bridge/internal/scanner"
+	"github.com/binoctal/open-agents-bridge/internal/serverproof"
 	"github.com/binoctal/open-agents-bridge/internal/session"
 	"github.com/binoctal/open-agents-bridge/internal/storage"
 	"github.com/binoctal/open-agents-bridge/internal/updater"
@@ -470,6 +471,12 @@ func New(cfg *config.Config) (*Bridge, error) {
 }
 
 func (b *Bridge) Start() error {
+	// 5e.1: no token leaves this process until the control plane proves its
+	// identity. Official builds retry with backoff instead of crash-looping.
+	if err := b.waitServerProof(); err != nil {
+		return err
+	}
+
 	// Start permission server
 	if err := b.permServer.Start(); err != nil {
 		b.logWarn("[%s] Could not start permission server: %v", logger.ModPermission, err)
@@ -666,7 +673,34 @@ func (b *Bridge) closeGolden() {
 	}
 }
 
+// serverProofBackoff is the retry schedule while an official build cannot
+// verify its server; the last value repeats.
+var serverProofBackoff = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second, time.Minute, 5 * time.Minute}
+
+// waitServerProof blocks until the server identity check passes (or is
+// tolerated by policy), or the bridge is stopped.
+func (b *Bridge) waitServerProof() error {
+	for attempt := 0; ; attempt++ {
+		err := serverproof.Ensure(b.config.ServerURL, func(f string, a ...interface{}) { b.logWarn("[%s] "+f, append([]interface{}{logger.ModBridge}, a...)...) })
+		if err == nil {
+			return nil
+		}
+		d := serverProofBackoff[min(attempt, len(serverProofBackoff)-1)]
+		b.logWarn("[%s] Refusing to send credentials: %v (retrying in %s)", logger.ModBridge, err, d)
+		select {
+		case <-b.done:
+			return nil
+		case <-time.After(d):
+		}
+	}
+}
+
 func (b *Bridge) connect() error {
+	// 5e.1: cached after the first success; on a reconnect to an unverified
+	// server this refuses before the token goes into the upgrade URL.
+	if err := serverproof.Ensure(b.config.ServerURL, nil); err != nil {
+		return err
+	}
 	// A new socket means the API re-pushes profiles; forget stale plaintext.
 	b.profileStore().dropCache()
 	u, err := url.Parse(b.config.ServerURL)

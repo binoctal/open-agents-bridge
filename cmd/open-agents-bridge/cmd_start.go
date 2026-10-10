@@ -10,6 +10,7 @@ import (
 
 	"github.com/binoctal/open-agents-bridge/internal/bridge"
 	"github.com/binoctal/open-agents-bridge/internal/config"
+	"github.com/binoctal/open-agents-bridge/internal/serverproof"
 	"github.com/binoctal/open-agents-bridge/internal/instancelock"
 	"github.com/binoctal/open-agents-bridge/internal/logger"
 	"github.com/binoctal/open-agents-bridge/internal/tray"
@@ -78,6 +79,13 @@ Examples:
 		logger.SetGlobalLevel(logLevel)
 
 		var cfg *config.Config
+
+		// 5e.1: server identity policy. Cloud session containers get their
+		// URL from the platform environment and bypass the 5c.2 pinning, so
+		// they are not held to the official-build proof requirement either
+		// (the check still runs and warns).
+		serverproof.SetUnsafe(startUnsafe)
+		serverproof.SetLenient(config.SessionEnvActive())
 
 		if config.SessionEnvActive() {
 			// Cloud session container: identity comes from the environment.

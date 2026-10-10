@@ -68,6 +68,10 @@ func TestConnectQueryAndKeepAliveCarryInstanceID(t *testing.T) {
 	var ids []string
 	frames := make(chan string, 4)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/server-proof" { // 5e.1 identity probe (dev build: warns, continues)
+			http.NotFound(w, r)
+			return
+		}
 		ids = append(ids, r.URL.Query().Get("instanceId"))
 		c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
 		if err != nil {
