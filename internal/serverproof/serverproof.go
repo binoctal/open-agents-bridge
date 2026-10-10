@@ -46,8 +46,8 @@ type TrustedKey struct {
 // can be rotated (see docs/server-identity.md); a proof is accepted when it
 // verifies against ANY entry. Tests replace it.
 var trustedKeys = []TrustedKey{
-	{ID: "staging", Key: "R/L6+P0CThVIwC8UjRqjoC+erkfGOHf1ULnCZOtNxk0="},
-	{ID: "production", Key: "33ZtlaYP8pRDH1kyEEJnfXy0PAX25DXo7N47wSmgIEg="},
+	{ID: "staging", Key: "YQ37ox3O0kSPtYtIfXuEexn8IKsUDg9klyrk7AXxTr8="},
+	{ID: "production", Key: "9gFMg60eboQSvG/VvStAUxRVq6ZH/9H2uwKqPDnreqU="},
 }
 
 // requireServerProof is the policy switch for official builds. While not
