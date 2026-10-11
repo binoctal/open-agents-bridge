@@ -81,9 +81,9 @@ func (m *Manager) createSession(cliType, workDir, sessionID string, cols, rows i
 			logger.Debug("[%s] Protocol: %s (still connected)", logger.ModSession, existingSess.Protocol.GetProtocolName())
 			logger.Debug("[%s] Status: %s", logger.ModSession, existingSess.Status)
 			logger.Debug("[%s] History preserved!", logger.ModSession)
-			existingSess.PermissionMode = permissionMode
 			existingSess.LastActiveAt = time.Now()
 			m.mu.Unlock()
+			m.syncResumedMode(existingSess, permissionMode)
 			return existingSess, nil
 		}
 
@@ -273,4 +273,24 @@ func (m *Manager) createSession(cliType, workDir, sessionID string, cols, rows i
 	logger.Debug("[%s] CLI Type: %s", logger.ModSession, cliType)
 	logger.Debug("[%s] Protocol: %s", logger.ModSession, protocolMgr.GetProtocolName())
 	return sess, nil
+}
+
+// syncResumedMode brings a resumed session to the requested permission mode.
+// The recorded mode is only changed once the engine really runs it: writing it
+// without applying made a later session:spec_update look like a no-op, so the
+// bridge reported a mode the engine never enforced.
+func (m *Manager) syncResumedMode(sess *Session, mode string) {
+	if mode == "" || mode == sess.PermissionMode {
+		return
+	}
+	acp, isACP := sess.Protocol.GetAdapter().(*protocol.ACPAdapter)
+	if sess.CLIType != "claude" || !isACP {
+		logger.Debug("[%s] Resume of %s keeps mode %s (engine cannot switch to %s in place)", logger.ModSession, sess.ID, sess.PermissionMode, mode)
+		return
+	}
+	if err := acp.SetMode(ClaudeACPModeID(mode), mode); err != nil {
+		logger.Warn("[%s] Resume of %s could not apply mode %s: %v", logger.ModSession, sess.ID, mode, err)
+		return
+	}
+	sess.PermissionMode = mode
 }
