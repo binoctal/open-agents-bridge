@@ -2130,7 +2130,17 @@ func (b *Bridge) handleSessionCancel(msg Message) {
 	// Send cancel to the session (ACP protocol)
 	sess := b.sessions.Get(sessionID)
 	if sess == nil {
-		b.logDebug("[%s] Session not found: %s", logger.ModSession, sessionID)
+		// Nothing is running (e.g. the bridge restarted and lost the session):
+		// still ack, otherwise the web stays on "cancelling…" forever.
+		b.logDebug("[%s] Session not found: %s, acking cancel anyway", logger.ModSession, sessionID)
+		b.sendMessage(Message{
+			Type: "session:cancelled",
+			Payload: map[string]interface{}{
+				"sessionId": sessionID,
+				"machineId": b.config.MachineID,
+			},
+			Timestamp: time.Now().UnixMilli(),
+		})
 		return
 	}
 
