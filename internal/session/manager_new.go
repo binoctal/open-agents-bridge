@@ -215,6 +215,8 @@ func (m *Manager) createSession(cliType, workDir, sessionID string, cols, rows i
 					m.credentialHealthCallback(sess.ID, h)
 				}
 			}
+			// Global fallback: no identity anywhere → use the host login live.
+			applyHostIdentityFallback(&config, workDir, dir)
 		} else {
 			logger.Warn("[%s] credential health check skipped, mode dir unavailable: %v", logger.ModSession, err)
 		}

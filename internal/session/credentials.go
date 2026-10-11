@@ -71,6 +71,12 @@ func (c *credentialsFile) effective() *credentialsFile {
 // mapping (bridge classifyAuthError) is the backstop for that case. A file
 // with no refresh expiry falls back to expiresAt for both checks.
 func CheckCredentialHealth(dir string, now time.Time) CredentialHealth {
+	return checkCredentialHealth(dir, now, true)
+}
+
+// checkCredentialHealth is CheckCredentialHealth with the dead-file removal
+// switchable: the host's own login must never be deleted by the bridge.
+func checkCredentialHealth(dir string, now time.Time, removeDead bool) CredentialHealth {
 	path := filepath.Join(dir, ".credentials.json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -90,6 +96,9 @@ func CheckCredentialHealth(dir string, now time.Time) CredentialHealth {
 	}
 	deadlineTime := time.UnixMilli(deadline)
 	if !now.Before(deadlineTime) {
+		if !removeDead {
+			return CredentialDead
+		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			logger.Warn("[%s] failed to remove dead credential file %s: %v", logger.ModSession, path, err)
 		} else if err == nil {
