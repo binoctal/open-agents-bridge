@@ -1208,6 +1208,7 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 		b.permPending[pendingPermKey(sessionID, permIDStr)] = reqMsg
 		b.permSessionMu.Unlock()
 
+		b.logInfo("[%s] Permission request %s sent for session %s", logger.ModPermission, permIDStr, sessionID)
 		b.sendMessage(reqMsg)
 
 	case protocol.MessageTypeStatus:
@@ -1318,6 +1319,13 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 
 	case protocol.MessageTypeError:
 		metrics.RecordError(sessionID, "protocol")
+
+		// The idle watchdog gave up on the turn: the engine no longer waits on
+		// any approval, so re-emitting them after a reconnect would only show
+		// zombie approvals.
+		if code, _ := msg.Meta["code"].(string); code == "TURN_IDLE_TIMEOUT" {
+			b.forgetSessionPermissions(sessionID)
+		}
 
 		// Only trigger fallback if the session's protocol is actually disconnected.
 		// Non-fatal errors (e.g. ENOSPC inotify warnings in stderr) should NOT

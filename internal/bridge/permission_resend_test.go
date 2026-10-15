@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/binoctal/open-agents-bridge/internal/permission"
+	"github.com/binoctal/open-agents-bridge/internal/protocol"
 )
 
 // wsPair connects b to a local WS server and returns a channel of the frames
@@ -306,6 +307,49 @@ func TestPendingPermissionClearedOnCancelAndStop(t *testing.T) {
 		case m := <-frames:
 			if m.Type == "permission:request" {
 				t.Fatalf("zombie approval re-sent after cancel/stop: %v", m.Payload)
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
+// The idle watchdog gives up on a turn that stalled on an approval nobody
+// answered; the approval must not be resurrected by later reconnects (live log
+// 2026-10-15: re-sent at every resume for an hour after the watchdog fired).
+func TestPendingPermissionClearedWhenIdleWatchdogFires(t *testing.T) {
+	dir := FixtureWorkspace(t)
+	t.Setenv("OA_REPLAY_SHIM", os.Args[0])
+	t.Setenv("OA_REPLAY_SHIM_ARGS", "-test.run=TestReplayAgentHelper")
+	t.Setenv("OA_REPLAY_SCRIPT", fixtureScript(t, "success.script.jsonl"))
+
+	b := newSendBridge(t)
+	b.handleSessionResume(Message{
+		Type: "session:resume",
+		Payload: map[string]interface{}{
+			"sessionId": "sess-w", "machineId": "dev-recreate", "cliType": "replay",
+			"workDir": dir, "permissionMode": "default",
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+	frames := wsPair(t, b)
+	b.permPending = map[string]Message{pendingPermKey("sess-w", "7"): permReq("7", "sess-w")}
+
+	b.forwardSessionOutput("sess-w", protocol.Message{
+		Type:    protocol.MessageTypeError,
+		Content: "agent turn stalled",
+		Meta:    map[string]interface{}{"code": "TURN_IDLE_TIMEOUT", "kind": "diagnostic"},
+	})
+	if len(b.permPending) != 0 {
+		t.Fatalf("watchdog must clear the session's pending approvals, left %d", len(b.permPending))
+	}
+	b.resendPendingPermissions("")
+	deadline := time.After(400 * time.Millisecond)
+	for {
+		select {
+		case m := <-frames:
+			if m.Type == "permission:request" {
+				t.Fatalf("zombie approval re-sent after watchdog: %v", m.Payload)
 			}
 		case <-deadline:
 			return
