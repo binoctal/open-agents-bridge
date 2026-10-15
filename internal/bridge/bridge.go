@@ -157,6 +157,13 @@ type Bridge struct {
 	// synthesized into a real option below.
 	permSessionMap map[string]string
 	permOptionsMap map[string][]string
+	// permPending keeps the full permission:request of every unanswered
+	// approval. The request is never buffered offline (noBufferTypes), so a
+	// request written into a socket that was already dead — or sent just
+	// before a drop — vanished and the engine waited out the idle watchdog.
+	// Re-emitted after a reconnect and on session resume; dropped once
+	// answered or once its session is gone.
+	permPending map[string]Message
 	specs          *specTracker
 	specsOnce      sync.Once
 	permSessionMu  sync.RWMutex
@@ -334,6 +341,7 @@ func New(cfg *config.Config) (*Bridge, error) {
 		statusTrackers:   make(map[string]*statusTracker),
 		permSessionMap:   make(map[string]string),
 		permOptionsMap:   make(map[string][]string),
+		permPending:      make(map[string]Message),
 		specs:            newSpecTracker(),
 		pendingQuestions: make(map[string]chan string),
 		lineBoundary:     make(map[string]bool),
@@ -771,6 +779,12 @@ func (b *Bridge) connect() error {
 		return err
 	}
 
+	// A path that goes silently dead (NAT/edge drop, no FIN) never errors on
+	// our 30s pings — writes just queue — so ReadMessage blocked until TCP
+	// gave up, and anything sent meanwhile was lost. Any inbound frame (the
+	// edge answers our ping with a pong) pushes the deadline out.
+	armReadDeadline(conn, wsReadTimeout)
+
 	b.connMu.Lock()
 	b.conn = conn
 	b.connMu.Unlock()
@@ -781,6 +795,19 @@ func (b *Bridge) connect() error {
 	b.logInfo("[%s] Connected to server successfully", logger.ModBridge)
 	return nil
 }
+
+// armReadDeadline makes silence on conn fatal: ReadMessage fails once d passes
+// with no inbound frame, and a pong (the edge's answer to our ping) counts.
+func armReadDeadline(conn *websocket.Conn, d time.Duration) {
+	conn.SetReadDeadline(time.Now().Add(d))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(d))
+		return nil
+	})
+}
+
+// wsReadTimeout bounds silence on the WebSocket: four missed 30s pings.
+const wsReadTimeout = 120 * time.Second
 
 func (b *Bridge) readLoop() {
 	for {
@@ -856,6 +883,7 @@ func (b *Bridge) readLoop() {
 			b.stateManager.SetState(StateConnected, "connection_established")
 			b.flushOffline() // Send buffered messages from offline period
 			b.notifyStaleSessionsStopped()
+			go b.resendPendingPermissions("")
 			go b.sendSessionRestore() // Push historical sessions to frontend
 			// Re-send the capability report: the probe conclusion may have
 			// changed while disconnected (e.g. API moved, token rotated).
@@ -881,6 +909,12 @@ func (b *Bridge) readLoop() {
 		_, data, err := b.conn.ReadMessage()
 		if err == nil {
 			b.conflictCount = 0
+			// b.conn may have been nil'd by a failed write since ReadMessage returned.
+			b.connMu.Lock()
+			if b.conn != nil {
+				b.conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+			}
+			b.connMu.Unlock()
 		}
 		if err != nil {
 			closeCode := b.extractCloseCode(err)
@@ -1153,9 +1187,7 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 		b.permSessionMu.Lock()
 		b.permSessionMap[permIDStr] = sessionID
 		b.permOptionsMap[permIDStr] = permReq.Options
-		b.permSessionMu.Unlock()
-
-		b.sendMessage(Message{
+		reqMsg := Message{
 			Type: "permission:request",
 			Payload: map[string]interface{}{
 				"sessionId":   sessionID,
@@ -1169,7 +1201,14 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 				"protocol":    protocolName,
 			},
 			Timestamp: time.Now().UnixMilli(),
-		})
+		}
+		if b.permPending == nil {
+			b.permPending = make(map[string]Message)
+		}
+		b.permPending[permIDStr] = reqMsg
+		b.permSessionMu.Unlock()
+
+		b.sendMessage(reqMsg)
 
 	case protocol.MessageTypeStatus:
 		// Real AgentStatus transitions (typed content) already went through
@@ -1807,6 +1846,7 @@ func (b *Bridge) handleSessionResume(msg Message) {
 	sess.LastActiveAt = time.Now()
 
 	b.logInfo("[%s] Session %s resumed successfully", logger.ModSession, sessionID)
+	go b.resendPendingPermissions(sessionID)
 
 	// Send resume success notification
 	b.sendMessage(Message{
@@ -2273,6 +2313,46 @@ func (b *Bridge) synthesizeOptionID(permID string, approved bool) string {
 	return "reject"
 }
 
+// forgetPendingPermission drops an answered approval from the re-emit set.
+func (b *Bridge) forgetPendingPermission(id string) {
+	if id == "" {
+		return
+	}
+	b.permSessionMu.Lock()
+	delete(b.permPending, id)
+	b.permSessionMu.Unlock()
+}
+
+// resendPendingPermissions re-emits unanswered permission:request frames.
+// sessionID "" means every session (after a reconnect); otherwise only that
+// session's (on resume). Entries whose session no longer exists are dropped.
+// The web side keys approvals by sessionId::id, so a request it already
+// holds is not duplicated.
+func (b *Bridge) resendPendingPermissions(sessionID string) {
+	b.permSessionMu.Lock()
+	var resend []Message
+	for id, msg := range b.permPending {
+		payload, _ := msg.Payload.(map[string]interface{})
+		sid, _ := payload["sessionId"].(string)
+		if b.sessions.Get(sid) == nil {
+			delete(b.permPending, id)
+			delete(b.permSessionMap, id)
+			delete(b.permOptionsMap, id)
+			continue
+		}
+		if sessionID != "" && sid != sessionID {
+			continue
+		}
+		msg.Timestamp = time.Now().UnixMilli()
+		resend = append(resend, msg)
+	}
+	b.permSessionMu.Unlock()
+	for _, msg := range resend {
+		b.logInfo("[%s] Re-sending unanswered permission request after reconnect/resume", logger.ModPermission)
+		b.sendMessage(msg)
+	}
+}
+
 func (b *Bridge) handlePermissionResponse(msg Message) {	payload, ok := msg.Payload.(map[string]interface{})
 	if !ok {
 		b.logDebug("[%s] Invalid permission response payload", logger.ModPermission)
@@ -2316,6 +2396,9 @@ func (b *Bridge) handlePermissionResponse(msg Message) {	payload, ok := msg.Payl
 
 	// Record permission metric
 	metrics.RecordPermission("", approved)
+
+	// Answered: stop re-emitting it after reconnects.
+	b.forgetPendingPermission(idStr)
 
 	// Also send to ACP protocol if optionId is provided
 	if optionID != "" {
