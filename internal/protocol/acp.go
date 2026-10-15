@@ -427,6 +427,12 @@ func (a *ACPAdapter) IsProcessing() bool {
 	return a.isProcessing.Load()
 }
 
+// Package-level vars so tests can shorten them.
+var (
+	staleTurnWait        = 60 * time.Second
+	staleTurnCancelGrace = 5 * time.Second
+)
+
 func (a *ACPAdapter) SendMessage(msg Message) error {
 	if !a.connected.Load() {
 		return fmt.Errorf("not connected")
@@ -456,13 +462,27 @@ initialized:
 	// Sending session/prompt while the agent is still processing causes the agent to
 	// silently drop the new request or get stuck.
 	if msg.Type == MessageTypeContent && a.isProcessing.Load() {
-		timeout := time.After(60 * time.Second)
+		timeout := time.After(staleTurnWait)
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-timeout:
-				return fmt.Errorf("timed out waiting for agent to finish processing")
+				// The previous turn is wedged (e.g. a tool call that never
+				// finished). Dropping the user's new message would leave
+				// them with a dead conversation, so cancel the stale turn,
+				// give the agent a moment to wind down, then send anyway.
+				logger.Warn("[%s] Previous turn still running after %s, cancelling it before sending the new prompt", logger.ModProtocol, staleTurnWait)
+				_ = a.SendMessage(Message{Type: MessageTypeCancel, Content: "superseded by new prompt"})
+				grace := time.After(staleTurnCancelGrace)
+				for a.isProcessing.Load() {
+					select {
+					case <-grace:
+						a.isProcessing.Store(false)
+					case <-ticker.C:
+					}
+				}
+				goto ready
 			case <-ticker.C:
 				if !a.isProcessing.Load() {
 					goto ready
