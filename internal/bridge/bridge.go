@@ -1205,7 +1205,7 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 		if b.permPending == nil {
 			b.permPending = make(map[string]Message)
 		}
-		b.permPending[permIDStr] = reqMsg
+		b.permPending[pendingPermKey(sessionID, permIDStr)] = reqMsg
 		b.permSessionMu.Unlock()
 
 		b.sendMessage(reqMsg)
@@ -2145,6 +2145,7 @@ func (b *Bridge) handleSessionStop(msg Message) {
 	// End session metrics
 	metrics.EndSession(sessionID)
 
+	b.forgetSessionPermissions(sessionID)
 	b.reclaimIsolatedSession(sessionID)
 
 	// Send session stopped notification
@@ -2183,6 +2184,8 @@ func (b *Bridge) handleSessionCancel(msg Message) {
 		})
 		return
 	}
+
+	b.forgetSessionPermissions(sessionID)
 
 	// Send session/cancel via protocol
 	if sess.Protocol != nil {
@@ -2313,14 +2316,48 @@ func (b *Bridge) synthesizeOptionID(permID string, approved bool) string {
 	return "reject"
 }
 
-// forgetPendingPermission drops an answered approval from the re-emit set.
+// pendingPermKey scopes a request id to its session: ACP ids are counters per
+// session, so two sessions can both be waiting on id "0".
+func pendingPermKey(sessionID, id string) string { return sessionID + "\x00" + id }
+
+// forgetPendingPermission drops an answered approval from the re-emit set. The
+// response carries no sessionId, so it is matched the way the answer itself is
+// routed: to the session recorded for that id, else every pending request
+// with that id.
 func (b *Bridge) forgetPendingPermission(id string) {
 	if id == "" {
 		return
 	}
 	b.permSessionMu.Lock()
-	delete(b.permPending, id)
-	b.permSessionMu.Unlock()
+	defer b.permSessionMu.Unlock()
+	if sid := b.permSessionMap[id]; sid != "" {
+		delete(b.permPending, pendingPermKey(sid, id))
+		return
+	}
+	for k, msg := range b.permPending {
+		if payload, _ := msg.Payload.(map[string]interface{}); fmt.Sprint(payload["id"]) == id {
+			delete(b.permPending, k)
+		}
+	}
+}
+
+// forgetSessionPermissions drops every unanswered approval of a session whose
+// turn was cancelled or that was stopped: the engine no longer waits on them,
+// so re-emitting them after a reconnect would show a zombie approval.
+func (b *Bridge) forgetSessionPermissions(sessionID string) {
+	b.permSessionMu.Lock()
+	defer b.permSessionMu.Unlock()
+	for k, msg := range b.permPending {
+		payload, _ := msg.Payload.(map[string]interface{})
+		if sid, _ := payload["sessionId"].(string); sid == sessionID {
+			delete(b.permPending, k)
+			id := fmt.Sprint(payload["id"])
+			if b.permSessionMap[id] == sessionID {
+				delete(b.permSessionMap, id)
+				delete(b.permOptionsMap, id)
+			}
+		}
+	}
 }
 
 // resendPendingPermissions re-emits unanswered permission:request frames.
@@ -2336,8 +2373,10 @@ func (b *Bridge) resendPendingPermissions(sessionID string) {
 		sid, _ := payload["sessionId"].(string)
 		if b.sessions.Get(sid) == nil {
 			delete(b.permPending, id)
-			delete(b.permSessionMap, id)
-			delete(b.permOptionsMap, id)
+			if pid := fmt.Sprint(payload["id"]); b.permSessionMap[pid] == sid {
+				delete(b.permSessionMap, pid)
+				delete(b.permOptionsMap, pid)
+			}
 			continue
 		}
 		if sessionID != "" && sid != sessionID {

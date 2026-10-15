@@ -108,15 +108,15 @@ func TestPendingPermissionResentAfterReconnect(t *testing.T) {
 	frames := wsPair(t, b)
 
 	b.permPending = map[string]Message{
-		"p-live": permReq("p-live", "sess-perm"),
-		"p-gone": permReq("p-gone", "sess-dead"),
+		pendingPermKey("sess-perm", "p-live"): permReq("p-live", "sess-perm"),
+		pendingPermKey("sess-dead", "p-gone"): permReq("p-gone", "sess-dead"),
 	}
 	b.permSessionMap = map[string]string{"p-live": "sess-perm", "p-gone": "sess-dead"}
 
 	b.resendPendingPermissions("")
 	expectPermFrame(t, frames, "p-live")
 	expectNoFrame(t, frames)
-	if _, ok := b.permPending["p-gone"]; ok {
+	if _, ok := b.permPending[pendingPermKey("sess-dead", "p-gone")]; ok {
 		t.Error("request of a vanished session must be dropped, not kept forever")
 	}
 
@@ -149,8 +149,8 @@ func TestPendingPermissionResentOnlyForResumedSession(t *testing.T) {
 	}
 	frames := wsPair(t, b)
 	b.permPending = map[string]Message{
-		"pa": permReq("pa", "sess-a"),
-		"pb": permReq("pb", "sess-b"),
+		pendingPermKey("sess-a", "pa"): permReq("pa", "sess-a"),
+		pendingPermKey("sess-b", "pb"): permReq("pb", "sess-b"),
 	}
 
 	b.resendPendingPermissions("sess-b")
@@ -220,4 +220,95 @@ func TestReadDeadlineTripsOnSilenceAndSurvivesPongs(t *testing.T) {
 	case <-time.After(4 * d):
 	}
 	close(stop2)
+}
+
+// ACP request ids are per-session counters: two sessions both waiting on id
+// "0" must both be re-sent, and answering one must not clear the other.
+func TestPendingPermissionSameIDAcrossSessions(t *testing.T) {
+	dir := FixtureWorkspace(t)
+	t.Setenv("OA_REPLAY_SHIM", os.Args[0])
+	t.Setenv("OA_REPLAY_SHIM_ARGS", "-test.run=TestReplayAgentHelper")
+	t.Setenv("OA_REPLAY_SCRIPT", fixtureScript(t, "success.script.jsonl"))
+
+	b := newSendBridge(t)
+	b.permHandler = permission.NewHandler()
+	for _, sid := range []string{"sess-a", "sess-b"} {
+		b.handleSessionResume(Message{
+			Type: "session:resume",
+			Payload: map[string]interface{}{
+				"sessionId": sid, "machineId": "dev-recreate", "cliType": "replay",
+				"workDir": dir, "permissionMode": "default",
+			},
+			Timestamp: time.Now().UnixMilli(),
+		})
+	}
+	frames := wsPair(t, b)
+	b.permPending = map[string]Message{}
+	b.permSessionMap = map[string]string{}
+	for _, sid := range []string{"sess-a", "sess-b"} {
+		b.permSessionMu.Lock()
+		b.permSessionMap["0"] = sid
+		b.permPending[pendingPermKey(sid, "0")] = permReq("0", sid)
+		b.permSessionMu.Unlock()
+	}
+
+	b.resendPendingPermissions("")
+	for i := 0; i < 2; i++ {
+		select {
+		case <-frames:
+		case <-time.After(2 * time.Second):
+			t.Fatal("both sessions' id-0 approvals must be re-sent")
+		}
+	}
+
+	// The answer routes to the last-registered session (sess-b); sess-a's stays.
+	b.handlePermissionResponse(Message{
+		Type:    "permission:response",
+		Payload: map[string]interface{}{"id": "0", "approved": true, "optionId": "allow_once"},
+	})
+	b.resendPendingPermissions("")
+	expectPermFrame(t, frames, "0")
+	expectNoFrame(t, frames)
+}
+
+// A cancelled turn or a stopped session no longer awaits its approvals; they
+// must not come back as zombie approvals after the next reconnect.
+func TestPendingPermissionClearedOnCancelAndStop(t *testing.T) {
+	dir := FixtureWorkspace(t)
+	t.Setenv("OA_REPLAY_SHIM", os.Args[0])
+	t.Setenv("OA_REPLAY_SHIM_ARGS", "-test.run=TestReplayAgentHelper")
+	t.Setenv("OA_REPLAY_SCRIPT", fixtureScript(t, "success.script.jsonl"))
+
+	b := newSendBridge(t)
+	for _, sid := range []string{"sess-c", "sess-s"} {
+		b.handleSessionResume(Message{
+			Type: "session:resume",
+			Payload: map[string]interface{}{
+				"sessionId": sid, "machineId": "dev-recreate", "cliType": "replay",
+				"workDir": dir, "permissionMode": "default",
+			},
+			Timestamp: time.Now().UnixMilli(),
+		})
+	}
+	frames := wsPair(t, b)
+	b.permPending = map[string]Message{
+		pendingPermKey("sess-c", "1"): permReq("1", "sess-c"),
+		pendingPermKey("sess-s", "2"): permReq("2", "sess-s"),
+	}
+
+	b.handleSessionCancel(Message{Payload: map[string]interface{}{"sessionId": "sess-c"}})
+	b.handleSessionStop(Message{Payload: map[string]interface{}{"sessionId": "sess-s"}})
+	b.resendPendingPermissions("")
+	// Only the cancelled/stopped acks may arrive; no permission:request.
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		select {
+		case m := <-frames:
+			if m.Type == "permission:request" {
+				t.Fatalf("zombie approval re-sent after cancel/stop: %v", m.Payload)
+			}
+		case <-deadline:
+			return
+		}
+	}
 }
