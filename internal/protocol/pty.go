@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -90,6 +91,19 @@ func (a *PTYAdapter) Connect(config AdapterConfig) error {
 
 		logger.Info("[%s] Process exited with code %d", logger.ModPTY, exitCode)
 
+		if a.callback != nil && exitCode != 0 {
+			// A dead engine used to surface only as an idle status, leaving the
+			// user with a silent, unresponsive session.
+			a.callback(Message{
+				Type:    MessageTypeError,
+				Content: fmt.Sprintf("the agent process exited with code %d; the session cannot continue. Check that the engine can start on this machine, then start a new session", exitCode),
+				Meta: map[string]interface{}{
+					"protocol":  "pty",
+					"code":      "ENGINE_EXITED",
+					"exit_code": exitCode,
+				},
+			})
+		}
 		if a.callback != nil {
 			a.callback(Message{
 				Type:    MessageTypeStatus,

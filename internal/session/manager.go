@@ -597,7 +597,10 @@ func (m *Manager) getCLICommand(cliType string) (string, []string, error) {
 	switch cliType {
 	case "claude":
 		// Claude Code ACP via npx (package renamed from @zed-industries/claude-code-acp)
-		return "npx", []string{"@agentclientprotocol/claude-agent-acp"}, nil
+		// --yes: without it npx asks "Ok to proceed?" on first install and
+		// reads the answer from stdin, which the ACP stream owns — initialize
+		// then times out and the session silently falls back to a dead PTY.
+		return "npx", []string{"--yes", "@agentclientprotocol/claude-agent-acp"}, nil
 	case "claude-pty":
 		// Claude Code PTY mode - full REPL with slash commands support
 		return "claude", nil, nil
