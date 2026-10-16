@@ -211,6 +211,10 @@ type Bridge struct {
 	// Message queue for ordered processing without blocking readLoop
 	messageQueue chan Message
 
+	// Per-session FIFO lanes for prompts (see enqueuePrompt).
+	promptLanes   map[string]*promptLane
+	promptLanesMu sync.Mutex
+
 	// HTTP client for API requests (reused to avoid connection reset issues)
 	httpClient *http.Client
 
@@ -1409,7 +1413,7 @@ func (b *Bridge) handleMessage(msg Message) {
 	case "session:resume":
 		b.handleSessionResume(msg)
 	case "session:send":
-		b.handleSessionSend(msg)
+		b.enqueuePrompt(msg, b.handleSessionSend)
 	case "session:stop":
 		b.handleSessionStop(msg)
 	case "session:spec_update":
@@ -1423,7 +1427,7 @@ func (b *Bridge) handleMessage(msg Message) {
 	case "session:resume-with-context":
 		b.handleResumeWithContext(msg)
 	case "chat:send":
-		b.handleChatSend(msg)
+		b.enqueuePrompt(msg, b.handleChatSend)
 	case "permission:response":
 		b.handlePermissionResponse(msg)
 	case "control:takeover":
@@ -1479,7 +1483,9 @@ func (b *Bridge) handleMessage(msg Message) {
 	case "scanner:rules:sync":
 		b.handleScannerRulesSync(msg)
 	case "machine:listDir":
-		b.handleListDir(msg)
+		// Read-only filesystem probe with no ordering needs: never queue it
+		// behind a slow handler, the web side gives up after 30s.
+		go b.handleListDir(msg)
 	default:
 		b.logDebug("[%s] Unknown message type: %s", logger.ModBridge, msg.Type)
 	}
