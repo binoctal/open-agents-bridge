@@ -2,9 +2,11 @@ package bridge
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/binoctal/open-agents-bridge/internal/replay"
 )
@@ -62,9 +64,33 @@ func TestReplayAgentHelper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replay helper: %v", err)
 	}
+	// The player outlives stdin EOF by design, so an interrupted or timed-out
+	// test run used to leak one helper per session forever. Cap the leak: exit
+	// shortly after the bridge side of the pipe closes, and never outlive a
+	// hard ceiling even if the pipe somehow stays open.
+	time.AfterFunc(helperMaxLifetime, func() { os.Exit(0) })
+	in := &eofExitReader{r: os.Stdin}
 	// Blocks until the process is killed; the returned error is unreachable
 	// in practice (context.Background is never cancelled).
-	if err := replay.RunPlayer(context.Background(), os.Stdin, os.Stdout, script); err != nil {
+	if err := replay.RunPlayer(context.Background(), in, os.Stdout, script); err != nil {
 		t.Fatalf("replay helper: %v", err)
 	}
+}
+
+const (
+	helperMaxLifetime = 15 * time.Minute
+	// Long enough for a test that closes stdin and then still expects the
+	// agent's trailing frames, short enough that orphans clear quickly.
+	helperEOFGrace = 30 * time.Second
+)
+
+// eofExitReader schedules process exit once the wrapped reader hits EOF.
+type eofExitReader struct{ r io.Reader }
+
+func (e *eofExitReader) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err == io.EOF {
+		time.AfterFunc(helperEOFGrace, func() { os.Exit(0) })
+	}
+	return n, err
 }

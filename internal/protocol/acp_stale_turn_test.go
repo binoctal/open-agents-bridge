@@ -162,3 +162,26 @@ func TestNewPromptWaitsWhileTurnIsActive(t *testing.T) {
 	}
 	t.Fatalf("expected cancel then prompt, agent saw:\n%s", wire())
 }
+
+// 2026-10-16: after the idle watchdog fired, only the bridge-side latch was
+// cleared; the agent stayed inside the abandoned turn and every following
+// prompt went silent for another full idle window. The watchdog must cancel
+// the agent's turn too.
+func TestWatchdogCancelsAgentTurn(t *testing.T) {
+	a, seen := startCaptureAgent(t)
+	a.isProcessing.Store(true)
+
+	a.fireTurnWatchdog(31 * time.Minute)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(seen(), `"session/cancel"`) {
+			if a.isProcessing.Load() {
+				t.Fatal("isProcessing must be cleared")
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("watchdog did not send session/cancel, agent saw:\n%s", seen())
+}

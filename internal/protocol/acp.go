@@ -1969,22 +1969,41 @@ func (a *ACPAdapter) turnWatchdog() {
 		if idle <= turnIdleLimit(a.hasActiveTools()) {
 			continue
 		}
-		logger.Warn("[%s] Turn idle watchdog fired: no protocol activity in %s while prompt %q is in flight; unblocking and reporting",
-			logger.ModACP, idle.Round(time.Second), a.promptIDInFlight())
-		a.isProcessing.Store(false)
-		a.lastPromptID.Store("")
-		a.resetActiveTools()
-		a.emitMessage(Message{
-			Type: MessageTypeError,
-			Content: fmt.Sprintf("agent turn stalled: no protocol activity for %s; if the session stays unresponsive, stop and restart it",
-				idle.Round(time.Second)),
-			Meta: map[string]interface{}{
-				"protocol": "acp",
-				"code":     "TURN_IDLE_TIMEOUT",
-				"kind":     "diagnostic",
-			},
-		})
+		a.fireTurnWatchdog(idle)
 	}
+}
+
+// fireTurnWatchdog reports a stalled turn, clears the local latch and tells
+// the agent to drop the turn. Clearing only our side used to leave the agent
+// wedged inside the abandoned turn (e.g. blocked on a permission answer that
+// was lost): the next prompt queued behind it and went silent for another
+// full idle window, which then fired again — the "5m after 30m" chain seen in
+// the 2026-10-16 logs.
+func (a *ACPAdapter) fireTurnWatchdog(idle time.Duration) {
+	logger.Warn("[%s] Turn idle watchdog fired: no protocol activity in %s while prompt %q is in flight; unblocking and reporting",
+		logger.ModACP, idle.Round(time.Second), a.promptIDInFlight())
+	a.isProcessing.Store(false)
+	a.lastPromptID.Store("")
+	a.resetActiveTools()
+	if sid := a.getSessionID(); sid != "" {
+		if err := a.sendJSONRPC(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"method":  "session/cancel",
+			"params":  map[string]interface{}{"sessionId": sid, "reason": "turn idle watchdog"},
+		}); err != nil {
+			logger.Warn("[%s] watchdog could not cancel the stalled turn: %v", logger.ModACP, err)
+		}
+	}
+	a.emitMessage(Message{
+		Type: MessageTypeError,
+		Content: fmt.Sprintf("agent turn stalled: no protocol activity for %s; if the session stays unresponsive, stop and restart it",
+			idle.Round(time.Second)),
+		Meta: map[string]interface{}{
+			"protocol": "acp",
+			"code":     "TURN_IDLE_TIMEOUT",
+			"kind":     "diagnostic",
+		},
+	})
 }
 
 // sendJSONRPC sends a JSON-RPC message
