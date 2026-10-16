@@ -1156,21 +1156,22 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 	case protocol.MessageTypeToolCall:
 		metrics.RecordToolCall(sessionID, fmt.Sprintf("%v", msg.Content))
 
-		toolName := fmt.Sprintf("%v", msg.Content)
-		if _, ok := b.loopDetectors[sessionID]; !ok {
-			b.loopDetectors[sessionID] = loopdetect.New(30, 5, 10)
-		}
-		if result := b.loopDetectors[sessionID].Record(toolName, toolName); result.Level > loopdetect.None {
-			b.logWarn("[%s] Loop detection [%s]: %s", logger.ModSession, sessionID, result.Message)
-			b.sendMessage(Message{
-				Type: "session:output",
-				Payload: map[string]interface{}{
-					"sessionId":  sessionID,
-					"outputType": "stderr",
-					"content":    fmt.Sprintf("⚠ %s", result.Message),
-				},
-				Timestamp: time.Now().UnixMilli(),
-			})
+		if toolName, inputKey, ok := loopCallKey(msg.Content); ok {
+			if _, exists := b.loopDetectors[sessionID]; !exists {
+				b.loopDetectors[sessionID] = loopdetect.New(30, 5, 10)
+			}
+			if result := b.loopDetectors[sessionID].Record(toolName, inputKey); result.Level > loopdetect.None {
+				b.logWarn("[%s] Loop detection [%s]: %s", logger.ModSession, sessionID, result.Message)
+				b.sendMessage(Message{
+					Type: "session:output",
+					Payload: map[string]interface{}{
+						"sessionId":  sessionID,
+						"outputType": "stderr",
+						"content":    fmt.Sprintf("⚠ %s", result.Message),
+					},
+					Timestamp: time.Now().UnixMilli(),
+				})
+			}
 		}
 
 		b.sendMessage(Message{
@@ -4875,4 +4876,28 @@ func toFallbackConfigs(mf []config.ModelFallback) []session.FallbackConfig {
 		out[i] = session.FallbackConfig{CLIType: f.CLIType, Fallback: f.Fallback, OnError: f.OnError}
 	}
 	return out
+}
+
+// loopCallKey extracts the (tool name, input fingerprint) pair loop detection
+// counts. Progress updates for an already-announced call carry only an id
+// (empty name and input) and must not count as another invocation; counting
+// them reported phantom loops on prod 2026-10-16.
+func loopCallKey(content interface{}) (name, inputKey string, ok bool) {
+	var tc protocol.ToolCall
+	switch v := content.(type) {
+	case protocol.ToolCall:
+		tc = v
+	case *protocol.ToolCall:
+		if v == nil {
+			return "", "", false
+		}
+		tc = *v
+	default:
+		return "", "", false
+	}
+	if tc.Name == "" || (tc.Status != "" && tc.Status != "pending") {
+		return "", "", false
+	}
+	raw, _ := json.Marshal(tc.Input)
+	return tc.Name, string(raw), true
 }
