@@ -46,3 +46,119 @@ func TestNewPromptCancelsWedgedTurn(t *testing.T) {
 	data, _ := os.ReadFile(capture)
 	t.Fatalf("expected session/cancel followed by session/prompt, agent saw:\n%s", data)
 }
+
+// startCaptureAgent connects an adapter to a fake agent that records every
+// line it receives, with a short stale-turn window for the test.
+func startCaptureAgent(t *testing.T) (*ACPAdapter, func() string) {
+	t.Helper()
+	oldWait, oldGrace := staleTurnWait, staleTurnCancelGrace
+	staleTurnWait, staleTurnCancelGrace = 300*time.Millisecond, 200*time.Millisecond
+	t.Cleanup(func() { staleTurnWait, staleTurnCancelGrace = oldWait, oldGrace })
+
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "stdin.log")
+	agent := "echo '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"agentInfo\":{\"name\":\"t\",\"version\":\"1\"}}}'\n" +
+		"while IFS= read -r line; do printf '%s\\n' \"$line\" >> " + capture + "; done"
+
+	a := NewACPAdapter()
+	t.Cleanup(func() { a.Disconnect() })
+	if err := a.Connect(AdapterConfig{Command: "sh", Args: []string{"-c", agent}, WorkDir: dir}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	a.setSessionID("s1")
+	return a, func() string { data, _ := os.ReadFile(capture); return string(data) }
+}
+
+// 2026-10-16: a turn waiting on the user's approval was cancelled 60s after
+// they typed a new message; the approval they then gave arrived too late and
+// Claude reported "user rejected". An open permission question is not a
+// wedged turn.
+func TestNewPromptWaitsWhilePermissionIsOpen(t *testing.T) {
+	a, wire := startCaptureAgent(t)
+	a.isProcessing.Store(true)
+	a.handlePermissionRequest(map[string]interface{}{
+		"id": float64(7),
+		"params": map[string]interface{}{
+			"toolCall": map[string]interface{}{"toolCallId": "tc1", "title": "Write"},
+			"options":  []interface{}{map[string]interface{}{"optionId": "allow"}},
+		},
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- a.SendMessage(Message{Type: MessageTypeContent, Content: "next"}) }()
+
+	time.Sleep(1 * time.Second) // > 3x staleTurnWait
+	if s := wire(); strings.Contains(s, "session/cancel") || strings.Contains(s, "session/prompt") {
+		t.Fatalf("turn awaiting approval was cancelled or overtaken:\n%s", s)
+	}
+
+	// The user approves; the turn then ends normally.
+	if err := a.SendMessage(Message{Type: MessageTypePermission, Content: PermissionResponse{ID: float64(7), OptionID: "allow"}}); err != nil {
+		t.Fatalf("permission reply: %v", err)
+	}
+	a.isProcessing.Store(false)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SendMessage: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("new prompt never went out after the turn ended")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(wire(), "session/prompt") {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if s := wire(); strings.Contains(s, "session/cancel") || !strings.Contains(s, "session/prompt") {
+		t.Fatalf("want prompt without cancel, agent saw:\n%s", s)
+	}
+}
+
+// A turn still producing wire traffic is busy, not wedged.
+func TestNewPromptWaitsWhileTurnIsActive(t *testing.T) {
+	a, wire := startCaptureAgent(t)
+	a.isProcessing.Store(true)
+
+	stop := make(chan struct{})
+	go func() {
+		tk := time.NewTicker(50 * time.Millisecond)
+		defer tk.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tk.C:
+				a.lastActivity.Store(time.Now().UnixNano())
+			}
+		}
+	}()
+
+	done := make(chan error, 1)
+	go func() { done <- a.SendMessage(Message{Type: MessageTypeContent, Content: "next"}) }()
+
+	time.Sleep(1 * time.Second)
+	if s := wire(); strings.Contains(s, "session/cancel") {
+		t.Fatalf("active turn was cancelled:\n%s", s)
+	}
+
+	// Activity stops: now it is wedged and must be cancelled.
+	close(stop)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SendMessage: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("wedged turn was never cancelled")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		s := wire()
+		if ci, pi := strings.Index(s, "session/cancel"), strings.Index(s, "session/prompt"); ci >= 0 && pi > ci {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("expected cancel then prompt, agent saw:\n%s", wire())
+}

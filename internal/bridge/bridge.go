@@ -2439,7 +2439,9 @@ func (b *Bridge) handlePermissionResponse(msg Message) {	payload, ok := msg.Payl
 		optionID = b.synthesizeOptionID(idStr, approved)
 	}
 
-	b.logDebug("[%s] Permission response: id=%v, approved=%v, optionId=%s", logger.ModPermission, id, approved, optionID)
+	// Info level: when an approval goes missing (2026-10-16), whether the
+	// answer ever reached the bridge is the first question.
+	b.logInfo("[%s] Permission response: id=%v, approved=%v, optionId=%s", logger.ModPermission, id, approved, optionID)
 
 	// First resolve internal permission handler
 	b.permHandler.Resolve(permission.Response{
@@ -2472,6 +2474,8 @@ func (b *Bridge) handlePermissionResponse(msg Message) {	payload, ok := msg.Payl
 						OptionID: optionID,
 					},
 				})
+			} else {
+				b.logWarn("[%s] Permission %s answered but session %s is gone or not ACP; answer dropped", logger.ModPermission, idStr, targetSessionID)
 			}
 
 			// Clean up mapping

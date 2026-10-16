@@ -143,6 +143,11 @@ type ACPAdapter struct {
 	// pendingPerms holds terminal commands waiting on a permission answer,
 	// keyed by terminalID (which doubles as the permission request id).
 	pendingPerms map[string]*pendingTerminal
+	// awaitingPerms holds the agent's own permission requests
+	// (session/request_permission) still waiting on the user, keyed by
+	// fmt.Sprint(id). Guarded by terminalMu. A turn with an open question is
+	// waiting on a human, not wedged — see waitForTurnEnd.
+	awaitingPerms map[string]struct{}
 	// Replay recording (off by default): when non-nil, raw wire frames are
 	// mirrored to a script file at the stdio boundary. A nil recorder makes
 	// every hook a no-op, so the production path pays nothing. recorderMu
@@ -156,12 +161,13 @@ type ACPAdapter struct {
 // NewACPAdapter creates a new ACP adapter
 func NewACPAdapter() *ACPAdapter {
 	a := &ACPAdapter{
-		terminals:    make(map[string]*terminalState),
-		pendingPerms: make(map[string]*pendingTerminal),
-		initDone:     make(chan struct{}),
-		procExited:   make(chan struct{}),
-		permMode:     "default",
-		rpcWaiters:   make(map[string]chan rpcReply),
+		terminals:     make(map[string]*terminalState),
+		pendingPerms:  make(map[string]*pendingTerminal),
+		awaitingPerms: make(map[string]struct{}),
+		initDone:      make(chan struct{}),
+		procExited:    make(chan struct{}),
+		permMode:      "default",
+		rpcWaiters:    make(map[string]chan rpcReply),
 	}
 	a.procExitCode.Store(-1)
 	return a
@@ -382,6 +388,7 @@ func (a *ACPAdapter) disconnectLocked() {
 		pt.timer.Stop()
 		delete(a.pendingPerms, id)
 	}
+	a.awaitingPerms = make(map[string]struct{})
 	a.terminalMu.Unlock()
 
 	if a.stdin != nil {
@@ -462,36 +469,10 @@ initialized:
 	// Sending session/prompt while the agent is still processing causes the agent to
 	// silently drop the new request or get stuck.
 	if msg.Type == MessageTypeContent && a.isProcessing.Load() {
-		timeout := time.After(staleTurnWait)
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-timeout:
-				// The previous turn is wedged (e.g. a tool call that never
-				// finished). Dropping the user's new message would leave
-				// them with a dead conversation, so cancel the stale turn,
-				// give the agent a moment to wind down, then send anyway.
-				logger.Warn("[%s] Previous turn still running after %s, cancelling it before sending the new prompt", logger.ModProtocol, staleTurnWait)
-				_ = a.SendMessage(Message{Type: MessageTypeCancel, Content: "superseded by new prompt"})
-				grace := time.After(staleTurnCancelGrace)
-				for a.isProcessing.Load() {
-					select {
-					case <-grace:
-						a.isProcessing.Store(false)
-					case <-ticker.C:
-					}
-				}
-				goto ready
-			case <-ticker.C:
-				if !a.isProcessing.Load() {
-					goto ready
-				}
-			}
+		if err := a.waitForTurnEnd(); err != nil {
+			return err
 		}
 	}
-
-ready:
 
 	// Convert unified message to ACP JSON-RPC format
 	switch msg.Type {
@@ -511,6 +492,7 @@ ready:
 		a.isProcessing.Store(true)
 		a.lastPromptID.Store(promptID)
 		a.resetActiveTools()
+		a.clearAwaitingPerms()
 		req := map[string]interface{}{
 			"jsonrpc": "2.0",
 			"id":      promptID,
@@ -534,6 +516,10 @@ ready:
 		if !ok {
 			return fmt.Errorf("invalid permission response type")
 		}
+
+		a.terminalMu.Lock()
+		delete(a.awaitingPerms, fmt.Sprint(perm.ID))
+		a.terminalMu.Unlock()
 
 		// A gated terminal command's approval: the id names the pending
 		// terminal, not a JSON-RPC request the agent made. Resolve it and
@@ -1162,6 +1148,13 @@ func (a *ACPAdapter) handlePermissionRequest(msg map[string]interface{}) {
 
 	logger.Debug("[%s] Permission request: tool=%s, options=%v", logger.ModACP, title, optionStrs)
 
+	a.terminalMu.Lock()
+	if a.awaitingPerms == nil {
+		a.awaitingPerms = make(map[string]struct{})
+	}
+	a.awaitingPerms[fmt.Sprint(id)] = struct{}{}
+	a.terminalMu.Unlock()
+
 	a.emitMessage(Message{
 		Type: MessageTypePermission,
 		Content: PermissionRequest{
@@ -1411,6 +1404,63 @@ func (a *ACPAdapter) gateTerminalOnPermission(terminalID, command string, env []
 			"protocol": "acp",
 		},
 	})
+}
+
+// waitForTurnEnd blocks a new prompt until the previous turn ends. Only a
+// wedged turn — no open permission question and no wire traffic for
+// staleTurnWait — is cancelled so the prompt can go through. A turn waiting
+// on the user's approval, or one still streaming, is left alone: cancelling
+// it on a fixed 60s clock (2026-10-16) killed turns whose approval the user
+// was about to give, and Claude reported the cancel as "user rejected".
+func (a *ACPAdapter) waitForTurnEnd() error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	quietSince := time.Now()
+	for a.isProcessing.Load() {
+		<-ticker.C
+		if !a.connected.Load() {
+			return fmt.Errorf("not connected")
+		}
+		if a.awaitingPermission() {
+			quietSince = time.Now()
+			continue
+		}
+		if last := time.Unix(0, a.lastActivity.Load()); last.After(quietSince) {
+			quietSince = last
+		}
+		if time.Since(quietSince) < staleTurnWait {
+			continue
+		}
+		// The previous turn is wedged (e.g. a tool call that never
+		// finished). Dropping the user's new message would leave them with
+		// a dead conversation, so cancel the stale turn, give the agent a
+		// moment to wind down, then send anyway.
+		logger.Warn("[%s] Previous turn silent for %s with no open permission request, cancelling it before sending the new prompt", logger.ModProtocol, staleTurnWait)
+		_ = a.SendMessage(Message{Type: MessageTypeCancel, Content: "superseded by new prompt"})
+		grace := time.After(staleTurnCancelGrace)
+		for a.isProcessing.Load() {
+			select {
+			case <-grace:
+				a.isProcessing.Store(false)
+			case <-ticker.C:
+			}
+		}
+	}
+	return nil
+}
+
+// awaitingPermission reports whether the current turn has a permission
+// question open: the agent's own request_permission or a gated terminal.
+func (a *ACPAdapter) awaitingPermission() bool {
+	a.terminalMu.Lock()
+	defer a.terminalMu.Unlock()
+	return len(a.awaitingPerms) > 0 || len(a.pendingPerms) > 0
+}
+
+func (a *ACPAdapter) clearAwaitingPerms() {
+	a.terminalMu.Lock()
+	a.awaitingPerms = make(map[string]struct{})
+	a.terminalMu.Unlock()
 }
 
 // optionApproves maps an ACP option id to an approval verdict. The web
