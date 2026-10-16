@@ -1735,6 +1735,11 @@ func (b *Bridge) handleSessionStart(msg Message) {
 		return
 	}
 
+	// A start for an id the registry already holds is a reuse (page reload,
+	// second tab): approvals the engine is still waiting on must reach the new
+	// view just as they do on session:resume, or the turn hangs unanswered.
+	go b.resendPendingPermissions(sess.ID)
+
 	// Send session started notification
 	b.sendMessage(Message{
 		Type: "session:started",

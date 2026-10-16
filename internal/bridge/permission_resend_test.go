@@ -356,3 +356,45 @@ func TestPendingPermissionClearedWhenIdleWatchdogFires(t *testing.T) {
 		}
 	}
 }
+
+// A page reload sends session:start for an id the registry already holds. The
+// unanswered approval must come back with it, otherwise the turn stays paused
+// on a request no view shows (live prod 2026-10-17).
+func TestPendingPermissionResentOnSessionStartReuse(t *testing.T) {
+	dir := FixtureWorkspace(t)
+	t.Setenv("OA_REPLAY_SHIM", os.Args[0])
+	t.Setenv("OA_REPLAY_SHIM_ARGS", "-test.run=TestReplayAgentHelper")
+	t.Setenv("OA_REPLAY_SCRIPT", fixtureScript(t, "success.script.jsonl"))
+
+	b := newSendBridge(t)
+	b.permHandler = permission.NewHandler()
+	start := func() {
+		b.handleSessionStart(Message{
+			Type: "session:start",
+			Payload: map[string]interface{}{
+				"sessionId": "sess-reuse", "machineId": "dev-recreate", "cliType": "replay",
+				"workDir": dir, "permissionMode": "default",
+			},
+			Timestamp: time.Now().UnixMilli(),
+		})
+	}
+	start()
+	if b.sessions.Get("sess-reuse") == nil {
+		t.Fatal("session should exist")
+	}
+	frames := wsPair(t, b)
+	b.permPending = map[string]Message{pendingPermKey("sess-reuse", "0"): permReq("0", "sess-reuse")}
+	b.permSessionMap = map[string]string{"0": "sess-reuse"}
+
+	start()
+	for {
+		select {
+		case m := <-frames:
+			if m.Type == "permission:request" {
+				return
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("pending approval was not re-sent on session:start reuse")
+		}
+	}
+}
