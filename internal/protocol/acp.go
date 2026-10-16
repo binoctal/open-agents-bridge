@@ -873,8 +873,13 @@ func (a *ACPAdapter) handleMessage(msg map[string]interface{}) {
 		} else if _, ok := msg["error"]; ok {
 			a.handleError(msg)
 		} else {
-			// Unknown request
-			logger.Warn("[%s] Unknown method: %s", logger.ModACP, method)
+			// Unknown request. Auth status pings and cancel notifications are
+			// routine agent chatter, not anomalies worth a warning per session.
+			if method == "_auth/status_update" || method == "$/cancel_request" {
+				logger.Debug("[%s] Ignoring method: %s", logger.ModACP, method)
+			} else {
+				logger.Warn("[%s] Unknown method: %s", logger.ModACP, method)
+			}
 		}
 	}
 }
@@ -1955,6 +1960,9 @@ func (a *ACPAdapter) turnWatchdog() {
 			return
 		}
 		if !a.isProcessing.Load() {
+			continue
+		}
+		if a.awaitingPermission() {
 			continue
 		}
 		idle := time.Since(time.Unix(0, a.lastActivity.Load()))
