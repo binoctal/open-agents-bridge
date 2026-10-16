@@ -31,3 +31,14 @@ func TestLoopCallKeyCountsOnlyAnnouncements(t *testing.T) {
 		t.Fatal("different inputs must have different fingerprints")
 	}
 }
+
+// Claude's ACP announces a call with an empty rawInput; those carry no
+// fingerprint, so they must not be counted as identical repeats.
+func TestLoopCallKeySkipsCallsWithoutInput(t *testing.T) {
+	for _, in := range []map[string]interface{}{nil, {}} {
+		c := protocol.ToolCall{ID: "t1", Name: "Terminal", Input: in, Status: "pending"}
+		if _, _, ok := loopCallKey(c); ok {
+			t.Fatalf("empty input %#v must not be counted", in)
+		}
+	}
+}

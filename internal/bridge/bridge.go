@@ -4904,5 +4904,12 @@ func loopCallKey(content interface{}) (name, inputKey string, ok bool) {
 		return "", "", false
 	}
 	raw, _ := json.Marshal(tc.Input)
+	// An engine that announces a call before its arguments are known (Claude's
+	// ACP sends an empty rawInput, filled in by later updates) gives every call
+	// of a tool the same fingerprint; counting those would flag any run of
+	// five distinct commands as a loop.
+	if k := string(raw); k == "null" || k == "{}" || k == "[]" || k == `""` {
+		return "", "", false
+	}
 	return tc.Name, string(raw), true
 }
