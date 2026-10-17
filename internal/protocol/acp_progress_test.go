@@ -40,12 +40,39 @@ func TestIsCliProgressLog(t *testing.T) {
 	}
 }
 
+// 2026-10-17 xuantie e2e: the claude-agent-acp adapter's unreachable()
+// helper dumps unrecognized engine events (e.g. command_lifecycle
+// state=queued) as `Unexpected case: {json}` on stderr. Forwarding them made
+// healthy tool runs show up in the Web UI as "N warnings" in red.
+func TestIsAdapterUnreachableDump(t *testing.T) {
+	suppressed := []string{
+		`Unexpected case: {"type":"command_lifecycle","command_uuid":"381d396c-706e-4a9d-a263-6ac51ac0a2c5","state":"queued"}`,
+		"Unexpected case: undefined",
+	}
+	for _, line := range suppressed {
+		if !isAdapterUnreachableDump(line) {
+			t.Errorf("adapter dump not suppressed: %q", line)
+		}
+	}
+
+	forwarded := []string{
+		"fatal: agent process crashed",
+		"Unexpected cases are fine, but this is a real error",
+	}
+	for _, line := range forwarded {
+		if isAdapterUnreachableDump(line) {
+			t.Errorf("real error wrongly classified as adapter dump: %q", line)
+		}
+	}
+}
+
 // End-to-end over a real stderr pipe: progress lines must never surface as
 // MessageTypeError, while an unknown error line on the same stream must.
 func TestReadErrorsSuppressesProgressForwardsUnknown(t *testing.T) {
 	agent := `echo '[session/create] sessionId=s1 phase=validate-cwd durationMs=0 totalMs=0' >&2
 echo '[session/query] sessionId=s1 resume=none apiType=native baseUrl=native' >&2
 echo '[authStatus] no identity signal; keeping probe' >&2
+echo 'Unexpected case: {"type":"command_lifecycle","command_uuid":"u1","state":"queued"}' >&2
 echo 'fatal: agent crashed unexpectedly' >&2
 read l; echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"p","version":"1"}}}'
 read l; echo '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}'
@@ -71,6 +98,9 @@ sleep 2`
 			content, _ := m.Content.(string)
 			if strings.HasPrefix(content, "[session/") || strings.HasPrefix(content, "[authStatus]") {
 				t.Fatalf("progress log leaked as session:error: %q", content)
+			}
+			if strings.HasPrefix(content, "Unexpected case: ") {
+				t.Fatalf("adapter unreachable dump leaked as session:error: %q", content)
 			}
 			if strings.Contains(content, "fatal: agent crashed") {
 				return // pass: unknown error still forwarded

@@ -784,6 +784,16 @@ func isCliProgressLog(line string) bool {
 	return false
 }
 
+// isAdapterUnreachableDump reports whether a stderr line is the
+// claude-agent-acp adapter's unreachable() dump for engine events it does not
+// recognize, e.g. `Unexpected case: {"type":"command_lifecycle",…,"state":"queued"}`.
+// Adapter noise, not a user-facing error — forwarding it made healthy tool
+// runs show up in the Web UI as "N warnings". Pure function so the
+// suppression contract is unit-testable.
+func isAdapterUnreachableDump(line string) bool {
+	return strings.HasPrefix(line, "Unexpected case: ")
+}
+
 // readErrors reads stderr and only forwards actionable errors.
 // CLI debug output (object dumps, stack traces) is logged locally but not sent to the Web UI.
 func (a *ACPAdapter) readErrors() {
@@ -803,6 +813,13 @@ func (a *ACPAdapter) readErrors() {
 		// is not an error, and forwarding it painted healthy sessions red.
 		if isCliProgressLog(line) {
 			logger.Debug("[%s] stderr progress (suppressed): %s", logger.ModACP, line)
+			continue
+		}
+
+		// Skip adapter unreachable() dumps (see isAdapterUnreachableDump) —
+		// unrecognized engine events are adapter noise, not errors.
+		if isAdapterUnreachableDump(line) {
+			logger.Debug("[%s] stderr adapter dump (suppressed): %s", logger.ModACP, line)
 			continue
 		}
 
