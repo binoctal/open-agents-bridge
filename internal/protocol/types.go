@@ -58,8 +58,12 @@ type ToolCall struct {
 	ID     string                 `json:"id"`
 	Name   string                 `json:"name"`
 	Input  map[string]interface{} `json:"input"`
-	Status string                 `json:"status"` // "pending", "in_progress", "completed", "failed"
+	Status string                 `json:"status"` // "pending", "in_progress", "completed", "failed", "cancelled"
 	Result interface{}            `json:"result,omitempty"`
+	// Error carries the structured failure text so the web Error section can
+	// render WHY a call failed; without it the failure reason only ever rides
+	// inside Result (if at all).
+	Error string `json:"error,omitempty"`
 }
 
 // UsageStats represents token usage statistics

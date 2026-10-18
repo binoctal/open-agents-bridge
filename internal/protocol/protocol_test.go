@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -108,6 +110,52 @@ func TestToolCall(t *testing.T) {
 
 	if call.Status != "pending" {
 		t.Errorf("Expected status 'pending', got '%s'", call.Status)
+	}
+}
+
+func TestToolCallErrorFieldSerialization(t *testing.T) {
+	// The web Error section only renders when the wire carries `error`; a
+	// failed call must serialize it and a clean call must omit the key.
+	call := ToolCall{ID: "c1", Name: "Bash", Status: "failed", Error: "exit status 1"}
+	data, err := json.Marshal(call)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"error":"exit status 1"`) {
+		t.Errorf("expected error field in JSON, got %s", data)
+	}
+
+	clean := ToolCall{ID: "c2", Name: "Bash", Status: "completed", Result: "ok"}
+	data2, _ := json.Marshal(clean)
+	if strings.Contains(string(data2), `"error"`) {
+		t.Errorf("clean call must omit error, got %s", data2)
+	}
+}
+
+func TestToolCallErrorExtraction(t *testing.T) {
+	// Top-level error string wins alone; ACP error content blocks are joined.
+	got := toolCallError(map[string]interface{}{
+		"status": "failed",
+		"error":  "boom",
+	})
+	if got != "boom" {
+		t.Errorf("expected top-level error, got %q", got)
+	}
+
+	got = toolCallError(map[string]interface{}{
+		"status": "failed",
+		"content": []interface{}{
+			map[string]interface{}{"type": "text", "data": "noise"},
+			map[string]interface{}{"type": "error", "data": "line 1"},
+			map[string]interface{}{"type": "error", "data": "line 2"},
+		},
+	})
+	if got != "line 1\nline 2" {
+		t.Errorf("expected joined content-block errors, got %q", got)
+	}
+
+	if toolCallError(map[string]interface{}{"status": "completed"}) != "" {
+		t.Error("no error input must yield empty string")
 	}
 }
 

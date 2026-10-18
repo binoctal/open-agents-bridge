@@ -993,6 +993,7 @@ func (a *ACPAdapter) processSessionUpdate(update map[string]interface{}) {
 				ID:     toolCallID,
 				Name:   title,
 				Status: status,
+				Error:  toolCallError(update),
 			},
 			Meta: map[string]interface{}{
 				"protocol": "acp",
@@ -1005,6 +1006,7 @@ func (a *ACPAdapter) processSessionUpdate(update map[string]interface{}) {
 			toolCallID, _ = update["id"].(string) // fallback
 		}
 		status, _ := update["status"].(string)
+		errText := toolCallError(update)
 		a.trackTool(toolCallID, status)
 		a.emitMessage(Message{
 			Type: MessageTypeToolCall,
@@ -1012,6 +1014,7 @@ func (a *ACPAdapter) processSessionUpdate(update map[string]interface{}) {
 				ID:     toolCallID,
 				Status: status,
 				Result: update["result"],
+				Error:  errText,
 			},
 			Meta: map[string]interface{}{
 				"protocol": "acp",
@@ -1918,6 +1921,31 @@ func (a *ACPAdapter) promptIDInFlight() string {
 		return v
 	}
 	return ""
+}
+
+// toolCallError extracts structured failure text from a session/update entry.
+// Agents differ in where the error surfaces: a top-level "error" string, or
+// ACP content blocks of type "error" (data field) inside tool_call_update.
+// Both are collected so the web Error section can say WHY a call failed.
+func toolCallError(update map[string]interface{}) string {
+	var parts []string
+	if e, ok := update["error"].(string); ok && e != "" {
+		parts = append(parts, e)
+	}
+	if arr, ok := update["content"].([]interface{}); ok {
+		for _, c := range arr {
+			cm, ok := c.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if t, _ := cm["type"].(string); t == "error" {
+				if d, ok := cm["data"].(string); ok && d != "" {
+					parts = append(parts, d)
+				}
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // trackTool records a tool call as in flight until it reaches a terminal status.
