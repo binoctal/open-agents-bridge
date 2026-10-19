@@ -992,6 +992,7 @@ func (a *ACPAdapter) processSessionUpdate(update map[string]interface{}) {
 			Content: ToolCall{
 				ID:     toolCallID,
 				Name:   title,
+				Input:  toolCallInput(update),
 				Status: status,
 				Error:  toolCallError(update),
 			},
@@ -1013,7 +1014,7 @@ func (a *ACPAdapter) processSessionUpdate(update map[string]interface{}) {
 			Content: ToolCall{
 				ID:     toolCallID,
 				Status: status,
-				Result: update["result"],
+				Result: toolCallRawOutput(update),
 				Error:  errText,
 			},
 			Meta: map[string]interface{}{
@@ -1946,6 +1947,70 @@ func toolCallError(update map[string]interface{}) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// Bounds on what one tool call may contribute to the tool:call payload. The
+// merged copy is persisted into sessions.metadata (D1) and re-read on every
+// merge, so a Read that returns a whole file or a Write that ships one in
+// rawInput must not ride along in full — the web detail view caps display at
+// 500 chars anyway.
+const (
+	toolCallInputValueMax = 512
+	toolCallResultMax     = 4096
+)
+
+// toolCallInput copies the rawInput object claude-code-acp attaches to
+// tool_call updates (the engine's structured arguments: file_path, command,
+// …), truncating oversized string values. That object is what feeds the web's
+// collapsed-row previews; without it the expanded detail shows nothing.
+func toolCallInput(update map[string]interface{}) map[string]interface{} {
+	raw, ok := update["rawInput"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	out := make(map[string]interface{}, len(raw))
+	for k, v := range raw {
+		if s, ok := v.(string); ok && len(s) > toolCallInputValueMax {
+			out[k] = logger.Truncate(s, toolCallInputValueMax)
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// toolCallRawOutput flattens the rawOutput field of a tool_call_update into
+// text for the Result field. claude-code-acp ships the engine's tool result
+// as an array of content blocks ({type:"text",text:…}), never as the
+// top-level "result" key the previous code read (always empty).
+func toolCallRawOutput(update map[string]interface{}) interface{} {
+	switch v := update["rawOutput"].(type) {
+	case string:
+		return logger.Truncate(v, toolCallResultMax)
+	case []interface{}:
+		var sb strings.Builder
+		for _, c := range v {
+			cm, ok := c.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if t, _ := cm["type"].(string); t == "text" {
+				if s, ok := cm["text"].(string); ok && s != "" {
+					if sb.Len() > toolCallResultMax {
+						break
+					}
+					if sb.Len() > 0 {
+						sb.WriteByte('\n')
+					}
+					sb.WriteString(s)
+				}
+			}
+		}
+		if sb.Len() > 0 {
+			return logger.Truncate(sb.String(), toolCallResultMax)
+		}
+	}
+	return nil
 }
 
 // trackTool records a tool call as in flight until it reaches a terminal status.
