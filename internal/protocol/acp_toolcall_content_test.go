@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -24,11 +25,12 @@ func collectToolCalls(t *testing.T, frames ...map[string]interface{}) []ToolCall
 	a := NewACPAdapter()
 	var calls []ToolCall
 	done := make(chan struct{})
+	var once sync.Once
 	a.Subscribe(func(m Message) {
 		if m.Type == MessageTypeToolCall {
 			calls = append(calls, m.Content.(ToolCall))
 		}
-		close(done)
+		once.Do(func() { close(done) })
 	})
 	for _, f := range frames {
 		a.handleMessage(f)
@@ -126,5 +128,39 @@ func TestToolCallUpdateWithoutRawOutputKeepsNilResult(t *testing.T) {
 	}))
 	if calls[0].Result != nil {
 		t.Fatalf("result = %#v, want nil", calls[0].Result)
+	}
+}
+
+func TestToolCallUpdateRefillsInputFromSecondEncounter(t *testing.T) {
+	// claude-agent-acp emits the first tool_call during streaming, when the
+	// arguments object is still empty; the full rawInput arrives on the
+	// follow-up tool_call_update (alreadyCached branch). The update must
+	// carry Input so the empty map gets replaced.
+	calls := collectToolCalls(t,
+		toolCallUpdateFrame(map[string]interface{}{
+			"sessionUpdate": "tool_call",
+			"toolCallId":    "t5",
+			"title":         "Read File",
+			"status":        "pending",
+			"rawInput":      map[string]interface{}{},
+		}),
+		toolCallUpdateFrame(map[string]interface{}{
+			"sessionUpdate": "tool_call_update",
+			"toolCallId":    "t5",
+			"rawInput": map[string]interface{}{
+				"file_path": "/repo/README.md",
+			},
+		}),
+	)
+	// First emission carries the empty streaming map, the second refills it.
+	if len(calls) != 2 {
+		t.Fatalf("want 2 tool call messages, got %d", len(calls))
+	}
+	last := calls[1]
+	if last.ID != "t5" {
+		t.Fatalf("id = %q, want t5", last.ID)
+	}
+	if got := last.Input["file_path"]; got != "/repo/README.md" {
+		t.Fatalf("update input.file_path = %v, want /repo/README.md", got)
 	}
 }

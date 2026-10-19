@@ -1012,7 +1012,13 @@ func (a *ACPAdapter) processSessionUpdate(update map[string]interface{}) {
 		a.emitMessage(Message{
 			Type: MessageTypeToolCall,
 			Content: ToolCall{
-				ID:     toolCallID,
+				ID:   toolCallID,
+				// claude-agent-acp emits the FIRST tool_call during streaming
+				// (content_block_start), when rawInput is still empty — the
+				// full arguments arrive on a follow-up tool_call_update
+				// (alreadyCached branch). Re-read rawInput here so the input
+				// detail fills in; a nil Input keeps whatever was stored.
+				Input:  toolCallInput(update),
 				Status: status,
 				Result: toolCallRawOutput(update),
 				Error:  errText,
