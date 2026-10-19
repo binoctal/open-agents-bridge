@@ -3,6 +3,7 @@ package bridge
 import (
 	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
@@ -93,6 +94,10 @@ func buildCapabilityReport(version, probeResult, probeDetail string, e2ee bool) 
 		// missionDelivery: bridge integrates missions into oa/mission-<m>
 		// and handles workflow:deliver (mission-branch-delivery, version 1).
 		"missionDelivery": 1,
+		// os: host operating system (runtime.GOOS) so the web machine
+		// insights can group by real platform instead of guessing from
+		// user-chosen machine names.
+		"os": runtime.GOOS,
 	}
 }
 

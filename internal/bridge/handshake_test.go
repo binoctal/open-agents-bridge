@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ func TestBuildCapabilityReportPinsTheWireFields(t *testing.T) {
 		"detail":          "dial timeout",
 		"sessionSpec":     1,
 		"missionDelivery": 1,
+		"os":              runtime.GOOS,
 	}
 	if len(report) != len(want) {
 		t.Fatalf("report has %d fields, want %d: %+v", len(report), len(want), report)
