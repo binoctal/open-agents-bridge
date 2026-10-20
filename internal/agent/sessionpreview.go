@@ -87,6 +87,10 @@ type SessionPreviews struct {
 	// sweep-driven reports (dual-home parity with RuntimePreviews).
 	EndpointFor func(baseURL string) SpEndpoint
 
+	// Logf mirrors Agent.Logf; wired by main. Unset (tests) drops the line --
+	// sweep-internal failures self-heal via re-offer, so the volume stays low.
+	Logf func(format string, args ...any)
+
 	// dial is the liveness seam (tests inject).
 	dial func(ctx context.Context, port int) error
 
@@ -169,10 +173,13 @@ func (sp *SessionPreviews) release(instanceID string) {
 }
 
 func (sp *SessionPreviews) logf(format string, args ...any) {
-	// The concrete agent carries a Logf; this package logs through the
-	// process stdout shape when wired. Kept minimal: sweep-internal failures
-	// self-heal via re-offer, so log volume is deliberately low.
-	_ = fmt.Sprintf(format, args...)
+	// Wired by main to the process stdout shape; unset (tests) drops the
+	// line. Volume is deliberately low: sweep-internal failures self-heal via
+	// re-offer, but a stop that can never succeed must at least be visible
+	// (the dead Coolify token would have been a 6-minute silent stall).
+	if sp.Logf != nil {
+		sp.Logf(format, args...)
+	}
 }
 
 // ─── up: materialize + git-http (the API drives Coolify from here) ──────────

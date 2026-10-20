@@ -124,6 +124,9 @@ func run() error {
 				}
 				return agent.SpEndpoint{}
 			},
+			Logf: func(format string, args ...any) {
+				fmt.Printf(time.Now().UTC().Format(time.RFC3339)+" "+format+"\n", args...)
+			},
 			Ingress: caddy, // nil-ingress-safe when Caddy is off
 			Store:   st,
 			GitHTTP: git,
