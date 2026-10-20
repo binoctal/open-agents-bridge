@@ -2,6 +2,8 @@ package deploysource
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/binoctal/open-agents-bridge/internal/api"
@@ -22,6 +24,7 @@ type fakeSessionClient struct {
 	declareErr   error
 	completeErr  error
 	uploadErr    error
+	failErr      error
 
 	declared   int
 	declareI   string
@@ -29,6 +32,10 @@ type fakeSessionClient struct {
 	completed  int
 	completedI string
 	completedS string
+	failed     int
+	failedI    string
+	failedS    string
+	failedD    string
 	uploaded   map[string][]byte // url -> bytes
 }
 
@@ -48,6 +55,14 @@ func (f *fakeSessionClient) CompleteSessionPreviewSource(instanceID, snapshotID 
 	f.completedI = instanceID
 	f.completedS = snapshotID
 	return f.completeErr
+}
+
+func (f *fakeSessionClient) FailSessionPreviewSource(instanceID, snapshotID, detail string) error {
+	f.failed++
+	f.failedI = instanceID
+	f.failedS = snapshotID
+	f.failedD = detail
+	return f.failErr
 }
 
 func (f *fakeSessionClient) UploadPreviewFile(url string, data []byte) error {
@@ -165,17 +180,46 @@ func TestRunSessionPreviewUpload_DeclareFailureIsBestEffort(t *testing.T) {
 	}
 }
 
-func TestRunSessionPreviewUpload_MissingWorkDirTouchesNothing(t *testing.T) {
-	// A vanished work_dir (session wiped mid-poll) fails the pack before any
-	// boundary call; the work is dropped, never propagated.
+func TestRunSessionPreviewUpload_MissingWorkDirReportsPackFailure(t *testing.T) {
+	// A vanished work_dir (session wiped mid-poll) is a DETERMINISTIC pack
+	// failure: the row must be failed via the report endpoint (otherwise the
+	// poll re-offers the same dead tree forever) and declare/complete never run.
 	fake := &fakeSessionClient{}
 
 	RunSessionPreviewUpload(fake, api.SessionPreviewWork{
 		InstanceID: "sp-1", SnapshotID: "snap-7", WorkDir: "/nonexistent/workdir",
 	}, nil)
 
+	if fake.failed != 1 || fake.failedI != "sp-1" || fake.failedS != "snap-7" {
+		t.Errorf("pack failure must be reported once with id/snapshot, got failed=%d %s/%s",
+			fake.failed, fake.failedI, fake.failedS)
+	}
+	if fake.failedD == "" {
+		t.Error("pack-failure report must carry the pack error as detail")
+	}
 	if fake.declared != 0 || fake.completed != 0 {
-		t.Errorf("pack failure must not reach the platform, got declared=%d completed=%d",
+		t.Errorf("failed pack must not declare/complete, got declared=%d completed=%d",
 			fake.declared, fake.completed)
+	}
+}
+
+func TestRunSessionPreviewUpload_PackFailureStaleReportIsQuiet(t *testing.T) {
+	// The user swapped before the failure report landed: the endpoint answers
+	// 409 SNAPSHOT_STALE and the report is dropped without noise (the new
+	// snapshot's pack owns the row now).
+	fake := &fakeSessionClient{
+		failErr: &api.PreviewAPIError{StatusCode: 409, Code: "SNAPSHOT_STALE"},
+	}
+
+	RunSessionPreviewUpload(fake, api.SessionPreviewWork{
+		InstanceID: "sp-1", SnapshotID: "snap-old", WorkDir: "/nonexistent/workdir",
+	}, func(format string, args ...interface{}) {
+		if strings.Contains(fmt.Sprintf(format, args...), "pack-failure report failed") {
+			t.Error("stale failure report must be dropped quietly")
+		}
+	})
+
+	if fake.failed != 1 {
+		t.Errorf("report must still fire once, got %d", fake.failed)
 	}
 }

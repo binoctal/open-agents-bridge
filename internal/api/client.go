@@ -718,3 +718,22 @@ func (c *Client) CompleteSessionPreviewSource(instanceID, snapshotID string) err
 	}
 	return nil
 }
+
+// FailSessionPreviewSource reports a deterministic pack failure (size caps,
+// unreadable files) so the platform fails the row instead of re-offering it
+// every poll tick (session-preview-polish 2.3). A SNAPSHOT_STALE 409 means
+// the user swapped: the report is dropped, not an error.
+func (c *Client) FailSessionPreviewSource(instanceID, snapshotID, detail string) error {
+	body := struct {
+		InstanceID string `json:"instanceId"`
+		SnapshotID string `json:"snapshotId"`
+		Detail     string `json:"detail"`
+	}{InstanceID: instanceID, SnapshotID: snapshotID, Detail: detail}
+
+	data, status, err := c.requestWithStatus("POST",
+		"/api/sessions/internal/session-previews/source-failed", body)
+	if err != nil {
+		return parsePreviewError(status, data, err)
+	}
+	return nil
+}

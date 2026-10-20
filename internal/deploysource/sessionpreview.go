@@ -20,6 +20,7 @@ import (
 type SessionPreviewUploader interface {
 	DeclareSessionPreviewSource(instanceID, snapshotID string, files []api.PreviewFile) (*api.SessionPreviewDeclareResponse, error)
 	CompleteSessionPreviewSource(instanceID, snapshotID string) error
+	FailSessionPreviewSource(instanceID, snapshotID, detail string) error
 	UploadPreviewFile(url string, data []byte) error
 }
 
@@ -43,6 +44,13 @@ func RunSessionPreviewUpload(client SessionPreviewUploader, work api.SessionPrev
 
 	pack, err := PackSourceTree(work.WorkDir)
 	if err != nil {
+		// Deterministic failure (size ceilings, unreadable tree): report it so
+		// the platform fails the row -- otherwise every poll tick re-offers the
+		// same un-packable tree and the user sees pending forever. SNAPSHOT_STALE
+		// drops silently: the swap that superseded this pack owns the row now.
+		if failErr := client.FailSessionPreviewSource(work.InstanceID, work.SnapshotID, err.Error()); failErr != nil && !isSnapshotStale(failErr) {
+			logf("[%s] pack-failure report failed for preview %s: %v", logger.ModDeploy, work.InstanceID, failErr)
+		}
 		logf("[%s] work_dir pack failed for preview %s: %v", logger.ModDeploy, work.InstanceID, err)
 		return
 	}
