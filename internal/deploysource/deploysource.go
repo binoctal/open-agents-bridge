@@ -174,7 +174,9 @@ func toAPIFiles(files []preview.ManifestFile) []api.PreviewFile {
 // and rationale as preview.uploadAll (a source tree carries thousands of
 // files and a sequential loop cannot finish inside the presigned-URL TTL).
 // First error wins; blob closures only read from disk.
-func uploadAll(client Uploader, uploads []api.PreviewUpload, blob func(path string) ([]byte, error)) error {
+func uploadAll(client interface {
+	UploadPreviewFile(url string, data []byte) error
+}, uploads []api.PreviewUpload, blob func(path string) ([]byte, error)) error {
 	const workers = 8
 	jobs := make(chan api.PreviewUpload)
 	errs := make(chan error, workers)

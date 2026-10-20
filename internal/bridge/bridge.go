@@ -282,6 +282,11 @@ type Bridge struct {
 	// for the same presigned objects. Same shape as previewInFlight.
 	deploySourceInFlightMu sync.Mutex
 	deploySourceInFlight   map[string]bool
+
+	// session-output-online-preview: per-instance in-flight guard for
+	// session work_dir packs, same rationale as deploySourceInFlight.
+	sessionPreviewInFlightMu sync.Mutex
+	sessionPreviewInFlight   map[string]bool
 }
 
 // taskMeta stores metadata for workflow tasks
@@ -573,6 +578,12 @@ func (b *Bridge) Start() error {
 	// activity costs one empty GET per tick.
 	b.logInfo("[%s] Launching deploySourcePollLoop goroutine...", logger.ModBridge)
 	go b.deploySourcePollLoop()
+
+	// session-output-online-preview (task 3.1): same discovery shape for
+	// session work_dir snapshot packs — an empty GET per tick unless the user
+	// clicked "preview" on a session page.
+	b.logInfo("[%s] Launching sessionPreviewPollLoop goroutine...", logger.ModBridge)
+	go b.sessionPreviewPollLoop()
 
 	b.logInfo("[%s] All goroutines started, entering main loop", logger.ModBridge)
 
@@ -4280,6 +4291,76 @@ func (b *Bridge) pollDeploySources() {
 			deploysource.RunSourceUpload(b.apiClient, work.MissionID, work.DeploymentID,
 				b.worktreeManager.ProjectDir(), b.logInfo)
 		}(d)
+	}
+}
+
+// sessionPreviewPollLoop periodically asks the platform for pending session
+// work_dir snapshot packs (session-output-online-preview task 3.1). Same
+// cadence as deploySourcePollLoop: a preview click waits on this tick.
+func (b *Bridge) sessionPreviewPollLoop() {
+	ticker := time.NewTicker(deploySourcePollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-b.done:
+			return
+		case <-ticker.C:
+			if b.standby.Load() {
+				continue
+			}
+			b.pollSessionPreviews()
+		}
+	}
+}
+
+func (b *Bridge) claimSessionPreview(instanceId string) bool {
+	b.sessionPreviewInFlightMu.Lock()
+	defer b.sessionPreviewInFlightMu.Unlock()
+	if b.sessionPreviewInFlight == nil {
+		b.sessionPreviewInFlight = make(map[string]bool)
+	}
+	if b.sessionPreviewInFlight[instanceId] {
+		return false
+	}
+	b.sessionPreviewInFlight[instanceId] = true
+	return true
+}
+
+func (b *Bridge) sessionPreviewDone(instanceId string) {
+	b.sessionPreviewInFlightMu.Lock()
+	defer b.sessionPreviewInFlightMu.Unlock()
+	delete(b.sessionPreviewInFlight, instanceId)
+}
+
+// pollSessionPreviews fetches and dispatches one batch of pending session
+// packs. Failures are logged and skipped; the row stays pending server-side,
+// so the next tick retries it (declare's skip-list keeps the retry cheap).
+func (b *Bridge) pollSessionPreviews() {
+	previews, err := b.apiClient.GetPendingSessionPreviews()
+	if err != nil {
+		b.logDebug("[%s] session preview: pending poll failed: %v", logger.ModDeploy, err)
+		return
+	}
+
+	for _, p := range previews {
+		if p.WorkDir == "" {
+			// Session row without a stored work_dir (very old or odd origin);
+			// nothing this bridge could pack. Log once per dispatch, the row
+			// stays pending and visible server-side.
+			b.logInfo("[%s] session preview: no work_dir stored for preview %s (session %s); skipping",
+				logger.ModDeploy, p.InstanceID, p.SessionID)
+			continue
+		}
+		if !b.claimSessionPreview(p.InstanceID) {
+			continue
+		}
+		b.logInfo("[%s] session preview: work_dir pack requested for session %s (preview %s)",
+			logger.ModDeploy, p.SessionID, p.InstanceID)
+		go func(work api.SessionPreviewWork) {
+			defer b.sessionPreviewDone(work.InstanceID)
+			deploysource.RunSessionPreviewUpload(b.apiClient, work, b.logInfo)
+		}(p)
 	}
 }
 

@@ -637,3 +637,84 @@ func (c *Client) CompleteHostedSource(missionID, deploymentID string) error {
 	}
 	return nil
 }
+
+// Session output online preview (session-output-online-preview task 3.1).
+//
+// The session tier's artifact bridge: the session's work_dir snapshot rides
+// the same two-phase protocol (declare -> presigned PUTs -> complete) into
+// the session-previews/ R2 namespace. The only trigger is a `pending`
+// session_preview_instances row the user created with an explicit preview
+// click; discovered through the machine-token-authenticated internal poll.
+
+// SessionPreviewWork is one pending work_dir pack the platform asked this
+// machine to produce (GET /api/sessions/internal/session-previews/pending).
+type SessionPreviewWork struct {
+	InstanceID string `json:"instanceId"`
+	SessionID  string `json:"sessionId"`
+	SnapshotID string `json:"snapshotId"`
+	WorkDir    string `json:"workDir"`
+}
+
+// GetPendingSessionPreviews polls for user-requested session preview packs.
+// Rows only exist after an explicit preview click by the session owner, so
+// the common response is an empty list.
+func (c *Client) GetPendingSessionPreviews() ([]SessionPreviewWork, error) {
+	data, err := c.request("GET", "/api/sessions/internal/session-previews/pending", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Previews []SessionPreviewWork `json:"previews"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Previews, nil
+}
+
+// SessionPreviewDeclareResponse mirrors declareSessionPreviewSource: presigned
+// PUTs only for objects not already in the bucket (skip-list economics).
+type SessionPreviewDeclareResponse struct {
+	InstanceID string          `json:"instanceId"`
+	Uploads    []PreviewUpload `json:"uploads"`
+}
+
+// DeclareSessionPreviewSource declares a snapshot's manifest. The snapshot id
+// must match the row's CURRENT request -- a stale bridge retrying a pack the
+// user superseded gets SNAPSHOT_STALE (409) and must re-poll pending instead
+// of merging old bytes into the new snapshot.
+func (c *Client) DeclareSessionPreviewSource(instanceID, snapshotID string, files []PreviewFile) (*SessionPreviewDeclareResponse, error) {
+	body := struct {
+		InstanceID string        `json:"instanceId"`
+		SnapshotID string        `json:"snapshotId"`
+		Manifest   []PreviewFile `json:"manifest"`
+	}{InstanceID: instanceID, SnapshotID: snapshotID, Manifest: files}
+
+	data, status, err := c.requestWithStatus("POST",
+		"/api/sessions/internal/session-previews/declare", body)
+	if err != nil {
+		return nil, parsePreviewError(status, data, err)
+	}
+
+	var resp SessionPreviewDeclareResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// CompleteSessionPreviewSource tells the platform every declared object
+// landed. The LIST verification is idempotent; completing twice is safe.
+func (c *Client) CompleteSessionPreviewSource(instanceID, snapshotID string) error {
+	body := struct {
+		InstanceID string `json:"instanceId"`
+		SnapshotID string `json:"snapshotId"`
+	}{InstanceID: instanceID, SnapshotID: snapshotID}
+
+	data, status, err := c.requestWithStatus("POST",
+		"/api/sessions/internal/session-previews/complete", body)
+	if err != nil {
+		return parsePreviewError(status, data, err)
+	}
+	return nil
+}
