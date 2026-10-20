@@ -197,7 +197,12 @@ func (s *Store) BuildRepo(ctx context.Context, repoKey string, manifest []api.Fi
 	if err := runGit(ctx, work, "init", "--quiet", "--initial-branch=main"); err != nil {
 		return "", fmt.Errorf("build repo %s: git init: %w", repoKey, err)
 	}
-	if err := runGit(ctx, work, "add", "-A"); err != nil {
+	// --force: the manifest is the sanitized source of truth. The tree can
+	// carry the project's own .gitignore, and a plain `git add -A` obeys it —
+	// silently dropping manifest files from the committed snapshot (a tree
+	// whose Dockerfile COPYs a .gitignore'd runtime asset builds broken even
+	// though the manifest and R2 both hold the file).
+	if err := runGit(ctx, work, "add", "-A", "--force"); err != nil {
 		return "", fmt.Errorf("build repo %s: git add: %w", repoKey, err)
 	}
 	gitEnv := []string{

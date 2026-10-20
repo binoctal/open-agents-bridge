@@ -264,6 +264,39 @@ func TestMaterializeFailedLeavesNoPartialRepo(t *testing.T) {
 	}
 }
 
+// TestMaterializeCommitsGitignoredFiles: the tree can carry the project's own
+// .gitignore, and every manifest file must land in the committed snapshot
+// regardless (2026-10-20 live incident: a Dockerfile COPY of a .gitignore'd
+// runtime db failed the build while the manifest and R2 both held the file).
+func TestMaterializeCommitsGitignoredFiles(t *testing.T) {
+	requireGit(t)
+	gitignore := "runtime/\n*.db\n"
+	db := "sqlite bytes"
+	manifest := []api.File{
+		file(".gitignore", gitignore),
+		file("Dockerfile", "FROM scratch\nCOPY runtime/data/xuantie.db /db\n"),
+		file("runtime/data/xuantie.db", db),
+	}
+	st, _ := newTestStore(t, map[string][]byte{
+		manifest[0].SHA256: []byte(gitignore),
+		manifest[1].SHA256: []byte("FROM scratch\nCOPY runtime/data/xuantie.db /db\n"),
+		manifest[2].SHA256: []byte(db),
+	})
+
+	if _, err := st.Materialize(context.Background(), "dep-gitignore", "deploys/dep-gitignore", manifest); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	out, err := exec.Command("git", "--git-dir", st.RepoPath("dep-gitignore"), "ls-tree", "-r", "--name-only", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("ls-tree: %v", err)
+	}
+	for _, want := range []string{".gitignore", "runtime/data/xuantie.db"} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("manifest file %s missing from committed tree; tree:\n%s", want, out)
+		}
+	}
+}
+
 func TestMaterializeRejectsPathEscape(t *testing.T) {
 	requireGit(t)
 	evil := api.File{Path: "../escape.txt", SHA256: sha([]byte("x")), Size: 1}
