@@ -364,20 +364,12 @@ func (sp *SessionPreviews) SweepIdle(ctx context.Context) {
 // noteAccess marks st accessed when its log file grew past the tracked
 // offset (same re-baseline discipline as the runtime tier).
 func (sp *SessionPreviews) noteAccess(st *spState) bool {
-	fi, err := os.Stat(sp.logPath(st.InstanceID))
-	if err != nil {
-		return false
-	}
-	size := fi.Size()
-	if size > st.LastOffset {
-		st.LastOffset = size
+	hit, off := hostTrafficDelta(sp.logPath(st.InstanceID), st.LastOffset, st.Host)
+	st.LastOffset = off
+	if hit {
 		st.LastAccess = time.Now().UTC()
-		return true
 	}
-	if size < st.LastOffset {
-		st.LastOffset = size
-	}
-	return false
+	return hit
 }
 
 func (sp *SessionPreviews) logPath(instanceID string) string {

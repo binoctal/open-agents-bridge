@@ -662,20 +662,12 @@ func (rp *RuntimePreviews) SweepIdle(ctx context.Context) {
 // reload) re-baselines at the new size without counting it as access --
 // growth after that is what counts.
 func (rp *RuntimePreviews) noteAccess(st *rtState) bool {
-	fi, err := os.Stat(rp.logPath(st.InstanceID))
-	if err != nil {
-		return false
-	}
-	size := fi.Size()
-	if size > st.LastOffset {
-		st.LastOffset = size
+	hit, off := hostTrafficDelta(rp.logPath(st.InstanceID), st.LastOffset, st.Host)
+	st.LastOffset = off
+	if hit {
 		st.LastAccess = time.Now().UTC()
-		return true
 	}
-	if size < st.LastOffset {
-		st.LastOffset = size
-	}
-	return false
+	return hit
 }
 
 func (rp *RuntimePreviews) logPath(instanceID string) string {

@@ -353,8 +353,9 @@ func TestSPSweepIdleStopsAfterTTL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Fresh traffic resets the window.
-	if err := os.WriteFile(sp.logPath("sp1"), []byte("hit\n"), 0o644); err != nil {
+	// Fresh traffic resets the window (a matching-host JSON line; sibling
+	// hosts' lines share the file and must not count -- see accesslog.go).
+	if err := os.WriteFile(sp.logPath("sp1"), []byte(`{"request":{"host":"sp1.deploy.openagents.top"},"status":200}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	sp.SweepIdle(context.Background())

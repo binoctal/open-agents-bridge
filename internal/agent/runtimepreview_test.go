@@ -349,17 +349,27 @@ func TestIdleExpired(t *testing.T) {
 func TestNoteAccess(t *testing.T) {
 	rp, _, _, _ := newTestRT(t, nil)
 	logPath := rp.logPath("instA")
-	st := &rtState{InstanceID: "instA", LastAccess: time.Now().Add(-time.Hour)}
+	st := &rtState{InstanceID: "instA", Host: "instA.deploy.example", LastAccess: time.Now().Add(-time.Hour)}
 
 	if rp.noteAccess(st) {
 		t.Fatal("absent log file must not count as access")
 	}
-	if err := os.WriteFile(logPath, []byte("line1\n"), 0o644); err != nil {
+	// The per-instance file also catches sibling hosts' lines (Caddy include
+	// filter); only matching-host lines may count as traffic.
+	foreign := `{"request":{"host":"analytics.example"},"status":404}` + "\n"
+	own := `{"request":{"host":"instA.deploy.example"},"status":200}` + "\n"
+	if err := os.WriteFile(logPath, []byte(foreign), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rp.noteAccess(st) {
+		t.Fatal("a sibling host's line must not count as access")
+	}
+	if err := os.WriteFile(logPath, []byte(foreign+own), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	before := st.LastAccess
 	if !rp.noteAccess(st) {
-		t.Fatal("new bytes past the offset must count as access")
+		t.Fatal("an own-host line past the offset must count as access")
 	}
 	if !st.LastAccess.After(before) {
 		t.Fatal("access must refresh lastAccess")
@@ -368,13 +378,13 @@ func TestNoteAccess(t *testing.T) {
 		t.Fatal("no growth must not count as access")
 	}
 	// Truncated/recreated file re-baselines without counting as access.
-	if err := os.WriteFile(logPath, []byte("x\n"), 0o644); err != nil {
+	if err := os.WriteFile(logPath, []byte(own), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if rp.noteAccess(st) {
 		t.Fatal("a shrunk file must re-baseline, not count as access")
 	}
-	if st.LastOffset != 2 {
+	if st.LastOffset != int64(len(own)) {
 		t.Fatalf("offset must re-baseline to the new size, got %d", st.LastOffset)
 	}
 }
