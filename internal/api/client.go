@@ -76,6 +76,16 @@ const (
 	// row as runtime_stop. Keyed by instanceId, not deploymentId.
 	ActionRuntimeUp   = "runtime_up"
 	ActionRuntimeStop = "runtime_stop"
+
+	// Session output preview actions (session-output-online-preview): an
+	// `up` is the bridge-packed work_dir snapshot to materialize + serve over
+	// git-http (the API then drives the Coolify build itself -- unlike
+	// runtime_up, the agent does NOT create the Coolify app); register_route
+	// wires the ingress after the API-side build lands (row `ready`); stop
+	// tears container + route down. Keyed by instanceId.
+	ActionSessionPreviewUp            = "session_preview_up"
+	ActionSessionPreviewRegisterRoute = "session_preview_register_route"
+	ActionSessionPreviewStop          = "session_preview_stop"
 )
 
 // SizeClass is the tier payload of a sandbox_up item: the cgroup limits are
@@ -163,6 +173,11 @@ type WorkItem struct {
 	// (coolify-project-per-user). Empty on old-API wire and non-preview
 	// items: the agent then falls back to the static configured project.
 	UserID string `json:"userId,omitempty"`
+
+	// CoolifyAppID (session preview register_route/stop items): the
+	// application the API drove for this instance. The agent stops this app
+	// on session_preview_stop; empty on up items (the app does not exist yet).
+	CoolifyAppID string `json:"coolifyAppId,omitempty"`
 }
 
 // PresignedObject maps an R2 key to its 15-minute GET URL.
@@ -222,6 +237,15 @@ const (
 	EventRuntimeRunning = "runtime_running"
 	EventRuntimeStopped = "runtime_stopped"
 	EventRuntimeFailed  = "runtime_failed"
+
+	// Session preview report events (session-output-online-preview): same
+	// instanceId key; the session_* namespace is disjoint from runtime_* so
+	// one report can never land in the wrong tier.
+	EventSessionMaterialized    = "session_materialized"
+	EventSessionMaterializeFail = "session_materialize_failed"
+	EventSessionRouteRegistered = "session_route_registered"
+	EventSessionStopped         = "session_stopped"
+	EventSessionFailed          = "session_failed"
 )
 
 // GetWork fetches the current work list. agent_id keys the deployment and
@@ -394,6 +418,48 @@ func (c *Client) ReportRuntimePreview(ctx context.Context, instanceID, event, co
 		"agentId":      c.AgentID,
 		"instanceId":   instanceID,
 		"event":        event,
+		"coolifyAppId": coolifyAppID,
+		"idle":         idle,
+		"detail":       detail,
+	}
+	return c.postJSON(ctx, "/internal/hosting-agent/report", payload, nil)
+}
+
+// FetchSessionSnapshot fetches the manifest of a session preview instance's
+// current snapshot (same shape as FetchRuntimeSnapshot, session-previews/ R2
+// prefix behind it).
+func (c *Client) FetchSessionSnapshot(ctx context.Context, instanceID string) (*RuntimeSnapshotManifest, error) {
+	var out RuntimeSnapshotManifest
+	if err := c.getJSON(ctx, "/internal/hosting-agent/session-snapshot?instanceId="+url.QueryEscape(instanceID), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SessionPresign exchanges snapshot object hashes for presigned GETs. Keys
+// are the full R2 keys session-previews/{instanceId}/{sha}.
+func (c *Client) SessionPresign(ctx context.Context, instanceID string, shas []string) (*PresignResponse, error) {
+	payload := map[string]any{
+		"agentId":    c.AgentID,
+		"instanceId": instanceID,
+		"shas":       shas,
+	}
+	var out PresignResponse
+	if err := c.postJSON(ctx, "/internal/hosting-agent/session-presign", payload, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ReportSessionPreview posts a session preview event. repoPort rides
+// session_materialized (the git-http port the API bakes into the Coolify app
+// it drives); idle=true marks an idle auto-stop.
+func (c *Client) ReportSessionPreview(ctx context.Context, instanceID, event string, repoPort int, coolifyAppID string, idle bool, detail string) error {
+	payload := map[string]any{
+		"agentId":      c.AgentID,
+		"instanceId":   instanceID,
+		"event":        event,
+		"repoPort":     repoPort,
 		"coolifyAppId": coolifyAppID,
 		"idle":         idle,
 		"detail":       detail,

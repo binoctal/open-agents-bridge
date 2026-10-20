@@ -121,6 +121,11 @@ type Config struct {
 	// by the caddy user (the spike found root-owned /var/log rejected); the
 	// default is Coolify's caddy-owned /var/lib/caddy.
 	RuntimePreviewLogDir string
+
+	// SessionPreviewIdleTTLMinutes is the session tier's zero-access window
+	// (default 30). Separate from the runtime tier's knob so one tier can
+	// tighten without moving the other.
+	SessionPreviewIdleTTLMinutes int
 }
 
 // FromEnv builds a Config from environment variables, applying defaults and
@@ -151,6 +156,8 @@ func FromEnv() (*Config, error) {
 		RuntimePreviewPortMax:        envInt("RUNTIME_PREVIEW_PORT_MAX", 32199),
 		RuntimePreviewIdleTTLMinutes: envInt("RUNTIME_PREVIEW_IDLE_TTL_MINUTES", 30),
 		RuntimePreviewLogDir:         envOr("RUNTIME_PREVIEW_LOG_DIR", "/var/lib/caddy/oa-runtime"),
+
+		SessionPreviewIdleTTLMinutes: envInt("SESSION_PREVIEW_IDLE_TTL_MINUTES", 30),
 	}
 
 	endpoints, err := resolveEndpoints(c.CoolifyProjectUUID)

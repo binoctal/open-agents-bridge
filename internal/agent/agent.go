@@ -71,6 +71,11 @@ type Agent struct {
 	// group 5); nil = feature disabled (no Coolify configured).
 	RT *RuntimePreviews
 
+	// SP drives session preview instances (session-output-online-preview
+	// group 4); nil = feature disabled. The API owns the Coolify build for
+	// this tier -- SP only materializes, wires routes, sweeps and stops.
+	SP *SessionPreviews
+
 	WorkPollInterval  time.Duration
 	WatermarkInterval time.Duration
 
@@ -246,6 +251,18 @@ func (a *Agent) Run(ctx context.Context) error {
 		rtIdle = rt.C
 	}
 
+	// Session previews share the runtime tier's tick discipline: adopt
+	// persisted instances, then sweep idle/liveness every minute. No image
+	// pre-pull -- the API-driven Coolify build pulls its own base image.
+	if a.SP != nil {
+		a.SP.Recover()
+		if rtIdle == nil {
+			rt := time.NewTicker(time.Minute)
+			defer rt.Stop()
+			rtIdle = rt.C
+		}
+	}
+
 	// First tick immediate: don't sit idle for a full interval at boot.
 	if err := a.pollWork(ctx); err != nil {
 		return err
@@ -271,7 +288,10 @@ func (a *Agent) Run(ctx context.Context) error {
 				return err
 			}
 		case <-rtIdle:
-			a.RT.SweepIdle(ctx)
+			if a.RT != nil {
+				a.RT.SweepIdle(ctx)
+			}
+			a.SP.SweepIdle(ctx) // nil-safe
 		}
 	}
 }
@@ -336,6 +356,13 @@ func (a *Agent) handle(ctx context.Context, ep APIEndpoint, item api.WorkItem) e
 	// runs async (a Coolify build takes minutes), so the claim must outlive
 	// this call -- the generic claim/release below cannot express that.
 	if item.InstanceID != "" {
+		// Session preview items are named apart (session_preview_*) and manage
+		// their own in-flight claims like the runtime tier; both dispatches
+		// are nil-safe for the disabled configuration.
+		if strings.HasPrefix(item.Action, "session_preview_") {
+			a.SP.dispatch(item, SpEndpoint{API: ep.Client, BaseURL: ep.BaseURL})
+			return nil
+		}
 		a.RT.dispatch(item, RtEndpoint{API: ep.Client, BaseURL: ep.BaseURL, ProjectUUID: ep.CoolifyProjectUUID})
 		return nil
 	}

@@ -108,12 +108,41 @@ func run() error {
 		}
 	}
 
+	// Session previews share the Caddy/coolify plumbing but invert the Coolify
+	// ownership: the agent materializes + routes + sweeps, the API builds. The
+	// Coolify gate is the same token; an unconfigured token keeps the tier off.
+	var sp *agent.SessionPreviews
+	if coolifyClient.Configured() && cfg.CoolifyProjectUUID != "" && cfg.CoolifyServerUUID != "" {
+		sp = &agent.SessionPreviews{
+			Coolify: coolifyClient, // Stop only; the API owns create/deploy
+			API:     primary,
+			EndpointFor: func(baseURL string) agent.SpEndpoint {
+				for _, ep := range eps {
+					if ep.BaseURL == baseURL {
+						return agent.SpEndpoint{API: ep.Client, BaseURL: ep.BaseURL}
+					}
+				}
+				return agent.SpEndpoint{}
+			},
+			Ingress: caddy, // nil-ingress-safe when Caddy is off
+			Store:   st,
+			GitHTTP: git,
+			Cfg: agent.SessionPreviewConfig{
+				IdleTTL:      time.Duration(cfg.SessionPreviewIdleTTLMinutes) * time.Minute,
+				LogDir:       cfg.RuntimePreviewLogDir,
+				DomainSuffix: cfg.DomainSuffix,
+				StateDir:     cfg.CacheDir + "/session-previews",
+			},
+		}
+	}
+
 	a := &agent.Agent{
 		Endpoints:         eps,
 		Store:             st,
 		GitHTTP:           git,
 		Ingress:           routes,
 		RT:                rt,
+		SP:                sp,
 		WorkPollInterval:  time.Duration(cfg.WorkPollIntervalSec) * time.Second,
 		WatermarkInterval: time.Duration(cfg.WatermarkIntervalSec) * time.Second,
 		WorkIdleMax:       time.Duration(cfg.WorkPollIdleMaxSec) * time.Second,
