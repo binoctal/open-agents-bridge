@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-本地 Bridge CLI，连接 AI 编程工具与 OpenAgents 云平台。
+本地 Bridge CLI，连接 AI 编程工具与 OpenAgents 云平台——在浏览器中编排 Claude Code、Codex、Gemini CLI，详见 [openagents.top](https://openagents.top)。
 
 ## 功能
 

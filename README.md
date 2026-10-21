@@ -2,7 +2,7 @@
 
 [中文](README.zh-CN.md)
 
-Local Bridge CLI that connects AI coding tools with the OpenAgents cloud platform.
+Local Bridge CLI that connects AI coding tools with the OpenAgents cloud platform — orchestrate Claude Code, Codex and Gemini CLI from your browser at [openagents.top](https://openagents.top).
 
 ## Features
 
