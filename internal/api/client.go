@@ -12,9 +12,9 @@ import (
 )
 
 type Client struct {
-	baseURL     string
+	baseURL      string
 	machineToken string
-	httpClient  *http.Client
+	httpClient   *http.Client
 }
 
 func NewClient(cfg *config.Config) *Client {
@@ -31,9 +31,9 @@ func NewClient(cfg *config.Config) *Client {
 	}
 
 	return &Client{
-		baseURL:     baseURL,
+		baseURL:      baseURL,
 		machineToken: cfg.MachineToken,
-		httpClient:  &http.Client{Timeout: 30 * time.Second},
+		httpClient:   &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -603,14 +603,17 @@ type DeclareSourceResponse struct {
 }
 
 // DeclareHostedSource declares a deployment's source manifest and returns the
-// presigned PUT targets. The platform rejects sensitive paths loudly
-// (SOURCE_SENSITIVE_FILE) — the bridge strips them at pack time, so a
-// rejection here means the local packer and the platform disagree and is
-// worth surfacing verbatim.
-func (c *Client) DeclareHostedSource(missionID, deploymentID string, files []PreviewFile) (*DeclareSourceResponse, error) {
+// presigned PUT targets. composePath is the packer's convention detection
+// result (hosted-compose-stacks 3.1): empty on single-container trees — the
+// platform then treats the declare exactly as before this field existed.
+// The platform rejects sensitive paths loudly (SOURCE_SENSITIVE_FILE) — the
+// bridge strips them at pack time, so a rejection here means the local packer
+// and the platform disagree and is worth surfacing verbatim.
+func (c *Client) DeclareHostedSource(missionID, deploymentID string, files []PreviewFile, composePath string) (*DeclareSourceResponse, error) {
 	body := struct {
-		Files []PreviewFile `json:"files"`
-	}{Files: files}
+		Files       []PreviewFile `json:"files"`
+		ComposePath string        `json:"compose_path,omitempty"`
+	}{Files: files, ComposePath: composePath}
 
 	data, status, err := c.requestWithStatus("POST",
 		"/api/missions/internal/"+missionID+"/hosted-deployments/"+deploymentID+"/declare-source", body)

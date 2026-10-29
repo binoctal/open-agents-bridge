@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/binoctal/open-agents-bridge/internal/api"
+	"github.com/binoctal/open-agents-bridge/internal/preview"
 )
 
 // --- PackSourceTree ---------------------------------------------------------
@@ -97,9 +98,9 @@ func TestPackSourceTree_SkipsBridgeWorktreesAndDotGitPointerFile(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"index.html": "hello",
 		// The linked-worktree shape: .git as a FILE (gitdir pointer).
-		".open-agents-bridge-worktrees/task-job_x-t0/.git":     "gitdir: /repo/.git/worktrees/t0",
-		".open-agents-bridge-worktrees/task-job_x-t0/app.ts":   "leftover",
-		".open-agents-bridge-worktrees/task-job_x-t0/.env":     "SECRET",
+		".open-agents-bridge-worktrees/task-job_x-t0/.git":   "gitdir: /repo/.git/worktrees/t0",
+		".open-agents-bridge-worktrees/task-job_x-t0/app.ts": "leftover",
+		".open-agents-bridge-worktrees/task-job_x-t0/.env":   "SECRET",
 		// A bare .git file at the repo root too (submodule-style pointer).
 		".git": "gitdir: elsewhere",
 	})
@@ -166,11 +167,12 @@ func TestPackSourceTree_EmptyTreeFails(t *testing.T) {
 
 // fakeUploader stubs the deploy boundary (same seam as preview's fakeUploader).
 type fakeUploader struct {
-	declareFiles []api.PreviewFile
-	declareResp  *api.DeclareSourceResponse
-	declareErr   error
-	completeErr  error
-	uploadErr    error
+	declareFiles   []api.PreviewFile
+	declareCompose string
+	declareResp    *api.DeclareSourceResponse
+	declareErr     error
+	completeErr    error
+	uploadErr      error
 
 	declared   int
 	completed  int
@@ -179,9 +181,10 @@ type fakeUploader struct {
 	uploaded   map[string][]byte // url -> bytes
 }
 
-func (f *fakeUploader) DeclareHostedSource(missionID, deploymentID string, files []api.PreviewFile) (*api.DeclareSourceResponse, error) {
+func (f *fakeUploader) DeclareHostedSource(missionID, deploymentID string, files []api.PreviewFile, composePath string) (*api.DeclareSourceResponse, error) {
 	f.declared++
 	f.declareFiles = files
+	f.declareCompose = composePath
 	if f.declareErr != nil {
 		return nil, f.declareErr
 	}
@@ -306,5 +309,83 @@ func TestRunSourceUpload_StrippedFilesAreLogged(t *testing.T) {
 	}
 	if len(fake.declareFiles) != 1 || fake.declareFiles[0].Path != "a.ts" {
 		t.Errorf("stripped file must not be declared: %v", fake.declareFiles)
+	}
+}
+
+// --- compose detection (hosted-compose-stacks 3.1) ---------------------------
+
+// Detection order mirrors the platform's COMPOSE_DIR_CANDIDATES x
+// COMPOSE_FILE_NAMES: root docker-compose.yml wins over every other
+// candidate; deploy/ ranks below root regardless of spelling.
+func TestDetectComposePath_ConventionOrder(t *testing.T) {
+	all := map[string]bool{}
+	for _, p := range []string{
+		"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
+		"deploy/docker-compose.yml", "deploy/docker-compose.yaml", "deploy/compose.yml", "deploy/compose.yaml",
+	} {
+		all[p] = true
+		files := []preview.ManifestFile{{Path: p}, {Path: "src/app.ts"}}
+		if got := DetectComposePath(files); got != p {
+			t.Errorf("single candidate %s: detected %q", p, got)
+		}
+	}
+	if got := DetectComposePath([]preview.ManifestFile{{Path: "docker-compose.yml"}, {Path: "compose.yml"}}); got != "docker-compose.yml" {
+		t.Errorf("root docker-compose.yml must outrank compose.yml, got %q", got)
+	}
+	if got := DetectComposePath([]preview.ManifestFile{{Path: "deploy/docker-compose.yml"}, {Path: "compose.yaml"}}); got != "compose.yaml" {
+		t.Errorf("root candidates must outrank deploy/, got %q", got)
+	}
+}
+
+func TestDetectComposePath_NonConventionAndEmpty(t *testing.T) {
+	for _, p := range []string{"ops/docker-compose.yml", "docker-compose.prod.yml", "src/compose.yaml"} {
+		if got := DetectComposePath([]preview.ManifestFile{{Path: p}}); got != "" {
+			t.Errorf("non-convention path %s must not detect, got %q", p, got)
+		}
+	}
+	if got := DetectComposePath([]preview.ManifestFile{{Path: "a.ts"}}); got != "" {
+		t.Errorf("plain tree must not detect, got %q", got)
+	}
+}
+
+func TestRunSourceUpload_DeclaresComposePathWhenDetected(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"src/app.ts":                "app",
+		"deploy/docker-compose.yml": "services: {web: {image: nginx}}",
+	})
+	fake := &fakeUploader{
+		declareResp: &api.DeclareSourceResponse{DeploymentID: "dep1"},
+	}
+
+	var logs []string
+	RunSourceUpload(fake, "m1", "dep1", root, func(format string, args ...interface{}) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	})
+
+	if fake.declareCompose != "deploy/docker-compose.yml" {
+		t.Errorf("declare must carry the detected path, got %q", fake.declareCompose)
+	}
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l, "deploy/docker-compose.yml") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("detection must be visible in logs, got %v", logs)
+	}
+}
+
+// Zero-change guarantee: a tree without a convention-path compose file must
+// declare with an EMPTY compose_path (omitempty keeps the wire byte-identical
+// to pre-compose bridges).
+func TestRunSourceUpload_NoComposeDeclaresEmptyPath(t *testing.T) {
+	root := writeTree(t, map[string]string{"src/app.ts": "app"})
+	fake := &fakeUploader{
+		declareResp: &api.DeclareSourceResponse{DeploymentID: "dep1"},
+	}
+	RunSourceUpload(fake, "m1", "dep1", root, nil)
+	if fake.declareCompose != "" {
+		t.Errorf("single-container tree must declare empty compose_path, got %q", fake.declareCompose)
 	}
 }

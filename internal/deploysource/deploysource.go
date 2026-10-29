@@ -28,7 +28,7 @@ import (
 // interface (not preview.Uploader, which demands the preview calls) so tests
 // stub exactly the deploy boundary.
 type Uploader interface {
-	DeclareHostedSource(missionID, deploymentID string, files []api.PreviewFile) (*api.DeclareSourceResponse, error)
+	DeclareHostedSource(missionID, deploymentID string, files []api.PreviewFile, composePath string) (*api.DeclareSourceResponse, error)
 	CompleteHostedSource(missionID, deploymentID string) error
 	UploadPreviewFile(url string, data []byte) error
 }
@@ -86,13 +86,41 @@ const (
 	MaxTotalBytes = 314_572_800 // 300MB per source tree
 )
 
+// composeConventionPaths mirrors the platform's COMPOSE_DIR_CANDIDATES x
+// COMPOSE_FILE_NAMES (apps/api/src/services/compose-policy.ts) in the same
+// order: root first, then deploy/, docker-compose spelling before compose,
+// .yml before .yaml. Detection order is a contract — the two sides must pick
+// the same file when a tree carries several.
+var composeConventionPaths = []string{
+	"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
+	"deploy/docker-compose.yml", "deploy/docker-compose.yaml", "deploy/compose.yml", "deploy/compose.yaml",
+}
+
+// DetectComposePath reports the first convention-path compose file present in
+// a packed manifest, or "" when the tree is single-container shape. Detection
+// rides the MANIFEST, so a reported path is by construction part of the
+// declared tree (the platform fail-louds paths outside the manifest anyway).
+func DetectComposePath(files []preview.ManifestFile) string {
+	set := make(map[string]bool, len(files))
+	for _, f := range files {
+		set[f.Path] = true
+	}
+	for _, p := range composeConventionPaths {
+		if set[p] {
+			return p
+		}
+	}
+	return ""
+}
+
 // PackResult carries the manifest plus what was left out, so the caller can
 // log the strip decisions — a deploy whose app genuinely needs a stripped
 // file fails at the hosting node, and this is the only place the omission is
 // visible before that.
 type PackResult struct {
-	Files    []preview.ManifestFile
-	Stripped []string // sensitive basenames removed, for the log line
+	Files       []preview.ManifestFile
+	Stripped    []string // sensitive basenames removed, for the log line
+	ComposePath string   // first convention-path compose file, "" when none
 }
 
 // PackSourceTree walks root and manifests every packable file. Paths are
@@ -156,6 +184,7 @@ func PackSourceTree(root string) (*PackResult, error) {
 		return nil, fmt.Errorf("no packable files under %s", root)
 	}
 	sort.Slice(res.Files, func(i, j int) bool { return res.Files[i].Path < res.Files[j].Path })
+	res.ComposePath = DetectComposePath(res.Files)
 	return &res, nil
 }
 
@@ -246,7 +275,7 @@ func RunSourceUpload(client Uploader, missionID, deploymentID, repoRoot string, 
 			logger.ModDeploy, len(pack.Stripped), deploymentID, strings.Join(pack.Stripped, ", "))
 	}
 
-	decl, err := client.DeclareHostedSource(missionID, deploymentID, toAPIFiles(pack.Files))
+	decl, err := client.DeclareHostedSource(missionID, deploymentID, toAPIFiles(pack.Files), pack.ComposePath)
 	if err != nil {
 		logf("[%s] declare failed for deployment %s: %v", logger.ModDeploy, deploymentID, err)
 		return
@@ -263,6 +292,9 @@ func RunSourceUpload(client Uploader, missionID, deploymentID, repoRoot string, 
 	if err := client.CompleteHostedSource(missionID, deploymentID); err != nil {
 		logf("[%s] complete failed for deployment %s: %v", logger.ModDeploy, deploymentID, err)
 		return
+	}
+	if pack.ComposePath != "" {
+		logf("[%s] compose stack detected for deployment %s: %s", logger.ModDeploy, deploymentID, pack.ComposePath)
 	}
 	logger.Info("[%s] source tree uploaded for deployment %s (mission %s): %d files, %d uploaded",
 		logger.ModDeploy, deploymentID, missionID, len(pack.Files), len(decl.Uploads))
