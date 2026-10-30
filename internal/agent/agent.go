@@ -119,9 +119,11 @@ type Agent struct {
 
 	// probeFails counts consecutive probe failures per deployment (S4). A
 	// single refused dial is noise (container restart, transient dip); three
-	// in a row (~30s at the default poll) is a dead app and is reported once
-	// per streak. Guarded by inFlightMu.
-	probeFails map[string]int
+	// in a row sustained across probeKillWindow is a dead app and is reported
+	// once per streak. probeFirstFail anchors that window per streak. Both
+	// guarded by inFlightMu.
+	probeFails     map[string]int
+	probeFirstFail map[string]time.Time
 
 	// epDisabled marks endpoints taken out by a 401 (D3): a rotated secret
 	// on one environment must not degrade service to the others, so the
@@ -490,11 +492,22 @@ func (a *Agent) handleRelease(ctx context.Context, ep APIEndpoint, item api.Work
 	return a.report(ctx, ep, item.DeploymentID, api.EventReleased, 0, "")
 }
 
+// probeKillWindow is how long a port must stay unreachable, across at least
+// three consecutive probe failures, before the row is killed (8.12). A row
+// flips ready when the Coolify deployment finishes, but the ingress container
+// may start listening well after that (vnivni 2026-10-30: row ready 06:47:16,
+// openfga container StartedAt 06:48:34 -- three probes ~10s apart killed the
+// row 37s before the container even existed). Cold-start seconds are not an
+// outage; 90s sustained unreachability is.
+const probeKillWindow = 90 * time.Second
+
 // handleProbe is the ready-alive check (S4): dial the app's published host
 // port on localhost. Success clears the streak; three consecutive failures
-// report runtime_fail once (the API's transition table takes ready -> failed,
-// and the streak entry is dropped so a retry/restart that fails again starts
-// a fresh streak instead of double-reporting).
+// sustained across probeKillWindow report runtime_fail once (the API's
+// transition table takes ready -> failed, and the streak entry is dropped so
+// a retry/restart that fails again starts a fresh streak instead of
+// double-reporting). Short bursts inside the window are treated as cold
+// start and only counted, not believed.
 func (a *Agent) handleProbe(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {
 	if a.probeDial == nil {
 		a.probeDial = defaultProbeDial
@@ -503,24 +516,33 @@ func (a *Agent) handleProbe(ctx context.Context, ep APIEndpoint, item api.WorkIt
 	a.inFlightMu.Lock()
 	if a.probeFails == nil {
 		a.probeFails = make(map[string]int)
+		a.probeFirstFail = make(map[string]time.Time)
 	}
 	if err == nil {
 		delete(a.probeFails, item.DeploymentID)
+		delete(a.probeFirstFail, item.DeploymentID)
 		a.inFlightMu.Unlock()
 		return nil
 	}
+	now := a.clock()
 	a.probeFails[item.DeploymentID]++
 	streak := a.probeFails[item.DeploymentID]
-	if streak < 3 {
+	if streak == 1 {
+		a.probeFirstFail[item.DeploymentID] = now
+	}
+	since := now.Sub(a.probeFirstFail[item.DeploymentID])
+	if streak < 3 || since < probeKillWindow {
 		a.inFlightMu.Unlock()
-		a.logf("deploy %s: probe port %d failed (%d/3): %v", item.DeploymentID, item.AppPort, streak, err)
+		a.logf("deploy %s: probe port %d failed (%d consecutive, %s into streak): %v",
+			item.DeploymentID, item.AppPort, streak, since.Round(time.Second), err)
 		return nil
 	}
 	delete(a.probeFails, item.DeploymentID)
+	delete(a.probeFirstFail, item.DeploymentID)
 	a.inFlightMu.Unlock()
-	a.logf("deploy %s: port %d dead after %d consecutive probes, reporting runtime_fail",
-		item.DeploymentID, item.AppPort, streak)
-	return a.report(ctx, ep, item.DeploymentID, api.EventRuntimeFail, 0, fmt.Sprintf("tcp dial 127.0.0.1:%d failed %d consecutive probes: %v", item.AppPort, streak, err))
+	a.logf("deploy %s: port %d dead after %d consecutive probes over %s, reporting runtime_fail",
+		item.DeploymentID, item.AppPort, streak, since.Round(time.Second))
+	return a.report(ctx, ep, item.DeploymentID, api.EventRuntimeFail, 0, fmt.Sprintf("tcp dial 127.0.0.1:%d failed %d consecutive probes over %s: %v", item.AppPort, streak, since.Round(time.Second), err))
 }
 
 // defaultProbeDial opens a short-lived TCP connection to the app port. Any
