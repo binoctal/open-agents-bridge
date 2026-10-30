@@ -333,3 +333,67 @@ func TestClient_UploadPreviewFile_NonSuccess(t *testing.T) {
 		t.Fatal("expected error for non-2xx PUT response")
 	}
 }
+
+// A chunked declare with Part 0 must still serialize "part":0 (and a legal
+// zero total_bytes): the platform switches to chunked mode on all three
+// fields being present, and omitempty on a zero-valued int once dropped
+// "part" from the first slice's body — the API silently declared that slice
+// as the whole tree and assembly 404'd on part-0 forever (vnivni, 2026-10-30).
+func TestClient_DeclareHostedSource_ChunkZeroPartMarshals(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		for _, field := range []string{"part", "total_parts", "total_bytes"} {
+			raw, ok := body[field]
+			if !ok {
+				t.Fatalf("chunked declare body missing %q (zero value dropped by omitempty?)", field)
+			}
+			var n json.Number
+			if err := json.Unmarshal(raw, &n); err != nil {
+				t.Fatalf("field %q is not a number: %v", field, err)
+			}
+		}
+		if string(body["part"]) != "0" {
+			t.Fatalf("expected part 0, got %s", body["part"])
+		}
+		if string(body["total_bytes"]) != "0" {
+			t.Fatalf("expected total_bytes 0, got %s", body["total_bytes"])
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"deploymentId": "d1", "uploads": []interface{}{}})
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{ServerURL: server.URL, MachineToken: "tok123"}
+	c := NewClient(cfg)
+
+	if _, err := c.DeclareHostedSource("mission-1", "d1", nil, "", &DeclareChunk{Part: 0, TotalParts: 7, TotalBytes: 0}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The legacy wire shape is chunk == nil: NONE of the three chunk fields may
+// appear, or an old-platform fallback would misread the declare as chunked.
+func TestClient_DeclareHostedSource_NilChunkSendsNoChunkFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		for _, field := range []string{"part", "total_parts", "total_bytes"} {
+			if _, ok := body[field]; ok {
+				t.Fatalf("single-shot declare body must not carry %q", field)
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"deploymentId": "d1", "uploads": []interface{}{}})
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{ServerURL: server.URL, MachineToken: "tok123"}
+	c := NewClient(cfg)
+
+	if _, err := c.DeclareHostedSource("mission-1", "d1", nil, "", nil); err != nil {
+		t.Fatal(err)
+	}
+}

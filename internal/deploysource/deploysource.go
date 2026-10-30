@@ -13,8 +13,10 @@ package deploysource
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -28,8 +30,8 @@ import (
 // interface (not preview.Uploader, which demands the preview calls) so tests
 // stub exactly the deploy boundary.
 type Uploader interface {
-	DeclareHostedSource(missionID, deploymentID string, files []api.PreviewFile, composePath string) (*api.DeclareSourceResponse, error)
-	CompleteHostedSource(missionID, deploymentID string) error
+	DeclareHostedSource(missionID, deploymentID string, files []api.PreviewFile, composePath string, chunk *api.DeclareChunk) (*api.DeclareSourceResponse, error)
+	CompleteHostedSource(missionID, deploymentID string, verify *api.CompleteSourceVerify) error
 	UploadPreviewFile(url string, data []byte) error
 }
 
@@ -49,6 +51,10 @@ func noopLogf(string, ...interface{}) {}
 var ExcludedDirs = map[string]bool{
 	".git": true, "node_modules": true, "dist": true, "build": true,
 	"out": true, ".next": true, ".cache": true, ".turbo": true, "coverage": true,
+	// Language build/dependency outputs the hosting node regenerates anyway:
+	// Maven (target/), Python virtualenvs (.venv/, venv/). Mirrors the
+	// platform's SOURCE_EXCLUDED_DIRS.
+	"target": true, ".venv": true, "venv": true,
 	".open-agents-bridge-worktrees": true,
 }
 
@@ -127,10 +133,46 @@ type PackResult struct {
 // POSIX-relative to root, sorted deterministically, hashed with sha256 —
 // the same manifest contract as previews. Oversize files/trees are errors,
 // not truncations: a partial tree deploys a broken app.
+//
+// Git-aware: when root is a git work tree the file set comes from
+// `git ls-files --cached --others --exclude-standard` — exactly the tree a
+// commit would carry. Untracked build output and local scratch that
+// .gitignore already excludes (virtualenvs, vendored caches, research
+// dumps...) never belong in a deploy source, and honoring gitignore keeps
+// real projects under the size ceiling without asking users to clean their
+// workdir first. Non-git roots keep the plain walk (ExcludedDirs et al).
 func PackSourceTree(root string) (*PackResult, error) {
-	var res PackResult
-	var total int64
+	if paths := gitPackPaths(root); paths != nil {
+		return packPaths(root, paths)
+	}
+	return packWalk(root)
+}
 
+// gitPackPaths returns the repo-relative POSIX paths git would commit
+// (tracked + untracked-but-not-ignored). nil when root is not a git work
+// tree, or when git cannot enumerate it (unresolvable linked-worktree
+// pointer, corrupted repo) — the caller then falls back to the plain walk,
+// which keeps today's behavior for such trees.
+func gitPackPaths(root string) []string {
+	if _, err := os.Stat(filepath.Join(root, ".git")); err != nil {
+		return nil
+	}
+	out, err := exec.Command("git", "-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z").Output()
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, p := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+		if p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
+// packWalk is the non-git packing path: a plain directory walk.
+func packWalk(root string) (*PackResult, error) {
+	var paths []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -140,45 +182,62 @@ func PackSourceTree(root string) (*PackResult, error) {
 			return relErr
 		}
 		relSlash := filepath.ToSlash(rel)
-
 		if info.IsDir() {
 			if relSlash != "." && ExcludedDirs[info.Name()] {
 				return filepath.SkipDir
 			}
 			return nil
 		}
+		paths = append(paths, relSlash)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return packPaths(root, paths)
+}
 
-		// A linked git worktree's .git is a POINTER FILE (gitdir: ...), not a
-		// directory, so the directory skip above never sees it — and the
-		// platform rejects any manifest path ending in a .git segment. Same
-		// for the file branch of BuildStaticTreeManifest.
-		if info.Name() == ".git" {
-			return nil
+// packPaths manifests the given repo-relative paths (strip, size-check,
+// hash) into a PackResult.
+func packPaths(root string, paths []string) (*PackResult, error) {
+	var res PackResult
+	var total int64
+
+	for _, relSlash := range paths {
+		// The platform rejects any manifest path hitting these segments;
+		// skip them here so a committed build dir does not fail the declare.
+		if segs := strings.Split(relSlash, "/"); segs[len(segs)-1] == ".git" || slices.ContainsFunc(segs, func(s string) bool { return ExcludedDirs[s] }) {
+			continue
+		}
+
+		path := filepath.Join(root, filepath.FromSlash(relSlash))
+		info, err := os.Lstat(path)
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			continue // submodule dir entries, symlinks
 		}
 
 		base := filepath.Base(path)
 		if isSensitive(base) {
 			res.Stripped = append(res.Stripped, relSlash)
-			return nil
+			continue
 		}
 
 		if info.Size() > MaxFileBytes {
-			return fmt.Errorf("file %s is %d bytes, over the %d byte limit", relSlash, info.Size(), MaxFileBytes)
+			return nil, fmt.Errorf("file %s is %d bytes, over the %d byte limit", relSlash, info.Size(), MaxFileBytes)
 		}
 		sum, err := preview.SHA256File(path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		total += info.Size()
 		if total > MaxTotalBytes {
-			return fmt.Errorf("source tree exceeds the %d byte limit", MaxTotalBytes)
+			return nil, fmt.Errorf("source tree exceeds the %d byte limit", MaxTotalBytes)
 		}
 
 		res.Files = append(res.Files, preview.ManifestFile{Path: relSlash, SHA256: sum, Size: info.Size()})
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
 	if len(res.Files) == 0 {
 		return nil, fmt.Errorf("no packable files under %s", root)
@@ -254,13 +313,34 @@ func uploadAll(client interface {
 	return firstErr
 }
 
+// declareChunkFiles slices a chunked declare. ~800 files keeps one request's
+// manifest JSON around 200KB, an order of magnitude under what blew the API
+// worker's CPU budget in a single shot (CF 1102 on a real 7.5k-file tree,
+// 2026-10-30).
+const declareChunkFiles = 800
+
+func featureEnabled(features []string, name string) bool {
+	for _, f := range features {
+		if f == name {
+			return true
+		}
+	}
+	return false
+}
+
 // RunSourceUpload packs repoRoot and runs the two-phase upload for one
 // pending deployment. Best-effort like every preview path: failures are
 // logged and returned, never propagated into mission control flow — and the
 // platform keeps offering the row on the next poll, so a transient failure
 // self-heals (declare's skip-list means the retry only uploads what is
 // missing).
-func RunSourceUpload(client Uploader, missionID, deploymentID, repoRoot string, logf Logf) {
+//
+// features is the platform's advertised protocol set from the pending poll.
+// Large trees (>declareChunkFiles files) take the chunked declare protocol
+// ONLY when the platform advertises chunked_declare: against an old API the
+// chunked wire would silently declare the last slice as the whole tree, so
+// the fallback keeps failing loudly (503) instead of corrupting quietly.
+func RunSourceUpload(client Uploader, missionID, deploymentID, repoRoot string, logf Logf, features []string) {
 	if logf == nil {
 		logf = noopLogf
 	}
@@ -275,21 +355,27 @@ func RunSourceUpload(client Uploader, missionID, deploymentID, repoRoot string, 
 			logger.ModDeploy, len(pack.Stripped), deploymentID, strings.Join(pack.Stripped, ", "))
 	}
 
-	decl, err := client.DeclareHostedSource(missionID, deploymentID, toAPIFiles(pack.Files), pack.ComposePath)
+	blob := func(path string) ([]byte, error) {
+		return os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(path)))
+	}
+
+	if featureEnabled(features, "chunked_declare") && len(pack.Files) > declareChunkFiles {
+		runChunkedSourceUpload(client, missionID, deploymentID, pack, blob, logf)
+		return
+	}
+
+	decl, err := client.DeclareHostedSource(missionID, deploymentID, toAPIFiles(pack.Files), pack.ComposePath, nil)
 	if err != nil {
 		logf("[%s] declare failed for deployment %s: %v", logger.ModDeploy, deploymentID, err)
 		return
 	}
 
-	blob := func(path string) ([]byte, error) {
-		return os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(path)))
-	}
 	if err := uploadAll(client, decl.Uploads, blob); err != nil {
 		logf("[%s] upload failed for deployment %s: %v", logger.ModDeploy, deploymentID, err)
 		return
 	}
 
-	if err := client.CompleteHostedSource(missionID, deploymentID); err != nil {
+	if err := client.CompleteHostedSource(missionID, deploymentID, nil); err != nil {
 		logf("[%s] complete failed for deployment %s: %v", logger.ModDeploy, deploymentID, err)
 		return
 	}
@@ -298,4 +384,59 @@ func RunSourceUpload(client Uploader, missionID, deploymentID, repoRoot string, 
 	}
 	logger.Info("[%s] source tree uploaded for deployment %s (mission %s): %d files, %d uploaded",
 		logger.ModDeploy, deploymentID, missionID, len(pack.Files), len(decl.Uploads))
+}
+
+// runChunkedSourceUpload is the large-tree upload: declare the pack slice by
+// slice, upload each slice's presigned objects, then complete with the full
+// {path, sha256} projection so the platform never has to parse the assembled
+// manifest itself. The compose path rides the FINAL declare (the platform
+// stamps it at assembly); every part carries the whole-tree TotalBytes so
+// the platform's quota gate sees the same total on every part and retries
+// stay idempotent. A failure mid-sequence returns; the row stays pending and
+// the next poll restarts at part 0, where declare's skip-list means only the
+// objects that never landed get re-PUT.
+func runChunkedSourceUpload(client Uploader, missionID, deploymentID string, pack *PackResult, blob func(string) ([]byte, error), logf Logf) {
+	totalParts := (len(pack.Files) + declareChunkFiles - 1) / declareChunkFiles
+	var totalBytes int64
+	for _, f := range pack.Files {
+		totalBytes += f.Size
+	}
+
+	verify := &api.CompleteSourceVerify{Files: make([]api.VerifyFile, 0, len(pack.Files))}
+	for part := 0; part < totalParts; part++ {
+		slice := pack.Files[part*declareChunkFiles : min((part+1)*declareChunkFiles, len(pack.Files))]
+		chunk := &api.DeclareChunk{Part: part, TotalParts: totalParts, TotalBytes: totalBytes}
+		// compose_path rides the final part: assembly stamps it then, and the
+		// whole-tree membership check moved to complete (verify.Files).
+		composePath := ""
+		if part == totalParts-1 {
+			composePath = pack.ComposePath
+		}
+		decl, err := client.DeclareHostedSource(missionID, deploymentID, toAPIFiles(slice), composePath, chunk)
+		if err != nil {
+			logf("[%s] declare failed for deployment %s (part %d/%d): %v",
+				logger.ModDeploy, deploymentID, part+1, totalParts, err)
+			return
+		}
+		if err := uploadAll(client, decl.Uploads, blob); err != nil {
+			logf("[%s] upload failed for deployment %s (part %d/%d): %v",
+				logger.ModDeploy, deploymentID, part+1, totalParts, err)
+			return
+		}
+		for _, f := range slice {
+			verify.Files = append(verify.Files, api.VerifyFile{Path: f.Path, SHA256: f.SHA256})
+		}
+		logf("[%s] declared part %d/%d for deployment %s: %d files, %d uploaded",
+			logger.ModDeploy, part+1, totalParts, deploymentID, len(slice), len(decl.Uploads))
+	}
+
+	if err := client.CompleteHostedSource(missionID, deploymentID, verify); err != nil {
+		logf("[%s] complete failed for deployment %s: %v", logger.ModDeploy, deploymentID, err)
+		return
+	}
+	if pack.ComposePath != "" {
+		logf("[%s] compose stack detected for deployment %s: %s", logger.ModDeploy, deploymentID, pack.ComposePath)
+	}
+	logger.Info("[%s] source tree uploaded for deployment %s (mission %s): %d files in %d parts",
+		logger.ModDeploy, deploymentID, missionID, len(pack.Files), totalParts)
 }

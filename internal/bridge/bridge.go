@@ -4274,13 +4274,13 @@ func (b *Bridge) deploySourceDone(deploymentId string) {
 // Every failure (network, per-item pack/upload) is logged and skipped; the
 // row stays pending server-side, so the next tick retries it.
 func (b *Bridge) pollDeploySources() {
-	deploys, err := b.apiClient.GetPendingHostedDeploys()
+	resp, err := b.apiClient.GetPendingHostedDeploys()
 	if err != nil {
 		b.logDebug("[%s] deploy: pending poll failed: %v", logger.ModDeploy, err)
 		return
 	}
 
-	for _, d := range deploys {
+	for _, d := range resp.Deploys {
 		if !b.claimDeploySource(d.DeploymentID) {
 			continue
 		}
@@ -4289,7 +4289,7 @@ func (b *Bridge) pollDeploySources() {
 		go func(work api.HostedDeployWork) {
 			defer b.deploySourceDone(work.DeploymentID)
 			deploysource.RunSourceUpload(b.apiClient, work.MissionID, work.DeploymentID,
-				b.worktreeManager.ProjectDir(), b.logInfo)
+				b.worktreeManager.ProjectDir(), b.logInfo, resp.Features)
 		}(d)
 	}
 }

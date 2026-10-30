@@ -15,6 +15,12 @@ type Client struct {
 	baseURL      string
 	machineToken string
 	httpClient   *http.Client
+	// slowClient backs the source-upload calls (declare/complete/PUT): their
+	// bodies run to megabytes (a full tree manifest) or tens of MB (a single
+	// R2 object), and both cross the same lossy links the 30s heartbeat
+	// budget was sized for. Every caller is a best-effort background loop,
+	// so a long deadline only slows the retry, never the bridge itself.
+	slowClient *http.Client
 }
 
 func NewClient(cfg *config.Config) *Client {
@@ -34,11 +40,12 @@ func NewClient(cfg *config.Config) *Client {
 		baseURL:      baseURL,
 		machineToken: cfg.MachineToken,
 		httpClient:   &http.Client{Timeout: 30 * time.Second},
+		slowClient:   &http.Client{Timeout: 5 * time.Minute},
 	}
 }
 
 func (c *Client) request(method, path string, body interface{}) ([]byte, error) {
-	data, _, err := c.requestWithStatus(method, path, body)
+	data, _, err := c.requestClient(c.httpClient, method, path, body)
 	return data, err
 }
 
@@ -46,6 +53,12 @@ func (c *Client) request(method, path string, body interface{}) ([]byte, error) 
 // which preview-hosting error handling needs to distinguish error codes
 // (e.g. PREVIEW_QUOTA_EXCEEDED) without re-parsing the wrapped error string.
 func (c *Client) requestWithStatus(method, path string, body interface{}) ([]byte, int, error) {
+	return c.requestClient(c.httpClient, method, path, body)
+}
+
+// requestClient is requestWithStatus against an explicit client, so the fat
+// source-upload calls (declare/complete) can take the slowClient deadline.
+func (c *Client) requestClient(client *http.Client, method, path string, body interface{}) ([]byte, int, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -63,7 +76,7 @@ func (c *Client) requestWithStatus(method, path string, body interface{}) ([]byt
 	req.Header.Set("Authorization", "Bearer "+c.machineToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -547,9 +560,10 @@ func (c *Client) UploadPreviewFile(url string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	// Use a client with no default headers of its own; c.httpClient carries
-	// only a timeout, so it's safe to reuse here too.
-	resp, err := c.httpClient.Do(req)
+	// slowClient: a single object rides the same lossy links at up to 25MB,
+	// well past the 30s heartbeat budget. It carries no default headers of its
+	// own (only a timeout), so it is safe for presigned URLs.
+	resp, err := c.slowClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -577,21 +591,29 @@ type HostedDeployWork struct {
 	DeploymentID string `json:"deploymentId"`
 }
 
+// PendingHostedDeploys wraps the pending poll response: the work items plus
+// the API's advertised protocol features. Features are the version-skew
+// guard -- a new bridge against an old API sees none and must fall back to
+// the single-shot declare instead of half-declaring a chunked tree (which
+// the old API would silently treat as the whole manifest).
+type PendingHostedDeploys struct {
+	Deploys  []HostedDeployWork `json:"deploys"`
+	Features []string           `json:"features"`
+}
+
 // GetPendingHostedDeploys polls for user-requested source packs. Rows only
 // exist after an explicit deploy click by the mission owner, so the common
 // response is an empty list.
-func (c *Client) GetPendingHostedDeploys() ([]HostedDeployWork, error) {
+func (c *Client) GetPendingHostedDeploys() (*PendingHostedDeploys, error) {
 	data, err := c.request("GET", "/api/missions/internal/hosted-deployments/pending", nil)
 	if err != nil {
 		return nil, err
 	}
-	var resp struct {
-		Deploys []HostedDeployWork `json:"deploys"`
-	}
+	var resp PendingHostedDeploys
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, err
 	}
-	return resp.Deploys, nil
+	return &resp, nil
 }
 
 // DeclareSourceResponse mirrors the platform's declareSource result: presigned
@@ -602,20 +624,48 @@ type DeclareSourceResponse struct {
 	Uploads      []PreviewUpload `json:"uploads"`
 }
 
+// DeclareChunk switches a declare to the chunked protocol for large trees
+// (a 7.5k-file manifest blows the API worker's CPU budget in one request).
+// TotalBytes is the WHOLE pack, not the slice — the platform's quota gate and
+// source_bytes stamp both key off it, on every part.
+type DeclareChunk struct {
+	Part       int   `json:"part"`
+	TotalParts int   `json:"total_parts"`
+	TotalBytes int64 `json:"total_bytes"`
+}
+
 // DeclareHostedSource declares a deployment's source manifest and returns the
 // presigned PUT targets. composePath is the packer's convention detection
 // result (hosted-compose-stacks 3.1): empty on single-container trees — the
 // platform then treats the declare exactly as before this field existed.
-// The platform rejects sensitive paths loudly (SOURCE_SENSITIVE_FILE) — the
-// bridge strips them at pack time, so a rejection here means the local packer
-// and the platform disagree and is worth surfacing verbatim.
-func (c *Client) DeclareHostedSource(missionID, deploymentID string, files []PreviewFile, composePath string) (*DeclareSourceResponse, error) {
+// chunk non-nil declares one slice of a chunked upload (nil = single-shot,
+// the pre-chunking wire shape). The platform rejects sensitive paths loudly
+// (SOURCE_SENSITIVE_FILE) — the bridge strips them at pack time, so a
+// rejection here means the local packer and the platform disagree and is
+// worth surfacing verbatim.
+func (c *Client) DeclareHostedSource(missionID, deploymentID string, files []PreviewFile, composePath string, chunk *DeclareChunk) (*DeclareSourceResponse, error) {
+	// The chunk fields are POINTERS: nil (single-shot) must omit all three --
+	// the legacy wire shape old platforms parse -- while a non-nil chunk must
+	// serialize every field even at its zero value, because the platform
+	// switches to chunked mode on all three being present. Plain int fields
+	// with omitempty dropped "part" from the first slice's body once: the API
+	// silently declared that slice as the whole tree and assembly 404'd on
+	// part-0 forever (observed on vnivni 2026-10-30: parts 1-9 in R2,
+	// part-0 never landed).
 	body := struct {
 		Files       []PreviewFile `json:"files"`
 		ComposePath string        `json:"compose_path,omitempty"`
+		Part        *int          `json:"part,omitempty"`
+		TotalParts  *int          `json:"total_parts,omitempty"`
+		TotalBytes  *int64        `json:"total_bytes,omitempty"`
 	}{Files: files, ComposePath: composePath}
+	if chunk != nil {
+		body.Part, body.TotalParts, body.TotalBytes = &chunk.Part, &chunk.TotalParts, &chunk.TotalBytes
+	}
 
-	data, status, err := c.requestWithStatus("POST",
+	// slowClient: a full-tree manifest runs to megabytes of JSON across the
+	// same lossy links the 30s heartbeat budget was sized for.
+	data, status, err := c.requestClient(c.slowClient, "POST",
 		"/api/missions/internal/"+missionID+"/hosted-deployments/"+deploymentID+"/declare-source", body)
 	if err != nil {
 		return nil, parsePreviewError(status, data, err)
@@ -628,13 +678,33 @@ func (c *Client) DeclareHostedSource(missionID, deploymentID string, files []Pre
 	return &resp, nil
 }
 
+// VerifyFile is one {path, sha256} pair of the complete-time verify list --
+// the manifest projection the platform would otherwise have to fetch and
+// parse back from storage (its own CPU-budget dodge for large trees).
+type VerifyFile struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+}
+
+// CompleteSourceVerify is the chunked complete body: the bridge replays its
+// local pack so the platform verifies every object landed without reading
+// the assembled manifest.
+type CompleteSourceVerify struct {
+	Files []VerifyFile `json:"files"`
+}
+
 // CompleteHostedSource tells the platform every declared object landed. The
 // row stays `pending` on the platform until the hosting-agent seam picks it
 // up, and the poll keeps offering it — completing twice is safe (the LIST
-// verification is idempotent).
-func (c *Client) CompleteHostedSource(missionID, deploymentID string) error {
-	data, status, err := c.requestWithStatus("POST",
-		"/api/missions/internal/"+missionID+"/hosted-deployments/"+deploymentID+"/complete-source", nil)
+// verification is idempotent). verify non-nil (chunked uploads) carries the
+// bridge's manifest projection; nil keeps the legacy empty body.
+func (c *Client) CompleteHostedSource(missionID, deploymentID string, verify *CompleteSourceVerify) error {
+	var payload interface{}
+	if verify != nil {
+		payload = verify
+	}
+	data, status, err := c.requestClient(c.slowClient, "POST",
+		"/api/missions/internal/"+missionID+"/hosted-deployments/"+deploymentID+"/complete-source", payload)
 	if err != nil {
 		return parsePreviewError(status, data, err)
 	}

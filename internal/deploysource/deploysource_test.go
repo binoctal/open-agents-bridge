@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -174,27 +175,41 @@ type fakeUploader struct {
 	completeErr    error
 	uploadErr      error
 
-	declared   int
-	completed  int
-	completedM string
-	completedD string
-	uploaded   map[string][]byte // url -> bytes
+	declared      int
+	completed     int
+	completedM    string
+	completedD    string
+	completedBody *api.CompleteSourceVerify
+	uploaded      map[string][]byte // url -> bytes
+
+	// chunked-call recording: every declare's (composePath, chunk) in order.
+	declareCalls []struct {
+		compose string
+		chunk   *api.DeclareChunk
+		files   int
+	}
 }
 
-func (f *fakeUploader) DeclareHostedSource(missionID, deploymentID string, files []api.PreviewFile, composePath string) (*api.DeclareSourceResponse, error) {
+func (f *fakeUploader) DeclareHostedSource(missionID, deploymentID string, files []api.PreviewFile, composePath string, chunk *api.DeclareChunk) (*api.DeclareSourceResponse, error) {
 	f.declared++
 	f.declareFiles = files
 	f.declareCompose = composePath
+	f.declareCalls = append(f.declareCalls, struct {
+		compose string
+		chunk   *api.DeclareChunk
+		files   int
+	}{composePath, chunk, len(files)})
 	if f.declareErr != nil {
 		return nil, f.declareErr
 	}
 	return f.declareResp, nil
 }
 
-func (f *fakeUploader) CompleteHostedSource(missionID, deploymentID string) error {
+func (f *fakeUploader) CompleteHostedSource(missionID, deploymentID string, verify *api.CompleteSourceVerify) error {
 	f.completed++
 	f.completedM = missionID
 	f.completedD = deploymentID
+	f.completedBody = verify
 	return f.completeErr
 }
 
@@ -218,7 +233,7 @@ func TestRunSourceUpload_HappyPath(t *testing.T) {
 	var logs []string
 	RunSourceUpload(fake, "m1", "dep1", root, func(format string, args ...interface{}) {
 		logs = append(logs, fmt.Sprintf(format, args...))
-	})
+	}, nil)
 
 	if fake.declared != 1 || fake.completed != 1 {
 		t.Fatalf("expected declare+complete once, got %d/%d", fake.declared, fake.completed)
@@ -242,7 +257,7 @@ func TestRunSourceUpload_SkipListMeansZeroUploads(t *testing.T) {
 		declareResp: &api.DeclareSourceResponse{DeploymentID: "dep1"},
 	}
 
-	RunSourceUpload(fake, "m1", "dep1", root, nil)
+	RunSourceUpload(fake, "m1", "dep1", root, nil, nil)
 
 	if fake.declared != 1 || fake.completed != 1 {
 		t.Fatalf("expected declare+complete once, got %d/%d", fake.declared, fake.completed)
@@ -258,7 +273,7 @@ func TestRunSourceUpload_DeclareFailureSkipsUploadAndComplete(t *testing.T) {
 		declareErr: &api.PreviewAPIError{StatusCode: 400, Code: "SOURCE_SENSITIVE_FILE"},
 	}
 
-	RunSourceUpload(fake, "m1", "dep1", root, nil)
+	RunSourceUpload(fake, "m1", "dep1", root, nil, nil)
 
 	if fake.completed != 0 || len(fake.uploaded) != 0 {
 		t.Errorf("declare failure must stop the pipeline, got completed=%d uploaded=%d",
@@ -276,7 +291,7 @@ func TestRunSourceUpload_UploadFailureSkipsComplete(t *testing.T) {
 		uploadErr: errors.New("ExpiredRequest"),
 	}
 
-	RunSourceUpload(fake, "m1", "dep1", root, nil)
+	RunSourceUpload(fake, "m1", "dep1", root, nil, nil)
 
 	if fake.completed != 0 {
 		t.Errorf("upload failure must not call complete (row stays pending, poll retries)")
@@ -296,7 +311,7 @@ func TestRunSourceUpload_StrippedFilesAreLogged(t *testing.T) {
 	logf := func(format string, args ...interface{}) {
 		logs = append(logs, fmt.Sprintf(format, args...))
 	}
-	RunSourceUpload(fake, "m1", "dep1", root, logf)
+	RunSourceUpload(fake, "m1", "dep1", root, logf, nil)
 
 	found := false
 	for _, l := range logs {
@@ -360,7 +375,7 @@ func TestRunSourceUpload_DeclaresComposePathWhenDetected(t *testing.T) {
 	var logs []string
 	RunSourceUpload(fake, "m1", "dep1", root, func(format string, args ...interface{}) {
 		logs = append(logs, fmt.Sprintf(format, args...))
-	})
+	}, nil)
 
 	if fake.declareCompose != "deploy/docker-compose.yml" {
 		t.Errorf("declare must carry the detected path, got %q", fake.declareCompose)
@@ -384,8 +399,159 @@ func TestRunSourceUpload_NoComposeDeclaresEmptyPath(t *testing.T) {
 	fake := &fakeUploader{
 		declareResp: &api.DeclareSourceResponse{DeploymentID: "dep1"},
 	}
-	RunSourceUpload(fake, "m1", "dep1", root, nil)
+	RunSourceUpload(fake, "m1", "dep1", root, nil, nil)
 	if fake.declareCompose != "" {
 		t.Errorf("single-container tree must declare empty compose_path, got %q", fake.declareCompose)
+	}
+}
+
+// Git-aware packing: in a real git work tree the file set is exactly what a
+// commit would carry — ignored material (virtualenvs, dumps) stays out even
+// without matching ExcludedDirs, while untracked-but-not-ignored files (a
+// freshly written compose file) ride along.
+func TestPackSourceTree_GitRepoHonorsGitignoreAndKeepsUntracked(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	root := t.TempDir()
+	for p, content := range map[string]string{
+		"README.md":               "tracked",
+		"docker-compose.yml":      "untracked but packable",
+		"scratch/vendor-blob.bin": "ignored material",
+	} {
+		full := filepath.Join(root, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, cmd := range [][]string{
+		{"git", "init", "-q"},
+		{"git", "config", "user.email", "t@t"},
+		{"git", "config", "user.name", "t"},
+		{"git", "add", "README.md"},
+		{"git", "commit", "-qm", "init"},
+	} {
+		c := exec.Command(cmd[0], cmd[1:]...)
+		c.Dir = root
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v\n%s", cmd, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("scratch/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := PackSourceTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, f := range res.Files {
+		got[f.Path] = true
+	}
+	if !got["README.md"] || !got["docker-compose.yml"] {
+		t.Errorf("tracked file or untracked compose missing: %v", got)
+	}
+	if got["scratch/vendor-blob.bin"] {
+		t.Errorf("gitignored material must not ride the pack: %v", got)
+	}
+	if res.ComposePath != "docker-compose.yml" {
+		t.Errorf("compose detection should see the untracked compose file, got %q", res.ComposePath)
+	}
+}
+
+// --- chunked declare (large trees vs the API worker CPU budget) -------------
+
+// writeMany writes n tiny numbered files under root (deterministic paths).
+func writeMany(t *testing.T, root string, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		p := filepath.Join(root, fmt.Sprintf("f%05d.txt", i))
+		if err := os.WriteFile(p, []byte(fmt.Sprintf("content-%d", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// declareChunkFiles+1 files plus a compose file: two parts (800 + remainder),
+// compose detection on, feature advertised.
+func TestRunSourceUpload_ChunkedSlicesLargeTrees(t *testing.T) {
+	root := t.TempDir()
+	writeMany(t, root, declareChunkFiles+1)
+	if err := os.WriteFile(filepath.Join(root, "docker-compose.yml"), []byte("services: {web: {image: nginx}}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeUploader{declareResp: &api.DeclareSourceResponse{DeploymentID: "dep1"}}
+
+	var logs []string
+	RunSourceUpload(fake, "m1", "dep1", root, func(format string, args ...interface{}) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}, []string{"chunked_declare"})
+
+	total := declareChunkFiles + 2 // numbered files + compose
+	if len(fake.declareCalls) != 2 {
+		t.Fatalf("expected 2 declares, got %d", len(fake.declareCalls))
+	}
+	first, last := fake.declareCalls[0], fake.declareCalls[1]
+	if first.chunk == nil || last.chunk == nil {
+		t.Fatal("both parts must carry chunk metadata")
+	}
+	if first.chunk.Part != 0 || last.chunk.Part != 1 || first.chunk.TotalParts != 2 || last.chunk.TotalParts != 2 {
+		t.Errorf("chunk parts wrong: %+v %+v", first.chunk, last.chunk)
+	}
+	if first.chunk.TotalBytes == 0 || first.chunk.TotalBytes != last.chunk.TotalBytes {
+		t.Errorf("whole-tree total must ride every part identically: %d vs %d", first.chunk.TotalBytes, last.chunk.TotalBytes)
+	}
+	if first.files != declareChunkFiles || last.files != total-declareChunkFiles {
+		t.Errorf("slice sizes wrong: %d then %d (total %d)", first.files, last.files, total)
+	}
+	// "docker-compose.yml" sorts inside part 0, but the wire contract sends it
+	// on the FINAL part only (the platform stamps at assembly).
+	if first.compose != "" || last.compose != "docker-compose.yml" {
+		t.Errorf("compose path must ride the final part only: %q then %q", first.compose, last.compose)
+	}
+	if fake.completedBody == nil || len(fake.completedBody.Files) != total {
+		t.Fatalf("complete verify must carry all %d path+sha pairs, got %+v", total, fake.completedBody)
+	}
+	if fake.completedBody.Files[0].Path != "docker-compose.yml" {
+		t.Errorf("verify projection must keep manifest order, first = %q", fake.completedBody.Files[0].Path)
+	}
+}
+
+// Version-skew guard: the same large tree against an API that did not
+// advertise chunked_declare must take the single legacy declare (which fails
+// loudly server-side on oversize) instead of half-declaring a chunked tree.
+func TestRunSourceUpload_FallsBackToSingleDeclareWithoutFeature(t *testing.T) {
+	root := t.TempDir()
+	writeMany(t, root, declareChunkFiles+50)
+	fake := &fakeUploader{declareResp: &api.DeclareSourceResponse{DeploymentID: "dep1"}}
+
+	RunSourceUpload(fake, "m1", "dep1", root, nil, nil)
+
+	if len(fake.declareCalls) != 1 || fake.declareCalls[0].chunk != nil {
+		t.Fatalf("old API must get one legacy declare, got %+v", fake.declareCalls)
+	}
+	if fake.completedBody != nil {
+		t.Errorf("legacy complete carries no verify body, got %+v", fake.completedBody)
+	}
+}
+
+// A failure anywhere in the part loop stops the upload without completing --
+// the row stays pending and the next poll restarts at part 0 (skip-listed).
+func TestRunSourceUpload_ChunkedDeclareFailureNeverCompletes(t *testing.T) {
+	root := t.TempDir()
+	writeMany(t, root, declareChunkFiles+1)
+	fake := &fakeUploader{
+		declareResp: &api.DeclareSourceResponse{DeploymentID: "dep1"},
+		declareErr:  errors.New("CF 1102"),
+	}
+
+	RunSourceUpload(fake, "m1", "dep1", root, nil, []string{"chunked_declare"})
+
+	if fake.completed != 0 {
+		t.Errorf("declare failure must not complete, got completed=%d", fake.completed)
 	}
 }

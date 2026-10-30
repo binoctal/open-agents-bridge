@@ -81,6 +81,9 @@ func BuildManifest(outputDir string) ([]ManifestFile, error) {
 var StaticTreeExcludedDirs = map[string]bool{
 	".git": true, "node_modules": true, "dist": true, "build": true,
 	"out": true, ".next": true, ".cache": true, ".turbo": true, "coverage": true,
+	// Language build/dependency outputs the hosting side regenerates anyway:
+	// Maven (target/), Python virtualenvs (.venv/, venv/).
+	"target": true, ".venv": true, "venv": true,
 	".open-agents-bridge-worktrees": true,
 }
 
