@@ -68,6 +68,38 @@ func TestSplitNetIOTx(t *testing.T) {
 	}
 }
 
+// --- compose label normalization (hosted-compose-stacks 8.13) ----------------
+
+func TestNormalizeCoolifyAppID(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		// Live capture 2026-10-30: compose service label embeds the stack uuid
+		// (the row's coolify_application_id) between service name and ordinal.
+		{"openfga-6parewue1tdmclhr6o1cudjn-070527871608", "6parewue1tdmclhr6o1cudjn"},
+		{"postgres-6parewue1tdmclhr6o1cudjn-070527872186", "6parewue1tdmclhr6o1cudjn"},
+		// Underscores are legal in service names.
+		{"my_db-6parewue1tdmclhr6o1cudjn-1", "6parewue1tdmclhr6o1cudjn"},
+		// A service name that itself ends in a 24-char run: the greedy prefix
+		// must still capture the LAST 24-char run before the ordinal.
+		{"svc-aaaaaaaaaaaaaaaaaaaaaaaa-6parewue1tdmclhr6o1cudjn-0705", "6parewue1tdmclhr6o1cudjn"},
+		// Single-container apps label with the bare app uuid: no -<ordinal>
+		// suffix, passes through untouched.
+		{"6parewue1tdmclhr6o1cudjn", "6parewue1tdmclhr6o1cudjn"},
+		{"owpd4yq2zsewmz1vh5lqmgxx", "owpd4yq2zsewmz1vh5lqmgxx"},
+		// Not a compose shape: wrong tail, too-short uuid run, empty.
+		{"openfga-6parewue1tdmclhr6o1cudjn", "openfga-6parewue1tdmclhr6o1cudjn"},
+		{"app-shortuuid1-12", "app-shortuuid1-12"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := normalizeCoolifyAppID(c.in); got != c.want {
+			t.Errorf("normalizeCoolifyAppID(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 // --- volume quota sampling (hosted-compose-stacks 4.5/5.4) ------------------
 
 func TestParseVolumeSizes(t *testing.T) {

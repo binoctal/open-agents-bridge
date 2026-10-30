@@ -717,6 +717,28 @@ func CollectWatermark(ctx context.Context) api.Watermark {
 // across containers are collapsed by the caller's seen map.
 var hostPortRe = regexp.MustCompile(`(?:\d+\.\d+\.\d+\.\d+|\[::\]):(\d+)->`)
 
+// composeServiceLabelRe matches the service-scoped coolify.name label Coolify
+// stamps on compose application containers: "<service>-<stackUuid>-<ordinal>"
+// (live capture 2026-10-30: "openfga-6parewue1tdmclhr6o1cudjn-070527871608").
+// The stack uuid -- the Coolify application uuid the API's row stores as
+// coolify_application_id -- embeds as a 24-char lowercase-base62 run; the
+// service name varies per container and the ordinal changes every rebuild,
+// so the raw label is neither a stable key nor a row match (samples were
+// dropped as orphans and the volume quota never fired). Single-container
+// apps label containers with the bare app uuid, which the pattern cannot
+// match (no -<ordinal> suffix), so they pass through untouched (8.13).
+var composeServiceLabelRe = regexp.MustCompile(`^[a-z0-9_-]+-([0-9a-z]{24})-\d+$`)
+
+// normalizeCoolifyAppID folds a compose service label down to its stack uuid.
+// The greedy prefix keeps the uuid capture on the last 24-char run before the
+// trailing ordinal, which is always the stack uuid Coolify appended.
+func normalizeCoolifyAppID(label string) string {
+	if m := composeServiceLabelRe.FindStringSubmatch(label); m != nil {
+		return m[1]
+	}
+	return label
+}
+
 // CollectUsageSamples reads per-container memory for Coolify-managed
 // containers (add-hosting-quota-guardrails design D1): docker ps filtered on
 // the coolify.name label (the application uuid the API stores), joined
@@ -767,7 +789,7 @@ func CollectUsageSamples(ctx context.Context, now time.Time) []api.UsageSample {
 		}
 		if mem, ok := memByID[fields[0]]; ok && mem > 0 {
 			samples = append(samples, api.UsageSample{
-				CoolifyAppID: fields[1],
+				CoolifyAppID: normalizeCoolifyAppID(fields[1]),
 				MemoryBytes:  mem,
 				TxBytes:      txByID[fields[0]],
 				TS:           ts,
@@ -795,7 +817,11 @@ func stampVolumeBytes(ctx context.Context, psOut []byte, samples []api.UsageSamp
 	for _, line := range strings.Split(string(psOut), "\n") {
 		fields := strings.SplitN(line, "\t", 2)
 		if len(fields) == 2 && fields[1] != "" {
-			idsByApp[fields[1]] = append(idsByApp[fields[1]], fields[0])
+			// Same normalization as the sample loop above: compose service
+			// labels fold to the stack uuid so the volume union spans every
+			// service of the stack, not one service per group (8.13).
+			appID := normalizeCoolifyAppID(fields[1])
+			idsByApp[appID] = append(idsByApp[appID], fields[0])
 		}
 	}
 	var ids []string
