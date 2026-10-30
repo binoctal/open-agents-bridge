@@ -342,7 +342,11 @@ func (c *Client) PresignSource(ctx context.Context, deploymentID string, shas []
 }
 
 // Report posts the outcome of one work item. detail carries the failure
-// reason for *_failed events; repoPort for materialized.
+// reason for *_failed events; repoPort for materialized. observedAt stamps
+// when the outcome was OBSERVED, not when the report got through: retries
+// over a lossy link can deliver a verdict minutes late, and the API's
+// runtime_fail guard uses the stamp to drop verdicts whose evidence predates
+// the row's latest transition (staging 2026-10-30 stale-verdict kill).
 func (c *Client) Report(ctx context.Context, deploymentID, event string, repoPort int, detail string) error {
 	payload := map[string]any{
 		"agentId":      c.AgentID,
@@ -350,6 +354,7 @@ func (c *Client) Report(ctx context.Context, deploymentID, event string, repoPor
 		"event":        event,
 		"repoPort":     repoPort,
 		"detail":       detail,
+		"observedAt":   time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	return c.postJSON(ctx, "/internal/hosting-agent/report", payload, nil)
 }
