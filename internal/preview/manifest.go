@@ -174,6 +174,13 @@ func SHA256File(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// SHA256Bytes hashes an in-memory buffer. deploysource verifies the bytes it
+// is about to PUT against the sha hashed at pack time (concurrent-edit guard).
+func SHA256Bytes(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 // HasRootIndexHTML reports whether the manifest includes a root-level
 // index.html. The platform rejects manifests without one (PREVIEW_INVALID_MANIFEST).
 func HasRootIndexHTML(files []ManifestFile) bool {

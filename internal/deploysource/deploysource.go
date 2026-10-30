@@ -355,8 +355,26 @@ func RunSourceUpload(client Uploader, missionID, deploymentID, repoRoot string, 
 			logger.ModDeploy, len(pack.Stripped), deploymentID, strings.Join(pack.Stripped, ", "))
 	}
 
+	shaByPath := make(map[string]string, len(pack.Files))
+	for _, f := range pack.Files {
+		shaByPath[f.Path] = f.SHA256
+	}
 	blob := func(path string) ([]byte, error) {
-		return os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(path)))
+		data, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(path)))
+		if err != nil {
+			return nil, err
+		}
+		// The pack hashed this file at walk time; verify the exact bytes we are
+		// about to PUT. A workspace being edited concurrently (live-project
+		// deploys are the norm) otherwise uploads new bytes under the old
+		// content-addressed key and the hosting node fails materialize on the
+		// sha mismatch. Abort this cycle instead; the row stays pending and the
+		// next poll re-packs a fresh snapshot.
+		if sum := preview.SHA256Bytes(data); sum != shaByPath[path] {
+			return nil, fmt.Errorf("%s changed during upload (packed %s, read %s); source tree is being modified concurrently",
+				path, shaByPath[path][:12], sum[:12])
+		}
+		return data, nil
 	}
 
 	if featureEnabled(features, "chunked_declare") && len(pack.Files) > declareChunkFiles {

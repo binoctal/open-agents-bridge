@@ -188,6 +188,10 @@ type fakeUploader struct {
 		chunk   *api.DeclareChunk
 		files   int
 	}
+
+	// declareHook runs after a successful declare record — tests use it to
+	// mutate the tree between the pack walk and the upload reads.
+	declareHook func()
 }
 
 func (f *fakeUploader) DeclareHostedSource(missionID, deploymentID string, files []api.PreviewFile, composePath string, chunk *api.DeclareChunk) (*api.DeclareSourceResponse, error) {
@@ -201,6 +205,9 @@ func (f *fakeUploader) DeclareHostedSource(missionID, deploymentID string, files
 	}{composePath, chunk, len(files)})
 	if f.declareErr != nil {
 		return nil, f.declareErr
+	}
+	if f.declareHook != nil {
+		f.declareHook()
 	}
 	return f.declareResp, nil
 }
@@ -246,6 +253,42 @@ func TestRunSourceUpload_HappyPath(t *testing.T) {
 	}
 	if len(fake.declareFiles) != 1 || fake.declareFiles[0].SHA256 != hash("app") {
 		t.Errorf("declare manifest = %v", fake.declareFiles)
+	}
+}
+
+func TestRunSourceUpload_ConcurrentEditAbortsInsteadOfCorrupting(t *testing.T) {
+	// The pack hashed the file at walk time; a workspace edit between declare
+	// and the PUT read would otherwise upload new bytes under the old
+	// content-addressed key and the hosting node fails materialize on the sha
+	// mismatch (2026-10-31 vnivni round 6: an active session kept editing the
+	// tree mid-upload). The cycle must abort — never complete, never PUT.
+	root := writeTree(t, map[string]string{"src/app.ts": "app"})
+	fake := &fakeUploader{
+		declareResp: &api.DeclareSourceResponse{
+			DeploymentID: "dep1",
+			Uploads:      []api.PreviewUpload{{Path: "src/app.ts", URL: "https://r2/put/app"}},
+		},
+	}
+	fake.declareHook = func() {
+		if err := os.WriteFile(filepath.Join(root, "src/app.ts"), []byte("edited"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var logs []string
+	RunSourceUpload(fake, "m1", "dep1", root, func(format string, args ...interface{}) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}, nil)
+
+	if fake.completed != 0 {
+		t.Fatalf("complete must not fire on a concurrent-edit abort, got %d", fake.completed)
+	}
+	if len(fake.uploaded) != 0 {
+		t.Errorf("no bytes should be PUT, got %v", fake.uploaded)
+	}
+	joined := strings.Join(logs, "\n")
+	if !strings.Contains(joined, "changed during upload") {
+		t.Errorf("abort log should name the concurrent edit, got: %s", joined)
 	}
 }
 
