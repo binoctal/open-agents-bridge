@@ -46,9 +46,13 @@ func NewCaddy(addr, domainSuffix string) *Caddy {
 // routeID is the stable Caddy route @id for one deployment.
 func routeID(deploymentID string) string { return "oa-" + deploymentID }
 
-// Host returns the public hostname for a deployment.
+// Host returns the public hostname for a deployment. The ID is lowercased:
+// Caddy's host matcher is case-sensitive while DNS, TLS SNI and clients are
+// not (browsers normalize to lowercase), so a mixed-case deployment ID would
+// only match when cased exactly (vnivni staging 2026-10-30: jKdcdUeYMjdL
+// 404'd through the wildcard until the exact-case hostname was used).
 func (c *Caddy) Host(deploymentID string) string {
-	return deploymentID + "." + c.DomainSuffix
+	return strings.ToLower(deploymentID) + "." + c.DomainSuffix
 }
 
 // Upsert ensures a route {label}.suffix -> {containerAddr} exists.
