@@ -601,6 +601,12 @@ type PendingHostedDeploys struct {
 	Features []string           `json:"features"`
 }
 
+// FeatureSourceUpload (fix-deploy-source-dual-claim): the API grants it only
+// to non-executor machines. A poll response whose features array is present
+// without it means this registration is an executor form (hosting-node
+// runner) and must not pack source trees — the deploy source poll loop stops.
+const FeatureSourceUpload = "source_upload"
+
 // GetPendingHostedDeploys polls for user-requested source packs. Rows only
 // exist after an explicit deploy click by the mission owner, so the common
 // response is an empty list.

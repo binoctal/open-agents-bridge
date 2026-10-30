@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -4243,7 +4244,13 @@ func (b *Bridge) deploySourcePollLoop() {
 			if b.standby.Load() {
 				continue
 			}
-			b.pollDeploySources()
+			if !b.pollDeploySources() {
+				// The API explicitly denied the source_upload feature to this
+				// machine (fix-deploy-source-dual-claim): executor-form
+				// registrations (hosting-node runners) never pack source
+				// trees. Absent features (old API) keeps polling.
+				return
+			}
 		}
 	}
 }
@@ -4272,12 +4279,19 @@ func (b *Bridge) deploySourceDone(deploymentId string) {
 
 // pollDeploySources fetches and dispatches one batch of pending source packs.
 // Every failure (network, per-item pack/upload) is logged and skipped; the
-// row stays pending server-side, so the next tick retries it.
-func (b *Bridge) pollDeploySources() {
+// row stays pending server-side, so the next tick retries it. The return
+// value is false only when the API's features array explicitly withholds
+// source_upload from this machine (executor form) — the poll loop then stops.
+func (b *Bridge) pollDeploySources() bool {
 	resp, err := b.apiClient.GetPendingHostedDeploys()
 	if err != nil {
 		b.logDebug("[%s] deploy: pending poll failed: %v", logger.ModDeploy, err)
-		return
+		return true
+	}
+	if resp.Features != nil && !slices.Contains(resp.Features, api.FeatureSourceUpload) {
+		b.logInfo("[%s] deploy: source_upload not granted to this machine (executor form); deploy source polling disabled",
+			logger.ModDeploy)
+		return false
 	}
 
 	for _, d := range resp.Deploys {
@@ -4292,6 +4306,7 @@ func (b *Bridge) pollDeploySources() {
 				b.worktreeManager.ProjectDir(), b.logInfo, resp.Features)
 		}(d)
 	}
+	return true
 }
 
 // sessionPreviewPollLoop periodically asks the platform for pending session
