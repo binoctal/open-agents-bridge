@@ -509,7 +509,9 @@ func (a *Agent) handleRelease(ctx context.Context, ep APIEndpoint, item api.Work
 // then networks, then volumes. Idempotent -- resources Coolify's own async
 // cleanup already took are the common case, and misses just log.
 func (a *Agent) purgeComposeProject(ctx context.Context, deploymentID, project string) {
-	label := "com.docker.compose.project=" + project
+	// The daemon rejects a bare "com.docker.compose.project=x" filter key
+	// ("invalid filter"); it must go through the "label=" key.
+	label := "label=com.docker.compose.project=" + project
 	// dockerRun captures stderr: "exit status 1" alone once hid the actual
 	// CLI error and cost a blind debugging round (8.17).
 	dockerRun := func(args ...string) (string, error) {
