@@ -117,6 +117,13 @@ type WorkItem struct {
 	ManifestURL  string `json:"manifestUrl,omitempty"`
 	SourcePrefix string `json:"sourcePrefix,omitempty"`
 
+	// Compose is set on compose-stack materialize items (hosted-compose-stacks
+	// 5.1): the rewrite spec -- the agent re-injects resource limits, strips
+	// non-ingress host ports, binds the ingress container port to the
+	// negotiated 127.0.0.1 host port and activates the requested profiles,
+	// all inside the materialized repo. nil on single-container items.
+	Compose *ComposeSpec `json:"compose,omitempty"`
+
 	// Sandbox fields (add-cloud-executor 4.1); empty on deployment items.
 	SandboxID     string     `json:"sandboxId,omitempty"`
 	ExecutorID    string     `json:"executorId,omitempty"`
@@ -215,6 +222,30 @@ type Watermark struct {
 	// -> stored NULL) and "docker hiccup, count unknown" (nil -> NULL again;
 	// the launch gate must refuse on unknown, never read it as free).
 	SandboxesRunning *int `json:"sandboxesRunning,omitempty"`
+	// DiskAvailableBytes is free space on the docker data root
+	// (hosted-compose-stacks 4.4/5.4): feeds the stack-placement watermark
+	// gate. Same unknown contract: 0 when the stat failed, and the API's
+	// gate trusts unknown rather than reading it as "full".
+	DiskAvailableBytes uint64 `json:"diskAvailableBytes,omitempty"`
+}
+
+// ComposeSpec is the rewrite payload on compose-stack materialize items
+// (hosted-compose-stacks 5.1). Wire-pinned against the API's AgentComposeSpec.
+type ComposeSpec struct {
+	ComposePath      string         `json:"composePath"`
+	IngressService   string         `json:"ingressService"`
+	IngressPort      int            `json:"ingressPort"`
+	ActivateProfiles []string       `json:"activateProfiles,omitempty"`
+	HostPort         int            `json:"hostPort"`
+	Services         []ServiceLimit `json:"services"`
+}
+
+// ServiceLimit is one ACTIVE service's post-min resource ceiling; the rewrite
+// injects it verbatim as deploy.resources.limits.
+type ServiceLimit struct {
+	Name      string  `json:"name"`
+	MemoryMiB int     `json:"memoryMiB"`
+	CPUs      float64 `json:"cpus"`
 }
 
 // Report events (terminal states of each work action).
@@ -488,7 +519,13 @@ type UsageSample struct {
 	// rollup derives per-hour deltas and guards counter resets. Zero when the
 	// stats line carried no parseable NetIO column.
 	TxBytes uint64 `json:"txBytes"`
-	TS      string `json:"ts"`
+	// VolumeBytes is the app's named-volume usage in bytes
+	// (hosted-compose-stacks 4.5): summed docker system df sizes of the named
+	// volumes the app's containers mount. nil when volume accounting failed
+	// (single-container rows, docker hiccup) -- the API's quota read skips
+	// unknown rather than treating it as zero.
+	VolumeBytes *uint64 `json:"volumeBytes,omitempty"`
+	TS          string  `json:"ts"`
 }
 
 // ReportUsage posts a batch of per-container samples. The API resolves tenant

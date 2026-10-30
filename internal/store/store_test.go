@@ -414,3 +414,102 @@ func TestBuildRepoRejectsEscapingExtraPath(t *testing.T) {
 		t.Fatal("extra path escaping the root must be rejected")
 	}
 }
+
+// readRepoFile returns a committed file's bytes (the assertions care about
+// the committed tree, not the scratch directory).
+func readRepoFile(t *testing.T, st *Store, deploymentID, path string) string {
+	t.Helper()
+	out, err := exec.Command("git", "--git-dir", st.RepoPath(deploymentID), "show", "HEAD:"+path).Output()
+	if err != nil {
+		t.Fatalf("git show %s: %v", path, err)
+	}
+	return string(out)
+}
+
+// hosted-compose-stacks 5.2: a compose materialize must land the REWRITTEN
+// stack file in the commit -- limits injected, non-ingress host ports gone,
+// ingress on the negotiated loopback slot -- while the rest of the tree rides
+// through untouched. Determinism carries over too: the rewrite is a pure
+// function, so re-materializing yields the same commit.
+func TestMaterializeComposeRewritesStackFile(t *testing.T) {
+	requireGit(t)
+	composeSrc := `
+services:
+  web:
+    image: nginx:1.27
+    ports: ["8080:3000"]
+  worker:
+    image: redis:7
+    ports: ["6379:6379"]
+`
+	manifest := []api.File{
+		file("docker-compose.yml", composeSrc),
+		file("src/app.ts", "app"),
+	}
+	st, _ := newTestStore(t, map[string][]byte{
+		manifest[0].SHA256: []byte(composeSrc),
+		manifest[1].SHA256: []byte("app"),
+	})
+	spec := api.ComposeSpec{
+		ComposePath:    "docker-compose.yml",
+		IngressService: "web",
+		IngressPort:    3000,
+		HostPort:       30001,
+		Services: []api.ServiceLimit{
+			{Name: "web", MemoryMiB: 512, CPUs: 1},
+			{Name: "worker", MemoryMiB: 256, CPUs: 0.5},
+		},
+	}
+
+	c1, err := st.MaterializeCompose(context.Background(), st.Presigner, "dep1", "deploys/dep1", manifest, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed := readRepoFile(t, st, "dep1", "docker-compose.yml")
+	for _, want := range []string{
+		`127.0.0.1:30001:3000`, // ingress: negotiated loopback slot
+		"cpus: 1",              // web limits injected
+		"memory: 536870912",    // 512MiB in bytes
+		"cpus: 0.5",            // worker limits injected
+		"memory: 268435456",    // 256MiB in bytes
+	} {
+		if !strings.Contains(committed, want) {
+			t.Errorf("committed compose missing %q:\n%s", want, committed)
+		}
+	}
+	for _, banned := range []string{"8080", "6379"} {
+		if strings.Contains(committed, banned) {
+			t.Errorf("committed compose must not carry original host ports (%s):\n%s", banned, committed)
+		}
+	}
+	if got := readRepoFile(t, st, "dep1", "src/app.ts"); got != "app" {
+		t.Errorf("the rest of the tree must ride through untouched, got %q", got)
+	}
+
+	// Deterministic: same manifest + spec -> same commit.
+	c2, err := st.MaterializeCompose(context.Background(), st.Presigner, "dep1", "deploys/dep1", manifest, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c1 != c2 {
+		t.Fatalf("compose materialize must be deterministic: %s != %s", c1, c2)
+	}
+}
+
+// A spec pointing outside the manifest (drift) must fail loudly, never build
+// a repo whose rewrite silently no-ops.
+func TestMaterializeComposeRejectsUnknownComposePath(t *testing.T) {
+	requireGit(t)
+	app := file("src/app.ts", "app")
+	st, _ := newTestStore(t, map[string][]byte{app.SHA256: []byte("app")})
+	if err := st.FetchMissing(context.Background(), []api.File{app}, func(ctx context.Context, shas []string) (*api.PresignResponse, error) {
+		return st.Presigner.PresignSource(ctx, "d", shas)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	spec := api.ComposeSpec{ComposePath: "compose.yaml", IngressService: "web", IngressPort: 80, HostPort: 1,
+		Services: []api.ServiceLimit{{Name: "web", MemoryMiB: 256, CPUs: 0.5}}}
+	if _, err := st.MaterializeCompose(context.Background(), st.Presigner, "dep1", "deploys/dep1", []api.File{app}, spec); err == nil {
+		t.Fatal("compose path outside the manifest must fail the materialize")
+	}
+}

@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/binoctal/open-agents/hosting-agent/internal/api"
@@ -410,7 +411,7 @@ func (a *Agent) handleMaterialize(ctx context.Context, ep APIEndpoint, item api.
 		a.logf("deploy %s: manifest fetch failed: %v", item.DeploymentID, err)
 		return a.report(ctx, ep, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
 	}
-	commit, err := a.Store.MaterializeVia(ctx, ep.Client, item.DeploymentID, item.SourcePrefix, manifest)
+	commit, err := a.materializeTree(ctx, ep, item, manifest)
 	if err != nil {
 		a.logf("deploy %s: materialize failed: %v", item.DeploymentID, err)
 		return a.report(ctx, ep, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
@@ -423,6 +424,24 @@ func (a *Agent) handleMaterialize(ctx context.Context, ep APIEndpoint, item api.
 	a.logf("deploy %s: materialized %s at http://127.0.0.1:%d/%s.git",
 		item.DeploymentID, commit[:12], port, item.DeploymentID)
 	return a.report(ctx, ep, item.DeploymentID, api.EventMaterialized, port, commit)
+}
+
+// materializeTree routes between the two materialize shapes
+// (hosted-compose-stacks 5.2): single-container trees pass through; compose
+// items rewrite the stack file (re-validated limits/ports/profiles) into the
+// commit Coolify pulls. Same failure contract as before -- an error here is a
+// materialize_failed event and the API re-offers or fails the row.
+func (a *Agent) materializeTree(ctx context.Context, ep APIEndpoint, item api.WorkItem, manifest []api.File) (string, error) {
+	if item.Compose == nil {
+		return a.Store.MaterializeVia(ctx, ep.Client, item.DeploymentID, item.SourcePrefix, manifest)
+	}
+	c := *item.Compose
+	commit, err := a.Store.MaterializeCompose(ctx, ep.Client, item.DeploymentID, item.SourcePrefix, manifest, c)
+	if err == nil {
+		a.logf("deploy %s: compose %s rewritten (ingress %s:%d -> 127.0.0.1:%d, %d active service(s))",
+			item.DeploymentID, c.ComposePath, c.IngressService, c.IngressPort, c.HostPort, len(c.Services))
+	}
+	return commit, err
 }
 
 func (a *Agent) handleRegisterRoute(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {
@@ -638,6 +657,7 @@ func CollectWatermark(ctx context.Context) api.Watermark {
 	w := api.Watermark{
 		MemoryAvailableBytes: meminfo("MemAvailable"),
 		MemoryTotalBytes:     meminfo("MemTotal"),
+		DiskAvailableBytes:   diskAvailableBytes(),
 	}
 	if out, err := psDocker(ctx, "ps", "--filter", "status=running", "--format", "{{.Names}} {{.ID}} {{.Ports}}"); err == nil {
 		w.ContainersRunning = 0
@@ -732,7 +752,144 @@ func CollectUsageSamples(ctx context.Context, now time.Time) []api.UsageSample {
 			})
 		}
 	}
+	stampVolumeBytes(ctx, psOut, samples)
 	return samples
+}
+
+// stampVolumeBytes attaches per-app named-volume totals to the batch's
+// samples (hosted-compose-stacks 4.5/5.4): docker inspect maps each labeled
+// container to the named volumes it mounts, docker system df -v sizes every
+// local volume, and every sample row of an app carries the union total
+// across its containers -- compose services mount disjoint volumes, so a
+// per-container sum would undercount the stack, and the API's quota read
+// takes the latest single row. Best-effort: any step failing leaves
+// VolumeBytes nil on every row -- memory/egress billing must not be held
+// hostage by volume accounting.
+func stampVolumeBytes(ctx context.Context, psOut []byte, samples []api.UsageSample) {
+	if len(samples) == 0 {
+		return
+	}
+	idsByApp := map[string][]string{}
+	for _, line := range strings.Split(string(psOut), "\n") {
+		fields := strings.SplitN(line, "\t", 2)
+		if len(fields) == 2 && fields[1] != "" {
+			idsByApp[fields[1]] = append(idsByApp[fields[1]], fields[0])
+		}
+	}
+	var ids []string
+	for _, list := range idsByApp {
+		ids = append(ids, list...)
+	}
+
+	// One inspect sweep: full container id + its volume-type mount names
+	// (binds are skipped -- only named volumes count against the quota).
+	inspectCtx, cancelInspect := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelInspect()
+	inspectArgs := append([]string{"inspect", "--format", `{{.Id}}\t{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}`}, ids...)
+	out, err := exec.CommandContext(inspectCtx, "docker", inspectArgs...).Output()
+	if err != nil {
+		return
+	}
+	volumesByID := map[string][]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		volumesByID[fields[0]] = fields[1:]
+	}
+
+	// One df sweep for per-volume sizes. df -v walks every volume's data, so
+	// it can take seconds -- bounded, and worth it once per usage tick.
+	dfCtx, cancelDF := context.WithTimeout(ctx, 60*time.Second)
+	defer cancelDF()
+	dfOut, err := exec.CommandContext(dfCtx, "docker", "system", "df", "-v").Output()
+	if err != nil {
+		return
+	}
+	sizes := parseVolumeSizes(string(dfOut))
+	// Containers mount named volumes but df parsed to nothing: the CLI's
+	// table format moved under us. Unknown beats a confident false zero.
+	mountedAny := false
+	for _, vols := range volumesByID {
+		if len(vols) > 0 {
+			mountedAny = true
+			break
+		}
+	}
+	if mountedAny && len(sizes) == 0 {
+		return
+	}
+
+	totals := volumeTotalsByApp(idsByApp, volumesByID, sizes)
+	for i := range samples {
+		if _, ok := idsByApp[samples[i].CoolifyAppID]; ok {
+			total := totals[samples[i].CoolifyAppID]
+			samples[i].VolumeBytes = &total
+		}
+	}
+}
+
+// volumeTotalsByApp unions each app's containers' mounted volumes and sums
+// their sizes. A mounted volume missing from the sizes table contributes 0
+// (best-effort undercount, never a skip of the whole app). Full inspect ids
+// are matched against the ps short ids by prefix.
+func volumeTotalsByApp(idsByApp map[string][]string, volumesByID map[string][]string, sizes map[string]uint64) map[string]uint64 {
+	totals := map[string]uint64{}
+	for app, ids := range idsByApp {
+		seen := map[string]bool{}
+		var total uint64
+		for _, short := range ids {
+			for full, vols := range volumesByID {
+				if !strings.HasPrefix(full, short) {
+					continue
+				}
+				for _, vol := range vols {
+					if seen[vol] {
+						continue
+					}
+					seen[vol] = true
+					total += sizes[vol]
+				}
+			}
+		}
+		totals[app] = total
+	}
+	return totals
+}
+
+// parseVolumeSizes reads the "Local Volumes space usage:" table out of
+// `docker system df -v`: rows of "VOLUME NAME LINKS SIZE" where volume names
+// and links carry no spaces, so the first field is the name and the last the
+// size. The section ends at the first blank line.
+func parseVolumeSizes(out string) map[string]uint64 {
+	sizes := map[string]uint64{}
+	inVolumes := false
+	for _, line := range strings.Split(out, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			inVolumes = false
+			continue
+		}
+		if strings.HasPrefix(t, "Local Volumes space usage:") {
+			inVolumes = true
+			continue
+		}
+		if !inVolumes {
+			continue
+		}
+		fields := strings.Fields(t)
+		if len(fields) < 2 {
+			continue
+		}
+		if fields[0] == "VOLUME" && fields[1] == "NAME" {
+			continue // header row
+		}
+		if size, ok := parseDockerSize(fields[len(fields)-1]); ok {
+			sizes[fields[0]] = size
+		}
+	}
+	return sizes
 }
 
 // splitNetIOTx extracts the tx half of docker stats' NetIO column ("rx / tx",
@@ -781,6 +938,22 @@ func parseDockerSize(s string) (uint64, bool) {
 		return 0, false
 	}
 	return uint64(v * float64(mult)), true
+}
+
+// diskAvailableBytes reports free space for the stack-placement watermark
+// gate (hosted-compose-stacks 4.4/5.4), preferring the docker data root --
+// that is the filesystem stack volumes and images actually land on -- and
+// falling back to / for single-disk nodes with a relocated root. Zero on
+// total failure: the wire field is omitempty, so the API stores unknown and
+// its gate refuses on unknown rather than reading it as "full" or "free".
+func diskAvailableBytes() uint64 {
+	for _, path := range []string{"/var/lib/docker", "/"} {
+		var st syscall.Statfs_t
+		if err := syscall.Statfs(path, &st); err == nil {
+			return uint64(st.Bavail) * uint64(st.Bsize)
+		}
+	}
+	return 0
 }
 
 func meminfo(key string) uint64 {

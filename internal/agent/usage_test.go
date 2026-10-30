@@ -67,3 +67,69 @@ func TestSplitNetIOTx(t *testing.T) {
 		}
 	}
 }
+
+// --- volume quota sampling (hosted-compose-stacks 4.5/5.4) ------------------
+
+func TestParseVolumeSizes(t *testing.T) {
+	out := `Images space usage:
+REPOSITORY   TAG   IMAGE ID   CREATED ago   SIZE   SHARED
+nginx        1.27  abc123     2 weeks ago  187MB  0B
+
+Containers space usage:
+CONTAINER ID  IMAGE        LOCAL SIZE   RECLAIMABLE
+aaa111        nginx:1.27   0B           0B
+
+Local Volumes space usage:
+VOLUME NAME                                                        LINKS      SIZE
+4e2a1f6b9c3d2e8a7b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b  some-app-1   52.4MB
+project_data                                                       some-app-1,worker-2   1.07GB
+short_vol                                                          0B
+
+Build cache usage: 0B
+`
+	got := parseVolumeSizes(out)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 volumes, got %v", got)
+	}
+	if got["4e2a1f6b9c3d2e8a7b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b"] != 52_400_000 {
+		t.Errorf("52.4MB = %d, want 52400000", got["4e2a1f6b9c3d2e8a7b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b"])
+	}
+	if got["project_data"] != 1_070_000_000 {
+		t.Errorf("1.07GB = %d, want 1070000000", got["project_data"])
+	}
+	if got["short_vol"] != 0 {
+		t.Errorf("0B = %d, want 0", got["short_vol"])
+	}
+}
+
+func TestParseVolumeSizes_EmptySectionYieldsNoSizes(t *testing.T) {
+	// A node with no volumes at all, or a CLI whose table moved: both must
+	// parse to an empty map so the caller can tell "nothing sized" from
+	// "nothing mounted".
+	if got := parseVolumeSizes("Images space usage:\nREPOSITORY TAG SIZE\nnginx 1.27 187MB\n"); len(got) != 0 {
+		t.Errorf("no volumes section must parse to empty, got %v", got)
+	}
+}
+
+func TestVolumeTotalsByApp(t *testing.T) {
+	// Two apps; the stack's two containers mount disjoint volumes plus one
+	// shared -- the union (not the sum) is the app total; the single-container
+	// app mounts nothing and totals zero.
+	idsByApp := map[string][]string{
+		"app-uuid-stack": {"aaa111", "bbb222"},
+		"app-uuid-solo":  {"ccc333"},
+	}
+	volumesByID := map[string][]string{
+		"aaa1111111111111111111111111111111111111111111111111111111111111": {"stack_db", "stack_shared"},
+		"bbb2222222222222222222222222222222222222222222222222222222222222": {"stack_shared", "stack_cache"},
+		"ccc3333333333333333333333333333333333333333333333333333333333333": {},
+	}
+	sizes := map[string]uint64{"stack_db": 100, "stack_shared": 10, "stack_cache": 5}
+	got := volumeTotalsByApp(idsByApp, volumesByID, sizes)
+	if got["app-uuid-stack"] != 115 {
+		t.Errorf("stack union total = %d, want 115", got["app-uuid-stack"])
+	}
+	if got["app-uuid-solo"] != 0 {
+		t.Errorf("solo total = %d, want 0", got["app-uuid-solo"])
+	}
+}

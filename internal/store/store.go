@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/binoctal/open-agents/hosting-agent/internal/api"
+	"github.com/binoctal/open-agents/hosting-agent/internal/compose"
 )
 
 // Presigner is the seam to the API (implemented by api.Client; faked in
@@ -104,6 +105,43 @@ func (s *Store) MaterializeVia(ctx context.Context, p Presigner, deploymentID, s
 		return "", fmt.Errorf("materialize %s: %w", deploymentID, err)
 	}
 	return s.BuildRepo(ctx, deploymentID, manifest, nil, true)
+}
+
+// MaterializeCompose is the compose-stack variant (hosted-compose-stacks
+// 5.2): after fetching the tree it reads the ORIGINAL compose file from the
+// object store, re-validates it against the rule table and rewrites it
+// (limits injected, non-ingress host ports stripped, ingress bound to the
+// negotiated loopback slot, profiles activated). The rewritten bytes ride
+// BuildRepo's extra channel, which overwrites the manifest copy at the same
+// path -- Coolify pulls a repo whose compose file is the deployable one.
+// staticFallback is off: compose trees never reach the nixpacks heuristic,
+// Coolify builds them as build_pack=dockercompose.
+func (s *Store) MaterializeCompose(ctx context.Context, p Presigner, deploymentID, sourcePrefix string, manifest []api.File, spec api.ComposeSpec) (string, error) {
+	presign := func(ctx context.Context, shas []string) (*api.PresignResponse, error) {
+		return p.PresignSource(ctx, deploymentID, shas)
+	}
+	if err := s.FetchMissing(ctx, manifest, presign); err != nil {
+		return "", fmt.Errorf("materialize %s: %w", deploymentID, err)
+	}
+	var composeSHA string
+	for _, f := range manifest {
+		if f.Path == spec.ComposePath {
+			composeSHA = f.SHA256
+			break
+		}
+	}
+	if composeSHA == "" {
+		return "", fmt.Errorf("materialize %s: compose path %s not in manifest", deploymentID, spec.ComposePath)
+	}
+	raw, err := s.ObjectBytes(composeSHA)
+	if err != nil {
+		return "", fmt.Errorf("materialize %s: read compose source: %w", deploymentID, err)
+	}
+	rewritten, err := compose.Rewrite(raw, spec)
+	if err != nil {
+		return "", fmt.Errorf("materialize %s: %w", deploymentID, err)
+	}
+	return s.BuildRepo(ctx, deploymentID, manifest, map[string][]byte{spec.ComposePath: rewritten}, false)
 }
 
 // FetchMissing ensures every manifest object exists locally, presigning via
