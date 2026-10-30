@@ -488,8 +488,49 @@ func (a *Agent) handleRelease(ctx context.Context, ep APIEndpoint, item api.Work
 		a.logf("deploy %s: repo removal failed: %v", item.DeploymentID, err)
 		return a.report(ctx, ep, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
 	}
+	// Compose project purge (hosted-compose-stacks 8.17): Coolify's
+	// delete_volumes only removes volumes carrying its own labels, and the
+	// compose stack's volumes carry none -- docker compose named them
+	// <stack-uuid>_<volume> with only com.docker.compose.* labels, so the
+	// delete path leaked every data volume on the node (2026-10-30 drill F:
+	// containers/networks/route cleared, 3 volumes stayed). The release item
+	// carries the stack uuid; tear the project down by its label. Absent uuid
+	// (old API or single-container rows) skips the purge entirely.
+	if id := item.CoolifyAppID; id != "" {
+		a.purgeComposeProject(ctx, item.DeploymentID, id)
+	}
 	a.logf("deploy %s: released (route + repo + port recycled)", item.DeploymentID)
 	return a.report(ctx, ep, item.DeploymentID, api.EventReleased, 0, "")
+}
+
+// purgeComposeProject force-removes everything docker compose created for
+// one project label: containers first (a mounted container pins its volume),
+// then networks, then volumes. Idempotent -- resources Coolify's own async
+// cleanup already took are the common case, and misses just log.
+func (a *Agent) purgeComposeProject(ctx context.Context, deploymentID, project string) {
+	label := "com.docker.compose.project=" + project
+	for _, k := range []struct {
+		name string
+		list []string
+		rm   []string
+	}{
+		{"container", []string{"ps", "-aq", "--filter", label}, []string{"rm", "-f"}},
+		{"network", []string{"network", "ls", "-q", "--filter", label}, []string{"network", "rm"}},
+		{"volume", []string{"volume", "ls", "-q", "--filter", label}, []string{"volume", "rm"}},
+	} {
+		out, err := exec.CommandContext(ctx, "docker", k.list...).Output()
+		if err != nil {
+			a.logf("deploy %s: compose %s list for purge failed: %v", deploymentID, k.name, err)
+			continue
+		}
+		for _, id := range strings.Fields(string(out)) {
+			args := append(append([]string{}, k.rm...), id)
+			if err := exec.CommandContext(ctx, "docker", args...).Run(); err != nil {
+				a.logf("deploy %s: compose %s %s removal failed: %v", deploymentID, k.name, id, err)
+			}
+		}
+	}
+	a.logf("deploy %s: compose project %s purge swept", deploymentID, project)
 }
 
 // probeKillWindow is how long a port must stay unreachable, across at least
