@@ -46,11 +46,12 @@ func NewCaddy(addr, domainSuffix string) *Caddy {
 // routeID is the stable Caddy route @id for one deployment.
 func routeID(deploymentID string) string { return "oa-" + deploymentID }
 
-// Host returns the public hostname for a deployment. The ID is lowercased:
-// Caddy's host matcher is case-sensitive while DNS, TLS SNI and clients are
-// not (browsers normalize to lowercase), so a mixed-case deployment ID would
-// only match when cased exactly (vnivni staging 2026-10-30: jKdcdUeYMjdL
-// 404'd through the wildcard until the exact-case hostname was used).
+// Host returns the public hostname for a deployment. The ID is lowercased for
+// one canonical form: DNS, TLS SNI and browsers lowercase names while the
+// deployment ID is mixed-case base62. Caddy's host matcher is itself
+// case-insensitive (EqualFold), so lowercasing is consistency, not matching
+// (the 2026-10-30 "case-sensitive matcher" theory was a mistyped probe
+// hostname; verified against Caddy v2.11.7 source and a local repro).
 func (c *Caddy) Host(deploymentID string) string {
 	return strings.ToLower(deploymentID) + "." + c.DomainSuffix
 }
