@@ -469,9 +469,9 @@ services:
 	for _, want := range []string{
 		`127.0.0.1:30001:3000`, // ingress: negotiated loopback slot
 		"cpus: 1",              // web limits injected
-		"memory: 536870912",    // 512MiB in bytes
+		`memory: "536870912"`, // 512MiB in bytes
 		"cpus: 0.5",            // worker limits injected
-		"memory: 268435456",    // 256MiB in bytes
+		`memory: "268435456"`, // 256MiB in bytes
 	} {
 		if !strings.Contains(committed, want) {
 			t.Errorf("committed compose missing %q:\n%s", want, committed)

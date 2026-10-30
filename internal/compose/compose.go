@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/binoctal/open-agents/hosting-agent/internal/api"
@@ -120,9 +121,11 @@ func Rewrite(src []byte, spec api.ComposeSpec) ([]byte, error) {
 			resources["limits"] = limits
 		}
 		limits["cpus"] = lim.CPUs
-		// Plain integer = bytes per the compose spec: unit-free sidesteps the
-		// decimal/IEC ambiguity of "m"/"M" suffixes across compose versions.
-		limits["memory"] = int64(lim.MemoryMiB) * 1024 * 1024
+		// A bare YAML integer fails compose config validation ("memory must be
+		// a string" -- vnivni staging 2026-10-30); a bare numeric STRING is
+		// still parsed as bytes, keeping the unit-free intent. cpus stays a
+		// number: the spec types it as one.
+		limits["memory"] = strconv.FormatInt(int64(lim.MemoryMiB)*1024*1024, 10)
 	}
 
 	// yaml.Marshal sorts map keys, so the output is deterministic.

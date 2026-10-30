@@ -95,10 +95,10 @@ func TestRewrite_ActivatesStripsPortsInjectsLimits(t *testing.T) {
 	if !strings.Contains(got, "cpus: 0.5") {
 		t.Errorf("worker cpus limit not injected:\n%s", got)
 	}
-	if !strings.Contains(got, "memory: 536870912") {
+	if !strings.Contains(got, `memory: "536870912"`) {
 		t.Errorf("web memory limit (512MiB in bytes) not injected:\n%s", got)
 	}
-	if !strings.Contains(got, "memory: 268435456") {
+	if !strings.Contains(got, `memory: "268435456"`) {
 		t.Errorf("worker memory limit (256MiB in bytes) not injected:\n%s", got)
 	}
 	if strings.Contains(got, "999") {
@@ -151,7 +151,7 @@ services:
 	if !strings.Contains(got, "pids: 64") {
 		t.Errorf("sibling limit key must be preserved:\n%s", got)
 	}
-	if !strings.Contains(got, "memory: 536870912") {
+	if !strings.Contains(got, `memory: "536870912"`) {
 		t.Errorf("memory must be injected into the existing limits map:\n%s", got)
 	}
 }
@@ -176,10 +176,10 @@ services:
 		t.Fatal(err)
 	}
 	got := string(out)
-	if !strings.Contains(got, "memory: 536870912") {
+	if !strings.Contains(got, `memory: "536870912"`) {
 		t.Errorf("web must keep its own limit:\n%s", got)
 	}
-	if !strings.Contains(got, "memory: 4294967296") {
+	if !strings.Contains(got, `memory: "4294967296"`) {
 		t.Errorf("worker must get its own limit, not web's:\n%s", got)
 	}
 	// web is the ingress (ports rewritten); worker must have NO ports.
