@@ -10,6 +10,7 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	crand "crypto/rand"
 	"encoding/hex"
@@ -509,6 +510,20 @@ func (a *Agent) handleRelease(ctx context.Context, ep APIEndpoint, item api.Work
 // cleanup already took are the common case, and misses just log.
 func (a *Agent) purgeComposeProject(ctx context.Context, deploymentID, project string) {
 	label := "com.docker.compose.project=" + project
+	// dockerRun captures stderr: "exit status 1" alone once hid the actual
+	// CLI error and cost a blind debugging round (8.17).
+	dockerRun := func(args ...string) (string, error) {
+		cmd := exec.CommandContext(ctx, "docker", args...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			if stderr.Len() > 0 {
+				err = fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+			}
+		}
+		return string(out), err
+	}
 	for _, k := range []struct {
 		name string
 		list []string
@@ -518,14 +533,13 @@ func (a *Agent) purgeComposeProject(ctx context.Context, deploymentID, project s
 		{"network", []string{"network", "ls", "-q", "--filter", label}, []string{"network", "rm"}},
 		{"volume", []string{"volume", "ls", "-q", "--filter", label}, []string{"volume", "rm"}},
 	} {
-		out, err := exec.CommandContext(ctx, "docker", k.list...).Output()
+		out, err := dockerRun(k.list...)
 		if err != nil {
 			a.logf("deploy %s: compose %s list for purge failed: %v", deploymentID, k.name, err)
 			continue
 		}
-		for _, id := range strings.Fields(string(out)) {
-			args := append(append([]string{}, k.rm...), id)
-			if err := exec.CommandContext(ctx, "docker", args...).Run(); err != nil {
+		for _, id := range strings.Fields(out) {
+			if _, err := dockerRun(append(append([]string{}, k.rm...), id)...); err != nil {
 				a.logf("deploy %s: compose %s %s removal failed: %v", deploymentID, k.name, id, err)
 			}
 		}
