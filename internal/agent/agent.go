@@ -829,22 +829,28 @@ func stampVolumeBytes(ctx context.Context, psOut []byte, samples []api.UsageSamp
 		ids = append(ids, list...)
 	}
 
-	// One inspect sweep: full container id + its volume-type mount names
-	// (binds are skipped -- only named volumes count against the quota).
+	// One inspect sweep: each container's volume-type mount names (binds are
+	// skipped -- only named volumes count against the quota). The format drops
+	// the id entirely and the output lines are paired with `ids` positionally:
+	// docker inspect echoes one block per argument in argument order, and the
+	// full-length id it can print never equals docker ps's 12-char ids that key
+	// idsByApp -- matching on the printed id silently zeroed every volume union
+	// (8.14). A missing container fails the whole inspect (non-zero exit),
+	// which the error path above already treats as "no stamp this tick".
 	inspectCtx, cancelInspect := context.WithTimeout(ctx, 30*time.Second)
 	defer cancelInspect()
-	inspectArgs := append([]string{"inspect", "--format", `{{.Id}}\t{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}`}, ids...)
+	inspectArgs := append([]string{"inspect", "--format", `{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}`}, ids...)
 	out, err := exec.CommandContext(inspectCtx, "docker", inspectArgs...).Output()
 	if err != nil {
 		return
 	}
 	volumesByID := map[string][]string{}
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
+	inspectLines := strings.Split(string(out), "\n")
+	for k, id := range ids {
+		if k >= len(inspectLines) {
+			break
 		}
-		volumesByID[fields[0]] = fields[1:]
+		volumesByID[id] = strings.Fields(inspectLines[k])
 	}
 
 	// One df sweep for per-volume sizes. df -v walks every volume's data, so
