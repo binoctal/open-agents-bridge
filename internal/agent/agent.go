@@ -918,18 +918,20 @@ func volumeTotalsByApp(idsByApp map[string][]string, volumesByID map[string][]st
 // size. The section ends at the first blank line.
 func parseVolumeSizes(out string) map[string]uint64 {
 	sizes := map[string]uint64{}
+	// Section boundaries are the "X space usage:" headers, not blank lines:
+	// the real docker output (dang, 2026-10-30) puts a blank line between the
+	// "Local Volumes space usage:" header and its table, which a blank-line
+	// reset treated as end-of-section -- every volume line was skipped and df
+	// parsed to nothing (8.15). Blank lines are simply ignored; the next
+	// "space usage:" header flips the section off.
 	inVolumes := false
 	for _, line := range strings.Split(out, "\n") {
 		t := strings.TrimSpace(line)
-		if t == "" {
-			inVolumes = false
+		if strings.HasSuffix(t, "space usage:") {
+			inVolumes = strings.HasPrefix(t, "Local Volumes")
 			continue
 		}
-		if strings.HasPrefix(t, "Local Volumes space usage:") {
-			inVolumes = true
-			continue
-		}
-		if !inVolumes {
+		if t == "" || !inVolumes {
 			continue
 		}
 		fields := strings.Fields(t)
