@@ -64,6 +64,7 @@ type File struct {
 const (
 	ActionMaterialize    = "materialize"
 	ActionRegisterRoute  = "register_route"
+	ActionAssertRoute    = "assert_route"
 	ActionRemoveRoute    = "remove_route"
 	ActionRelease        = "release"
 	ActionProbe          = "probe"
@@ -227,6 +228,12 @@ type Watermark struct {
 	// gate. Same unknown contract: 0 when the stat failed, and the API's
 	// gate trusts unknown rather than reading it as "full".
 	DiskAvailableBytes uint64 `json:"diskAvailableBytes,omitempty"`
+	// CaddyAlive is the edge-proxy liveness verdict (fix-caddy-route-reassert
+	// D4), reported only once the agent has confirmed the verdict: nil until
+	// then (route wiring disabled, or not yet N consecutive probes) so the
+	// API stores unknown instead of alarming on old agents. true/false is the
+	// confirmed verdict itself, not one probe's result.
+	CaddyAlive *bool `json:"caddyAlive,omitempty"`
 }
 
 // ComposeSpec is the rewrite payload on compose-stack materialize items

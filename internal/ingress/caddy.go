@@ -89,6 +89,26 @@ func (c *Caddy) Upsert(ctx context.Context, deploymentID, containerAddr string) 
 		fmt.Sprintf("http://%s/config/apps/http/servers/srv0/routes/0", c.Addr), route)
 }
 
+// Ping reports whether the admin endpoint answers at all. Any HTTP response
+// -- whatever the status -- means the process is up and serving; only a
+// transport-level failure (connection refused, timeout) means down. The
+// caller owns debounce; one ping is one probe, not a verdict.
+func (c *Caddy) Ping(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s/config/", c.Addr), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
 // notFoundError marks a 404 from the admin API so callers can branch on it.
 type notFoundError struct{ underlying error }
 

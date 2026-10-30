@@ -38,6 +38,9 @@ type Logf func(format string, args ...any)
 type Ingress interface {
 	Upsert(ctx context.Context, deploymentID, containerAddr string) error
 	Remove(ctx context.Context, deploymentID string) error
+	// Ping reports whether the edge proxy is answering (fix-caddy-route-
+	// reassert D4); one probe, not a debounced verdict.
+	Ping(ctx context.Context) error
 }
 
 // APIEndpoint is one served API environment (dual-home-hosting-agent D1/D2).
@@ -68,6 +71,10 @@ type Agent struct {
 	Store   *store.Store
 	GitHTTP *githttp.Manager
 	Ingress Ingress // may be nil (local dev without Caddy)
+
+	// caddyFails counts consecutive failed liveness probes (fix-caddy-route-
+	// reassert D4). Written only from the watermark loop goroutine.
+	caddyFails int
 
 	// RT drives runtime preview instances (add-dynamic-preview-compute
 	// group 5); nil = feature disabled (no Coolify configured).
@@ -387,6 +394,8 @@ func (a *Agent) handle(ctx context.Context, ep APIEndpoint, item api.WorkItem) e
 		return a.handleMaterialize(ctx, ep, item)
 	case api.ActionRegisterRoute:
 		return a.handleRegisterRoute(ctx, ep, item)
+	case api.ActionAssertRoute:
+		return a.handleAssertRoute(ctx, ep, item)
 	case api.ActionRemoveRoute:
 		return a.handleRemoveRoute(ctx, ep, item)
 	case api.ActionRelease:
@@ -459,6 +468,29 @@ func (a *Agent) handleRegisterRoute(ctx context.Context, ep APIEndpoint, item ap
 	}
 	a.logf("deploy %s: route %s -> %s registered", item.DeploymentID, item.Host, addr)
 	return a.report(ctx, ep, item.DeploymentID, api.EventRouteRegistered, 0, item.Host)
+}
+
+// handleAssertRoute is the periodic re-assert of an already-registered route
+// (fix-caddy-route-reassert D2). Deliberately silent on every path: no event,
+// no report, no failure. First registration reports EventRouteRegistered and
+// a lost route would be a deployment failure -- but this is neither; it is
+// routine maintenance over a healthy row, so a Caddy that happens to be mid-
+// restart must not kill the deployment (EventMaterializeFailed here would
+// flip a ready row to failed), and a successful re-assert must not write the
+// row either (the event consumer UPDATEs on every report). Upsert is
+// idempotent (PATCH-in-place first), so the steady state is a no-op.
+func (a *Agent) handleAssertRoute(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {
+	if a.Ingress == nil {
+		a.logf("deploy %s: assert skipped (no Caddy admin)", item.DeploymentID)
+		return nil
+	}
+	addr := fmt.Sprintf("127.0.0.1:%d", item.AppPort)
+	if err := a.Ingress.Upsert(ctx, item.DeploymentID, addr); err != nil {
+		a.logf("deploy %s: route assert failed (will retry next cycle): %v", item.DeploymentID, err)
+		return nil
+	}
+	a.logf("deploy %s: route %s -> %s asserted", item.DeploymentID, item.Host, addr)
+	return nil
 }
 
 func (a *Agent) handleRemoveRoute(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {
@@ -634,6 +666,7 @@ func (a *Agent) report(ctx context.Context, ep APIEndpoint, deploymentID, event 
 func (a *Agent) reportWatermark(ctx context.Context) error {
 	w := CollectWatermark(ctx)
 	w.BootID = a.BootID
+	w.CaddyAlive = a.caddyVerdict(ctx)
 	for _, ep := range a.endpoints() {
 		if a.endpointDisabled(ep.Client) {
 			continue
@@ -647,6 +680,28 @@ func (a *Agent) reportWatermark(ctx context.Context) error {
 		}
 	}
 	return a.fatalIfAllDisabled()
+}
+
+// caddyVerdict debounces the edge-proxy liveness probe (fix-caddy-route-
+// reassert D4): nil means no confirmed verdict yet -- route wiring disabled,
+// or fewer than 3 consecutive failed probes -- so the API stores unknown and
+// does not alarm; false means 3 probes in a row failed; true means the last
+// probe succeeded (recovery is reported immediately, decay is not).
+func (a *Agent) caddyVerdict(ctx context.Context) *bool {
+	if a.Ingress == nil {
+		return nil
+	}
+	if err := a.Ingress.Ping(ctx); err != nil {
+		a.caddyFails++
+		if a.caddyFails < 3 {
+			return nil
+		}
+		dead := false
+		return &dead
+	}
+	a.caddyFails = 0
+	alive := true
+	return &alive
 }
 
 // reportUsage samples per-container memory and posts the batch. Skipped when
