@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/binoctal/open-agents/hosting-agent/internal/api"
 	"github.com/binoctal/open-agents/hosting-agent/internal/githttp"
@@ -158,6 +159,20 @@ func TestPollWorkRoutesReportsAndPresignsToOfferingEndpoint(t *testing.T) {
 		t.Fatalf("pollWork: %v", err)
 	}
 
+	// Materialize runs off the poll loop now (image-tier tars stream for
+	// minutes), so the report/presign/repo assertions must wait for the
+	// goroutine to land its side effects rather than expecting them on
+	// return. Deadline-bound poll, not a fixed sleep.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if sa.count("/internal/hosting-agent/report") > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the materialized report must land on A")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	if got := sa.count("/internal/hosting-agent/presign-source"); got == 0 {
 		t.Fatal("presign must go through the offering endpoint A")
 	}
