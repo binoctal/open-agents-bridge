@@ -483,7 +483,7 @@ func (a *Agent) loadImageTars(ctx context.Context, deploymentID string, manifest
 // Best-effort: a failed rmi logs and is forgotten -- the dangling image
 // falls to the node's routine prune instead of blocking teardown.
 func (a *Agent) rmiDeployImages(ctx context.Context, deploymentID string) {
-	out, err := a.docker()(ctx, "images", "--filter", "reference=oa-deploy-"+deploymentID+"-*", "--format", "{{.Repository}}:{{.Tag}}")
+	out, err := a.docker()(ctx, "images", "--filter", "reference=oa-deploy-"+strings.ToLower(deploymentID)+"-*", "--format", "{{.Repository}}:{{.Tag}}")
 	if err != nil {
 		a.logf("deploy %s: image listing for rmi failed (left for routine prune): %v", deploymentID, err)
 		return

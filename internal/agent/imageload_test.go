@@ -90,25 +90,29 @@ func TestLoadImageTarsMissingObject(t *testing.T) {
 }
 
 // Release removes exactly the deployment's local tags; a failed rmi never
-// blocks the rest of teardown.
+// blocks the rest of teardown. Mixed-case ids fold to lowercase — the bridge
+// builds the tags that way (docker rejects uppercase repositories).
 func TestRmiDeployImages(t *testing.T) {
 	dk := &fakeDocker{outcomes: map[string]struct {
 		stdout string
 		err    error
 	}{
-		"images --filter":             {"oa-deploy-D1-web:latest\noa-deploy-D1-worker:latest\n", nil},
-		"rmi oa-deploy-D1-web:latest": {"", errors.New("image is in use")},
+		"images --filter":             {"oa-deploy-d1-web:latest\noa-deploy-d1-worker:latest\n", nil},
+		"rmi oa-deploy-d1-web:latest": {"", errors.New("image is in use")},
 	}}
 	a := newImageAgent(t, dk)
 
 	a.rmiDeployImages(context.Background(), "D1")
+	if got := strings.Join(dk.calls[0].args, " "); got != "images --filter reference=oa-deploy-d1-* --format {{.Repository}}:{{.Tag}}" {
+		t.Fatalf("list filter (must fold the id) = %q", got)
+	}
 	if len(dk.calls) != 3 {
 		t.Fatalf("docker calls = %d, want 3 (list + 2 rmi)", len(dk.calls))
 	}
-	if got := strings.Join(dk.calls[1].args, " "); got != "rmi oa-deploy-D1-web:latest" {
+	if got := strings.Join(dk.calls[1].args, " "); got != "rmi oa-deploy-d1-web:latest" {
 		t.Fatalf("first rmi = %q", got)
 	}
-	if got := strings.Join(dk.calls[2].args, " "); got != "rmi oa-deploy-D1-worker:latest" {
+	if got := strings.Join(dk.calls[2].args, " "); got != "rmi oa-deploy-d1-worker:latest" {
 		t.Fatalf("second rmi (must survive the first failing) = %q", got)
 	}
 }
