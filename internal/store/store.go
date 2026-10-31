@@ -154,24 +154,40 @@ func (s *Store) MaterializeCompose(ctx context.Context, p Presigner, deploymentI
 // FetchMissing ensures every manifest object exists locally, presigning via
 // fn in batches of 500 (add-dynamic-preview-compute 5.2: the runtime preview
 // path reuses the whole pipeline through this seam, only the presign origin
-// differs).
+// differs). A failed pass re-derives missing from disk and retries with
+// fresh presigns (URLs expire as a set; a multi-GiB image-tier tar can
+// outlive a batch's 15-minute signature mid-stream -- 10-31: batch member
+// two 403'd after a 2.4 GiB sibling took 14 minutes). Completed objects are
+// never re-downloaded: hasObject skips them on the rescan.
 func (s *Store) FetchMissing(ctx context.Context, manifest []api.File, fn presignFunc) error {
 	if len(manifest) == 0 {
 		return fmt.Errorf("empty manifest")
 	}
-	var missing []string
-	for _, f := range manifest {
-		if !s.hasObject(f.SHA256) {
-			missing = append(missing, f.SHA256)
+	const attempts = 3
+	var lastErr error
+	for try := 0; try < attempts; try++ {
+		var missing []string
+		for _, f := range manifest {
+			if !s.hasObject(f.SHA256) {
+				missing = append(missing, f.SHA256)
+			}
+		}
+		if len(missing) == 0 {
+			return nil
+		}
+		lastErr = nil
+		for i := 0; i < len(missing); i += 500 {
+			end := min(i+500, len(missing))
+			if err := s.fetchBatch(ctx, fn, missing[i:end]); err != nil {
+				lastErr = err
+				break
+			}
+		}
+		if lastErr == nil {
+			return nil
 		}
 	}
-	for i := 0; i < len(missing); i += 500 {
-		end := min(i+500, len(missing))
-		if err := s.fetchBatch(ctx, fn, missing[i:end]); err != nil {
-			return err
-		}
-	}
-	return nil
+	return lastErr
 }
 
 // ObjectPath is the on-disk path of a fetched object (sha-addressed, no
