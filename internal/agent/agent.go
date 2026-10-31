@@ -428,6 +428,18 @@ func (a *Agent) handleMaterialize(ctx context.Context, ep APIEndpoint, item api.
 		a.logf("deploy %s: materialize failed: %v", item.DeploymentID, err)
 		return a.report(ctx, ep, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
 	}
+	// Image tier (docker-image-deploy-tier D6): every manifest tar is
+	// docker-loaded into the node's local store AFTER the tree materialized
+	// and BEFORE the materialized event lets Coolify compose the stack up --
+	// compose resolves the oa-deploy-* references from the local daemon, no
+	// registry involved. A load failure fails materialize; the re-offer
+	// re-loads, and `docker load` over an existing image is idempotent.
+	if c := item.Compose; c != nil && c.Tier == "image" {
+		if err := a.loadImageTars(ctx, item.DeploymentID, manifest); err != nil {
+			a.logf("deploy %s: image load failed: %v", item.DeploymentID, err)
+			return a.report(ctx, ep, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
+		}
+	}
 	port, err := a.GitHTTP.Serve(item.DeploymentID)
 	if err != nil {
 		a.logf("deploy %s: git http serve failed: %v", item.DeploymentID, err)
@@ -436,6 +448,53 @@ func (a *Agent) handleMaterialize(ctx context.Context, ep APIEndpoint, item api.
 	a.logf("deploy %s: materialized %s at http://127.0.0.1:%d/%s.git",
 		item.DeploymentID, commit[:12], port, item.DeploymentID)
 	return a.report(ctx, ep, item.DeploymentID, api.EventMaterialized, port, commit)
+}
+
+// loadImageTars (docker-image-deploy-tier D6) docker-loads each manifest tar
+// from the object store. Loads are independent of each other -- no ordering
+// -- and the failure carries the failing tar plus docker's output tail, the
+// only place the load error is visible before the compose up fails on a
+// missing local image.
+func (a *Agent) loadImageTars(ctx context.Context, deploymentID string, manifest []api.File) error {
+	for _, f := range manifest {
+		if !strings.HasSuffix(f.Path, ".tar") {
+			continue
+		}
+		path, err := a.Store.ObjectPath(f.SHA256)
+		if err != nil {
+			return fmt.Errorf("tar %s: %w", f.Path, err)
+		}
+		out, err := a.docker()(ctx, "load", "-i", path)
+		if err != nil {
+			tail := strings.TrimSpace(out)
+			if len(tail) > 200 {
+				tail = tail[len(tail)-200:]
+			}
+			return fmt.Errorf("docker load %s: %v: %s", f.Path, err, tail)
+		}
+		a.logf("deploy %s: loaded image tar %s", deploymentID, f.Path)
+	}
+	return nil
+}
+
+// rmiDeployImages (docker-image-deploy-tier 3.2) removes the deployment's
+// local oa-deploy-* images on release. Coolify's app delete never sees them
+// (compose up resolved the references locally), so this is the only hook.
+// Best-effort: a failed rmi logs and is forgotten -- the dangling image
+// falls to the node's routine prune instead of blocking teardown.
+func (a *Agent) rmiDeployImages(ctx context.Context, deploymentID string) {
+	out, err := a.docker()(ctx, "images", "--filter", "reference=oa-deploy-"+deploymentID+"-*", "--format", "{{.Repository}}:{{.Tag}}")
+	if err != nil {
+		a.logf("deploy %s: image listing for rmi failed (left for routine prune): %v", deploymentID, err)
+		return
+	}
+	for _, ref := range strings.Fields(out) {
+		if _, err := a.docker()(ctx, "rmi", ref); err != nil {
+			a.logf("deploy %s: rmi %s failed (left for routine prune): %v", deploymentID, ref, err)
+		} else {
+			a.logf("deploy %s: removed image %s", deploymentID, ref)
+		}
+	}
 }
 
 // materializeTree routes between the two materialize shapes
@@ -532,6 +591,9 @@ func (a *Agent) handleRelease(ctx context.Context, ep APIEndpoint, item api.Work
 	if id := item.CoolifyAppID; id != "" {
 		a.purgeComposeProject(ctx, item.DeploymentID, id)
 	}
+	// Image-tier rows leave oa-deploy-* images in the local daemon; the
+	// purge above only touches compose artifacts (containers/volumes/nets).
+	a.rmiDeployImages(ctx, item.DeploymentID)
 	a.logf("deploy %s: released (route + repo + port recycled)", item.DeploymentID)
 	return a.report(ctx, ep, item.DeploymentID, api.EventReleased, 0, "")
 }

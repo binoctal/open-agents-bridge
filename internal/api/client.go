@@ -245,6 +245,13 @@ type ComposeSpec struct {
 	ActivateProfiles []string       `json:"activateProfiles,omitempty"`
 	HostPort         int            `json:"hostPort"`
 	Services         []ServiceLimit `json:"services"`
+
+	// Tier is "image" on image-tier rows (docker-image-deploy-tier): the
+	// manifest carries per-service image tars the agent docker-loads before
+	// Coolify composes the stack up, and the rewritten compose references
+	// local oa-deploy-* tags instead of a build:. Empty/“source” is the
+	// build-on-node tier and changes nothing.
+	Tier string `json:"tier,omitempty"`
 }
 
 // ServiceLimit is one ACTIVE service's post-min resource ceiling; the rewrite

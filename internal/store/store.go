@@ -167,6 +167,17 @@ func (s *Store) FetchMissing(ctx context.Context, manifest []api.File, fn presig
 	return nil
 }
 
+// ObjectPath is the on-disk path of a fetched object (sha-addressed, no
+// extension). The image tier docker-loads image tars straight from the store
+// (docker-image-deploy-tier D6) -- `docker load -i` is content-driven, so
+// the sha filename is fine and no multi-GiB copy happens.
+func (s *Store) ObjectPath(sha string) (string, error) {
+	if !s.hasObject(sha) {
+		return "", fmt.Errorf("object %s not in store", sha)
+	}
+	return s.objectPath(sha), nil
+}
+
 // ObjectBytes returns the verified content of one object already in the
 // store (the runtime preview path reads runtime.json this way after
 // FetchMissing, before generating the Dockerfile that rides the same commit).
