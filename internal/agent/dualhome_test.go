@@ -43,6 +43,8 @@ func (f *fakeIngress) Upsert(ctx context.Context, deploymentID, containerAddr st
 
 func (f *fakeIngress) Remove(ctx context.Context, deploymentID string) error { return nil }
 
+func (f *fakeIngress) Ping(ctx context.Context) error { return nil }
+
 // epServer is one fake API environment: it counts requests per path and can
 // be told to reject everything with 401 (the rotated-secret scenario).
 type epServer struct {

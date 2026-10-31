@@ -388,16 +388,13 @@ func (a *Agent) handle(ctx context.Context, ep APIEndpoint, item api.WorkItem) e
 		return nil
 	}
 
-	switch item.Action {
-	case api.ActionMaterialize:
+	if item.Action == api.ActionMaterialize {
 		// Image-tier tars stream for many minutes (a 2.4 GiB tar at 10-31
 		// rates). handleMaterialize on the loop would stall watermark/work
 		// ticks until the row reads agent-lost (10-31: heartbeat froze at
 		// the claim, API failed the row agent_unreachable mid-download).
-		// The inFlight claim above already keeps a re-offer from
-		// double-starting, so run the whole chain (fetch, load, repo build)
-		// off-loop and release from inside. ctx is the agent's root context:
-		// the goroutine dies with the process, same as the loop itself.
+		// The goroutine owns this claim and releases from inside; the defer
+		// below only covers the synchronous handlers.
 		go func() {
 			defer a.release(key)
 			if err := a.handleMaterialize(ctx, ep, item); err != nil {
@@ -405,6 +402,15 @@ func (a *Agent) handle(ctx context.Context, ep APIEndpoint, item api.WorkItem) e
 			}
 		}()
 		return nil
+	}
+	// Synchronous handlers release on return. A single defer for every
+	// action would free the claim while the materialize goroutine still
+	// streams (10-31: register_route leaked its claim, so the next
+	// materialize offer skipped forever as "already in flight" with no
+	// goroutine running).
+	defer a.release(key)
+
+	switch item.Action {
 	case api.ActionRegisterRoute:
 		return a.handleRegisterRoute(ctx, ep, item)
 	case api.ActionAssertRoute:
