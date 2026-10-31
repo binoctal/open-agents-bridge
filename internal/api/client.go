@@ -21,6 +21,10 @@ type Client struct {
 	// budget was sized for. Every caller is a best-effort background loop,
 	// so a long deadline only slows the retry, never the bridge itself.
 	slowClient *http.Client
+	// blobClient backs single PUTs of image-tier tars: a 4.5GiB tar at a
+	// realistic home uplink needs tens of minutes, past slowClient's 5min
+	// by an order of magnitude. Only the oversized bodies ride it.
+	blobClient *http.Client
 }
 
 func NewClient(cfg *config.Config) *Client {
@@ -41,6 +45,7 @@ func NewClient(cfg *config.Config) *Client {
 		machineToken: cfg.MachineToken,
 		httpClient:   &http.Client{Timeout: 30 * time.Second},
 		slowClient:   &http.Client{Timeout: 5 * time.Minute},
+		blobClient:   &http.Client{Timeout: 60 * time.Minute},
 	}
 }
 
@@ -561,9 +566,14 @@ func (c *Client) UploadPreviewFile(url string, data []byte) error {
 		return err
 	}
 	// slowClient: a single object rides the same lossy links at up to 25MB,
-	// well past the 30s heartbeat budget. It carries no default headers of its
-	// own (only a timeout), so it is safe for presigned URLs.
-	resp, err := c.slowClient.Do(req)
+	// well past the 30s heartbeat budget. Image-tier tars run to GiBs and
+	// need blobClient's hour instead. Both carry no default headers of their
+	// own (only a timeout), so they are safe for presigned URLs.
+	client := c.slowClient
+	if len(data) > 256<<20 {
+		client = c.blobClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
