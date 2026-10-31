@@ -10,7 +10,12 @@ import (
 )
 
 func TestImageTag(t *testing.T) {
-	if got, want := ImageTag("MlqbhZR340sM", "web"), "oa-deploy-MlqbhZR340sM-web"; got != want {
+	// Mixed-case deployment ids must fold to lowercase: docker rejects
+	// uppercase repository names ("invalid tag ... must be lowercase").
+	if got, want := ImageTag("MlqbhZR340sM", "web"), "oa-deploy-mlqbhzr340sm-web"; got != want {
+		t.Fatalf("ImageTag = %q, want %q", got, want)
+	}
+	if got, want := ImageTag("d1", "web-user"), "oa-deploy-d1-web-user"; got != want {
 		t.Fatalf("ImageTag = %q, want %q", got, want)
 	}
 }
@@ -59,10 +64,10 @@ func TestRewriteCompose(t *testing.T) {
 	if strings.Contains(rendered, "build") {
 		t.Fatalf("rewrite left a `build` key behind:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "image: oa-deploy-DEP1-web") {
+	if !strings.Contains(rendered, "image: oa-deploy-dep1-web") {
 		t.Fatalf("web not rewritten to local tag:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "image: oa-deploy-DEP1-worker") {
+	if !strings.Contains(rendered, "image: oa-deploy-dep1-worker") {
 		t.Fatalf("worker (image+build coexist) not overwritten:\n%s", rendered)
 	}
 	if strings.Contains(rendered, "placeholder/overwritten") {

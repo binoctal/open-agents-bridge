@@ -34,7 +34,10 @@ const MaxImageTarBytes = int64(4_831_838_208) // 4.5 GiB
 // <deploymentID> segment keeps concurrent deployments from cross-mounting
 // each other's images.
 func ImageTag(deploymentID, service string) string {
-	return "oa-deploy-" + deploymentID + "-" + service
+	// Docker repository names must be lowercase; deployment ids are mixed-case
+	// base62 (e.g. MlqbhZR340sM), so fold the whole tag. rmiDeployImages in the
+	// hosting-agent folds the same way — keep the two in sync.
+	return strings.ToLower("oa-deploy-" + deploymentID + "-" + service)
 }
 
 // RunImageTierUpload is the image-tier entry point, dispatched from the same
