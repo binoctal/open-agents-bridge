@@ -271,7 +271,10 @@ func buildArgs(repoRoot, composeDir string, build *yaml.Node) ([]string, error) 
 		}
 		argv = []string{"build", context}
 		if n := mappingValue(build, "dockerfile"); n != nil {
-			argv = append(argv, "-f", n.Value)
+			// Compose resolves dockerfile against the CONTEXT, but docker -f
+			// resolves against the daemon's cwd — join the (absolute) context
+			// so `dockerfile: app/Dockerfile` works from any cwd.
+			argv = append(argv, "-f", filepath.Join(context, filepath.FromSlash(n.Value)))
 		}
 		if n := mappingValue(build, "target"); n != nil {
 			argv = append(argv, "--target", n.Value)

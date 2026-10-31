@@ -135,7 +135,7 @@ args:
 		t.Fatalf("mapping form: %v", err)
 	}
 	joined := strings.Join(got, " ")
-	for _, want := range []string{"build /repo/deploy/apps/web", "-f Dockerfile.dev", "--target build-stage", "--build-arg NODE_ENV=production", "--build-arg TOKEN"} {
+	for _, want := range []string{"build /repo/deploy/apps/web", "-f /repo/deploy/apps/web/Dockerfile.dev", "--target build-stage", "--build-arg NODE_ENV=production", "--build-arg TOKEN"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("mapping form argv missing %q: %v", want, got)
 		}
