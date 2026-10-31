@@ -4298,6 +4298,20 @@ func (b *Bridge) pollDeploySources() bool {
 		if !b.claimDeploySource(d.DeploymentID) {
 			continue
 		}
+		if d.Tier == "image" {
+			// Image tier (docker-image-deploy-tier): build locally, upload
+			// tars + rewritten compose — the source tree stays on this
+			// machine. No features negotiation: the single-shot declare is
+			// the whole protocol for a 2-3 member pack.
+			b.logInfo("[%s] deploy: image-tier build requested for mission %s (deployment %s)",
+				logger.ModDeploy, d.MissionID, d.DeploymentID)
+			go func(work api.HostedDeployWork) {
+				defer b.deploySourceDone(work.DeploymentID)
+				deploysource.RunImageTierUpload(b.apiClient, work.MissionID, work.DeploymentID,
+					b.worktreeManager.ProjectDir(), b.logInfo)
+			}(d)
+			continue
+		}
 		b.logInfo("[%s] deploy: source pack requested for mission %s (deployment %s)",
 			logger.ModDeploy, d.MissionID, d.DeploymentID)
 		go func(work api.HostedDeployWork) {

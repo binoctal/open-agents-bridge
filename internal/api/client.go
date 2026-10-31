@@ -585,10 +585,13 @@ func (c *Client) UploadPreviewFile(url string, data []byte) error {
 // zero source leaves the machine unless the user asked for it.
 
 // HostedDeployWork is one pending source pack the platform asked this
-// machine to produce (GET /internal/hosted-deployments/pending).
+// machine to produce (GET /internal/hosted-deployments/pending). Tier is
+// "image" for image-tier rows (docker-image-deploy-tier) and "" or "source"
+// otherwise; an old API omitting the field keeps today's source-tier path.
 type HostedDeployWork struct {
 	MissionID    string `json:"missionId"`
 	DeploymentID string `json:"deploymentId"`
+	Tier         string `json:"tier"`
 }
 
 // PendingHostedDeploys wraps the pending poll response: the work items plus

@@ -1,0 +1,182 @@
+package deploysource
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+func TestImageTag(t *testing.T) {
+	if got, want := ImageTag("MlqbhZR340sM", "web"), "oa-deploy-MlqbhZR340sM-web"; got != want {
+		t.Fatalf("ImageTag = %q, want %q", got, want)
+	}
+}
+
+// rewriteFixture carries a build service, a registry-image service and the
+// sibling keys the rewrite must leave byte-identical.
+const rewriteFixture = `# top comment survives
+services:
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      args:
+        NODE_ENV: production
+    ports:
+      - "3000:3000"
+    profiles:
+      - full
+    depends_on:
+      - redis
+  redis:
+    image: redis:7-alpine
+  worker:
+    build: ./worker # inline comment rides along
+    image: placeholder/overwritten
+`
+
+func rewriteFixtureDoc(t *testing.T) *yaml.Node {
+	t.Helper()
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(rewriteFixture), &doc); err != nil {
+		t.Fatalf("fixture parse: %v", err)
+	}
+	return &doc
+}
+
+func TestRewriteCompose(t *testing.T) {
+	doc := rewriteFixtureDoc(t)
+	var out strings.Builder
+	if err := rewriteCompose(doc, "DEP1", &out); err != nil {
+		t.Fatalf("rewriteCompose: %v", err)
+	}
+	rendered := out.String()
+
+	// The build keys are gone; rewritten tags point at the local tag contract.
+	if strings.Contains(rendered, "build") {
+		t.Fatalf("rewrite left a `build` key behind:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "image: oa-deploy-DEP1-web") {
+		t.Fatalf("web not rewritten to local tag:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "image: oa-deploy-DEP1-worker") {
+		t.Fatalf("worker (image+build coexist) not overwritten:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "placeholder/overwritten") {
+		t.Fatalf("image alongside build survived the rewrite:\n%s", rendered)
+	}
+	// Registry references and sibling keys pass through untouched. Build
+	// args ride the `build:` subtree and are gone with it — runtime compose
+	// has no use for them.
+	if !strings.Contains(rendered, "image: redis:7-alpine") {
+		t.Fatalf("registry image service was disturbed:\n%s", rendered)
+	}
+	for _, keep := range []string{"profiles:", "depends_on:", `"3000:3000"`} {
+		if !strings.Contains(rendered, keep) {
+			t.Fatalf("sibling key %q lost by rewrite:\n%s", keep, rendered)
+		}
+	}
+	if strings.Contains(rendered, "NODE_ENV") {
+		t.Fatalf("build arg leaked past the build-key removal:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "# top comment survives") {
+		t.Fatalf("top-level comment lost:\n%s", rendered)
+	}
+
+	// The platform's complete-time validator resolves the service name from
+	// the tar filename — the two spellings must agree for every built service.
+	var back map[string]any
+	if err := yaml.Unmarshal([]byte(rendered), &back); err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	services, _ := back["services"].(map[string]any)
+	for _, svc := range []string{"web", "worker"} {
+		body, _ := services[svc].(map[string]any)
+		tag, _ := body["image"].(string)
+		if tag != ImageTag("DEP1", svc) && tag != ImageTag("DEP1", svc)+":latest" {
+			t.Fatalf("service %s image %q does not match tag contract", svc, tag)
+		}
+	}
+}
+
+func TestBuildArgs(t *testing.T) {
+	var ctxNode yaml.Node
+	if err := yaml.Unmarshal([]byte(`./svc`), &ctxNode); err != nil {
+		t.Fatal(err)
+	}
+	got, err := buildArgs("/repo", "/repo", ctxNode.Content[0])
+	if err != nil {
+		t.Fatalf("string form: %v", err)
+	}
+	if len(got) != 2 || got[0] != "build" || got[1] != "/repo/svc" {
+		t.Fatalf("string form argv = %v", got)
+	}
+
+	var mapNode yaml.Node
+	if err := yaml.Unmarshal([]byte(`
+context: ./apps/web
+dockerfile: Dockerfile.dev
+target: build-stage
+args:
+  NODE_ENV: production
+  TOKEN:`), &mapNode); err != nil {
+		t.Fatal(err)
+	}
+	got, err = buildArgs("/repo", "/repo/deploy", mapNode.Content[0])
+	if err != nil {
+		t.Fatalf("mapping form: %v", err)
+	}
+	joined := strings.Join(got, " ")
+	for _, want := range []string{"build /repo/deploy/apps/web", "-f Dockerfile.dev", "--target build-stage", "--build-arg NODE_ENV=production", "--build-arg TOKEN"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("mapping form argv missing %q: %v", want, got)
+		}
+	}
+}
+
+func TestRunImageTierUploadFailFast(t *testing.T) {
+	root := t.TempDir()
+
+	// No convention compose -> loud error before anything docker-shaped.
+	err := runImageTierUpload(nil, "m", "d", root, nil)
+	if err == nil || !strings.Contains(err.Error(), "no convention-path compose") {
+		t.Fatalf("want compose-miss error, got %v", err)
+	}
+
+	// Compose present but no build services -> image tier has nothing to do.
+	writeFile(t, filepath.Join(root, "docker-compose.yml"), "services:\n  db:\n    image: postgres:16\n")
+	err = runImageTierUpload(nil, "m", "d", root, nil)
+	if err == nil || !strings.Contains(err.Error(), "no `build:` services") {
+		t.Fatalf("want no-build-services error, got %v", err)
+	}
+
+	// Docker unusable -> explicit reason, never a silent source-tier fallback.
+	writeFile(t, filepath.Join(root, "docker-compose.yml"), "services:\n  web:\n    build: .\n")
+	orig := dockerProbe
+	dockerProbe = func() error { return os.ErrPermission }
+	defer func() { dockerProbe = orig }()
+	err = runImageTierUpload(nil, "m", "d", root, nil)
+	if err == nil || !strings.Contains(err.Error(), "docker not usable") {
+		t.Fatalf("want docker-unusable error, got %v", err)
+	}
+}
+
+func TestTailOutput(t *testing.T) {
+	long := strings.Repeat("x", 500)
+	if got := tailOutput([]byte("  "+long+"\n"), 100); len(got) != 103 || !strings.HasPrefix(got, "...") {
+		t.Fatalf("tailOutput len = %d, want 103 (…marker + 100)", len(got))
+	}
+	if got := tailOutput([]byte(" short "), 100); got != "short" {
+		t.Fatalf("tailOutput = %q, want %q", got, "short")
+	}
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
