@@ -51,7 +51,14 @@ func New(dir string, p Presigner) *Store {
 	return &Store{
 		Dir:       dir,
 		Presigner: p,
-		HTTP:      &http.Client{Timeout: 60 * time.Second},
+		// The store's only HTTP use is downloading manifest objects from
+		// R2, and image-tier tars run to 4.5 GiB (docker-image-deploy-tier)
+		// -- the ceiling is a blob-download budget, not a chatty-API one.
+		// 60s was sized for source-tree objects; a 2.4 GiB tar died at the
+		// mark mid-body (10-31 staging run). Presigns ride api.Client's own
+		// short-timeout transport and are unaffected. Failed downloads
+		// re-presign wholesale, so a slow batch never leans on stale URLs.
+		HTTP: &http.Client{Timeout: 60 * time.Minute},
 	}
 }
 
