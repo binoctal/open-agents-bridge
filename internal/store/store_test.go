@@ -426,6 +426,16 @@ func readRepoFile(t *testing.T, st *Store, deploymentID, path string) string {
 	return string(out)
 }
 
+// lsRepoTree lists every path in the committed tree.
+func lsRepoTree(t *testing.T, st *Store, deploymentID string) []string {
+	t.Helper()
+	out, err := exec.Command("git", "--git-dir", st.RepoPath(deploymentID), "ls-tree", "-r", "--name-only", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("git ls-tree: %v", err)
+	}
+	return strings.Fields(string(out))
+}
+
 // hosted-compose-stacks 5.2: a compose materialize must land the REWRITTEN
 // stack file in the commit -- limits injected, non-ingress host ports gone,
 // ingress on the negotiated loopback slot -- while the rest of the tree rides
@@ -469,9 +479,9 @@ services:
 	for _, want := range []string{
 		`127.0.0.1:30001:3000`, // ingress: negotiated loopback slot
 		"cpus: 1",              // web limits injected
-		`memory: "536870912"`, // 512MiB in bytes
+		`memory: "536870912"`,  // 512MiB in bytes
 		"cpus: 0.5",            // worker limits injected
-		`memory: "268435456"`, // 256MiB in bytes
+		`memory: "268435456"`,  // 256MiB in bytes
 	} {
 		if !strings.Contains(committed, want) {
 			t.Errorf("committed compose missing %q:\n%s", want, committed)
@@ -511,5 +521,127 @@ func TestMaterializeComposeRejectsUnknownComposePath(t *testing.T) {
 		Services: []api.ServiceLimit{{Name: "web", MemoryMiB: 256, CPUs: 0.5}}}
 	if _, err := st.MaterializeCompose(context.Background(), st.Presigner, "dep1", "deploys/dep1", []api.File{app}, spec); err == nil {
 		t.Fatal("compose path outside the manifest must fail the materialize")
+	}
+}
+
+// imageTierManifest is the image-tier shape: the rewritten compose, the
+// per-service image tars, and a small rider file. The objects map carries
+// the same bytes file() hashed, so FetchMissing verifies cleanly.
+func imageTierManifest(t *testing.T) (manifest []api.File, objects map[string][]byte) {
+	t.Helper()
+	composeSrc := `
+services:
+  web:
+    image: oa-deploy-dep1-web:latest
+    ports: ["8080:3000"]
+`
+	entries := []struct{ path, content string }{
+		{"docker-compose.yml", composeSrc},
+		{"web.tar", "pretend docker save tar for web"},
+		{"nested/worker.tar", "pretend docker save tar for worker"},
+		{"README.md", "readme"},
+	}
+	objects = map[string][]byte{}
+	for _, e := range entries {
+		manifest = append(manifest, file(e.path, e.content))
+		objects[sha([]byte(e.content))] = []byte(e.content)
+	}
+	return manifest, objects
+}
+
+// image-tier-compose-only-materialize 1.2: the image tier must keep tars OUT
+// of the committed tree (Coolify only ever reads the compose) while they
+// still land in the object store (docker load reads ObjectPath, not the
+// repo), and the committed compose must be the rewritten one.
+func TestMaterializeComposeImageTierOmitsTarsFromTree(t *testing.T) {
+	requireGit(t)
+	manifest, objects := imageTierManifest(t)
+	st, _ := newTestStore(t, objects)
+	spec := api.ComposeSpec{
+		ComposePath:    "docker-compose.yml",
+		IngressService: "web",
+		IngressPort:    3000,
+		HostPort:       30001,
+		Tier:           "image",
+		Services:       []api.ServiceLimit{{Name: "web", MemoryMiB: 512, CPUs: 1}},
+	}
+
+	if _, err := st.MaterializeCompose(context.Background(), st.Presigner, "dep1", "deploys/dep1", manifest, spec); err != nil {
+		t.Fatal(err)
+	}
+	// Tree carries compose + rider, zero tar entries (nested or flat).
+	paths := lsRepoTree(t, st, "dep1")
+	want := map[string]bool{"docker-compose.yml": false, "README.md": false}
+	for _, p := range paths {
+		if strings.HasSuffix(p, ".tar") {
+			t.Errorf("image-tier tree must not carry tar entries, found %s", p)
+		}
+		if _, ok := want[p]; ok {
+			want[p] = true
+		}
+	}
+	for p, seen := range want {
+		if !seen {
+			t.Errorf("image-tier tree must keep %s, tree=%v", p, paths)
+		}
+	}
+	// Committed compose is the rewritten one (loopback slot injected).
+	if committed := readRepoFile(t, st, "dep1", "docker-compose.yml"); !strings.Contains(committed, "127.0.0.1:30001:3000") {
+		t.Errorf("committed compose must be the rewrite:\n%s", committed)
+	}
+	// The tars still exist in the object store: docker load reads
+	// ObjectPath(sha), so dropping them from the tree must not drop them
+	// from disk.
+	for _, f := range manifest {
+		if !strings.HasSuffix(f.Path, ".tar") {
+			continue
+		}
+		if _, err := os.Stat(st.objectPath(f.SHA256)); err != nil {
+			t.Errorf("tar %s must remain in the object store for docker load: %v", f.Path, err)
+		}
+	}
+}
+
+// image-tier-compose-only-materialize 1.3: the source tier keeps the full
+// manifest in the tree, byte-for-byte with the pre-change behavior.
+func TestMaterializeComposeSourceTierKeepsFullTree(t *testing.T) {
+	requireGit(t)
+	manifest, objects := imageTierManifest(t)
+	st, _ := newTestStore(t, objects)
+	spec := api.ComposeSpec{
+		ComposePath:    "docker-compose.yml",
+		IngressService: "web",
+		IngressPort:    3000,
+		HostPort:       30001,
+		Tier:           "source",
+		Services:       []api.ServiceLimit{{Name: "web", MemoryMiB: 512, CPUs: 1}},
+	}
+
+	if _, err := st.MaterializeCompose(context.Background(), st.Presigner, "dep1", "deploys/dep1", manifest, spec); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, p := range lsRepoTree(t, st, "dep1") {
+		seen[p] = true
+	}
+	for _, f := range manifest {
+		if !seen[f.Path] {
+			t.Errorf("source-tier tree must keep every manifest entry, missing %s, tree=%v", f.Path, seen)
+		}
+	}
+	// Same manifest under the empty tier (the legacy wire shape) must behave
+	// identically: full tree.
+	spec.Tier = ""
+	if _, err := st.MaterializeCompose(context.Background(), st.Presigner, "dep2", "deploys/dep2", manifest, spec); err != nil {
+		t.Fatal(err)
+	}
+	seen2 := map[string]bool{}
+	for _, p := range lsRepoTree(t, st, "dep2") {
+		seen2[p] = true
+	}
+	for _, f := range manifest {
+		if !seen2[f.Path] {
+			t.Errorf("empty-tier tree must keep every manifest entry, missing %s, tree=%v", f.Path, seen2)
+		}
 	}
 }

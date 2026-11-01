@@ -123,6 +123,18 @@ func (s *Store) MaterializeVia(ctx context.Context, p Presigner, deploymentID, s
 // path -- Coolify pulls a repo whose compose file is the deployable one.
 // staticFallback is off: compose trees never reach the nixpacks heuristic,
 // Coolify builds them as build_pack=dockercompose.
+//
+// Image tier narrows the TREE, not the fetch (image-tier-compose-only-
+// materialize): every manifest object still lands in the store (docker load
+// reads tars from ObjectPath, never from the repo), but tar entries are
+// dropped from BuildRepo's manifest so the commit Coolify clones carries
+// only the compose file and the small files -- a multi-GiB tar in the tree
+// bought nothing but a clone+checkout that times out on tight disks
+// (2026-11-01 vnivni: 4min loadComposeFile failures; compose-only trees
+// deploy in 1-2.5min end to end). The .tar suffix filter is deliberately
+// the same rule loadImageTars uses to FIND the tars, so the two sides
+// cannot drift on what counts as an image tar. Source tier keeps the full
+// manifest in the tree (Coolify builds it on the node).
 func (s *Store) MaterializeCompose(ctx context.Context, p Presigner, deploymentID, sourcePrefix string, manifest []api.File, spec api.ComposeSpec) (string, error) {
 	presign := func(ctx context.Context, shas []string) (*api.PresignResponse, error) {
 		return p.PresignSource(ctx, deploymentID, shas)
@@ -148,7 +160,17 @@ func (s *Store) MaterializeCompose(ctx context.Context, p Presigner, deploymentI
 	if err != nil {
 		return "", fmt.Errorf("materialize %s: %w", deploymentID, err)
 	}
-	return s.BuildRepo(ctx, deploymentID, manifest, map[string][]byte{spec.ComposePath: rewritten}, false)
+	treeManifest := manifest
+	if spec.Tier == "image" {
+		treeManifest = make([]api.File, 0, len(manifest))
+		for _, f := range manifest {
+			if strings.HasSuffix(f.Path, ".tar") {
+				continue
+			}
+			treeManifest = append(treeManifest, f)
+		}
+	}
+	return s.BuildRepo(ctx, deploymentID, treeManifest, map[string][]byte{spec.ComposePath: rewritten}, false)
 }
 
 // FetchMissing ensures every manifest object exists locally, presigning via
