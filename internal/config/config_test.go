@@ -144,4 +144,10 @@ func TestFromEnvDefaults(t *testing.T) {
 	if cfg.CoolifyBaseURL != "http://127.0.0.1:8000" {
 		t.Fatalf("default Coolify base URL wrong: %q", cfg.CoolifyBaseURL)
 	}
+	if cfg.WorkPollIntervalSec != 10 {
+		t.Fatalf("default work poll interval wrong: %d", cfg.WorkPollIntervalSec)
+	}
+	if cfg.WorkPollIdleMaxSec != 60 {
+		t.Fatalf("default idle backoff cap wrong: %d", cfg.WorkPollIdleMaxSec)
+	}
 }

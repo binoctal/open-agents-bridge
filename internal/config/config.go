@@ -88,6 +88,10 @@ type Config struct {
 
 	// WorkPollIdleMaxSec caps the idle backoff of the work poll (see
 	// agent.Agent.WorkIdleMax). <= WorkPollIntervalSec disables it.
+	// Default 60s: an idle node settles at ~1 poll/55s (the effective gap is
+	// cap - base/2, see noteWork), which keeps worst-case pickup latency for a
+	// newly queued deploy at ~1 minute while cutting the account-wide Worker
+	// request burn roughly in half versus a 30s cap.
 	WorkPollIdleMaxSec int
 
 	// CoolifyBaseURL is the Coolify API origin (default http://127.0.0.1:8000 —
@@ -145,7 +149,7 @@ func FromEnv() (*Config, error) {
 		GitPortMax:           envInt("GIT_HTTP_PORT_MAX", 24199),
 		WorkPollIntervalSec:  envInt("WORK_POLL_INTERVAL_SEC", 10),
 		WatermarkIntervalSec: envInt("WATERMARK_INTERVAL_SEC", 60),
-		WorkPollIdleMaxSec:   envInt("WORK_POLL_IDLE_MAX_SEC", 30),
+		WorkPollIdleMaxSec:   envInt("WORK_POLL_IDLE_MAX_SEC", 60),
 
 		CoolifyBaseURL:               strings.TrimRight(envOr("COOLIFY_BASE_URL", "http://127.0.0.1:8000"), "/"),
 		CoolifyAPIToken:              os.Getenv("COOLIFY_API_TOKEN"),
