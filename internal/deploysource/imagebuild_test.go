@@ -116,11 +116,13 @@ func TestBuildArgs(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(`./svc`), &ctxNode); err != nil {
 		t.Fatal(err)
 	}
-	got, err := buildArgs("/repo", "/repo", ctxNode.Content[0])
+	got, err := buildArgs("/repo", "/repo", "arm64", ctxNode.Content[0])
 	if err != nil {
 		t.Fatalf("string form: %v", err)
 	}
-	if len(got) != 2 || got[0] != "build" || got[1] != "/repo/svc" {
+	// fix-image-tier-arch-mismatch: the platform pin rides right after the
+	// verb, before the positional context.
+	if len(got) != 4 || got[0] != "build" || got[1] != "--platform" || got[2] != "linux/arm64" || got[3] != "/repo/svc" {
 		t.Fatalf("string form argv = %v", got)
 	}
 
@@ -134,14 +136,38 @@ args:
   TOKEN:`), &mapNode); err != nil {
 		t.Fatal(err)
 	}
-	got, err = buildArgs("/repo", "/repo/deploy", mapNode.Content[0])
+	got, err = buildArgs("/repo", "/repo/deploy", "arm64", mapNode.Content[0])
 	if err != nil {
 		t.Fatalf("mapping form: %v", err)
 	}
 	joined := strings.Join(got, " ")
-	for _, want := range []string{"build /repo/deploy/apps/web", "-f /repo/deploy/apps/web/Dockerfile.dev", "--target build-stage", "--build-arg NODE_ENV=production", "--build-arg TOKEN"} {
+	for _, want := range []string{
+		"build --platform linux/arm64 /repo/deploy/apps/web",
+		"-f /repo/deploy/apps/web/Dockerfile.dev", "--target build-stage",
+		"--build-arg NODE_ENV=production", "--build-arg TOKEN",
+	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("mapping form argv missing %q: %v", want, got)
+		}
+	}
+}
+
+// The arch whitelist (fix-image-tier-arch-mismatch D3): only amd64|arm64 are
+// protocol spellings. Missing (old API / omitted registry fact) and abnormal
+// values both degrade to amd64 — a bad fact must never inject an arbitrary
+// --platform token into the docker argv.
+func TestNormalizeArch(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"amd64", "amd64"},
+		{"arm64", "arm64"},
+		{"", "amd64"},           // field omitted by the API or old API skew
+		{"riscv64", "amd64"},    // abnormal registry value
+		{"AMD64", "amd64"},      // case-sensitive: no accidental matches
+		{"amd64;rm", "amd64"},   // injection attempt degrades
+	}
+	for _, c := range cases {
+		if got := normalizeArch(c.in); got != c.want {
+			t.Fatalf("normalizeArch(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
@@ -150,14 +176,14 @@ func TestRunImageTierUploadFailFast(t *testing.T) {
 	root := t.TempDir()
 
 	// No convention compose -> loud error before anything docker-shaped.
-	err := runImageTierUpload(nil, "m", "d", root, nil)
+	err := runImageTierUpload(nil, "m", "d", root, "", nil)
 	if err == nil || !strings.Contains(err.Error(), "no convention-path compose") {
 		t.Fatalf("want compose-miss error, got %v", err)
 	}
 
 	// Compose present but no build services -> image tier has nothing to do.
 	writeFile(t, filepath.Join(root, "docker-compose.yml"), "services:\n  db:\n    image: postgres:16\n")
-	err = runImageTierUpload(nil, "m", "d", root, nil)
+	err = runImageTierUpload(nil, "m", "d", root, "", nil)
 	if err == nil || !strings.Contains(err.Error(), "no `build:` services") {
 		t.Fatalf("want no-build-services error, got %v", err)
 	}
@@ -167,7 +193,7 @@ func TestRunImageTierUploadFailFast(t *testing.T) {
 	orig := dockerProbe
 	dockerProbe = func() error { return os.ErrPermission }
 	defer func() { dockerProbe = orig }()
-	err = runImageTierUpload(nil, "m", "d", root, nil)
+	err = runImageTierUpload(nil, "m", "d", root, "", nil)
 	if err == nil || !strings.Contains(err.Error(), "docker not usable") {
 		t.Fatalf("want docker-unusable error, got %v", err)
 	}

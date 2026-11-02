@@ -602,10 +602,16 @@ func (c *Client) UploadPreviewFile(url string, data []byte) error {
 // machine to produce (GET /internal/hosted-deployments/pending). Tier is
 // "image" for image-tier rows (docker-image-deploy-tier) and "" or "source"
 // otherwise; an old API omitting the field keeps today's source-tier path.
+// NodeArch (fix-image-tier-arch-mismatch) is the target node's arch fact
+// from the registry ("amd64"|"arm64"), present only when the platform knows
+// it: an old API, or one omitting the field for a missing/abnormal registry
+// row, leaves it empty and the image tier pins --platform to the amd64
+// default. Old bridges ignore the extra JSON member entirely.
 type HostedDeployWork struct {
 	MissionID    string `json:"missionId"`
 	DeploymentID string `json:"deploymentId"`
 	Tier         string `json:"tier"`
+	NodeArch     string `json:"nodeArch,omitempty"`
 }
 
 // PendingHostedDeploys wraps the pending poll response: the work items plus

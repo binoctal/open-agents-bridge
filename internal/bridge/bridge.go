@@ -4308,7 +4308,7 @@ func (b *Bridge) pollDeploySources() bool {
 			go func(work api.HostedDeployWork) {
 				defer b.deploySourceDone(work.DeploymentID)
 				deploysource.RunImageTierUpload(b.apiClient, work.MissionID, work.DeploymentID,
-					b.worktreeManager.ProjectDir(), b.logInfo)
+					b.worktreeManager.ProjectDir(), work.NodeArch, b.logInfo)
 			}(d)
 			continue
 		}

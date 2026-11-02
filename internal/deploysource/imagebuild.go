@@ -41,25 +41,45 @@ func ImageTag(deploymentID, service string) string {
 	return strings.ToLower("oa-deploy-" + deploymentID + "-" + service)
 }
 
+// normalizeArch (fix-image-tier-arch-mismatch D3) whitelists the only arch
+// spellings the registry contract allows. Anything else — an empty string
+// (old API omitting nodeArch, or the API omitting it for a missing/abnormal
+// registry row) or an unexpected value — degrades to amd64, the current
+// fleet default, so a bad fact can never inject an arbitrary --platform
+// token into the docker argv.
+func normalizeArch(nodeArch string) string {
+	switch nodeArch {
+	case "arm64":
+		return "arm64"
+	default:
+		return "amd64"
+	}
+}
+
 // RunImageTierUpload is the image-tier entry point, dispatched from the same
 // pending poll as RunSourceUpload when the row declares tier=image. Failure
 // semantics match the source tier exactly: log and return — the row stays
 // pending server-side and the next poll retries (docker builds are
 // idempotent; re-running a failed service rebuilds only what changed).
 //
+// nodeArch is the target node's arch fact off the poll item (the registry's
+// hosting_nodes.arch); every build is pinned to it via --platform so an
+// arm64 dev machine (Apple Silicon) produces amd64 images for amd64 nodes
+// under emulation instead of shipping an exec-format-error tar.
+//
 // Old-bridge skew note: a bridge that predates this function never sees
 // Tier on the poll item and runs the source tier instead, so an image row
 // degrades to a node-side build rather than breaking.
-func RunImageTierUpload(client Uploader, missionID, deploymentID, repoRoot string, logf Logf) {
+func RunImageTierUpload(client Uploader, missionID, deploymentID, repoRoot, nodeArch string, logf Logf) {
 	if logf == nil {
 		logf = noopLogf
 	}
-	if err := runImageTierUpload(client, missionID, deploymentID, repoRoot, logf); err != nil {
+	if err := runImageTierUpload(client, missionID, deploymentID, repoRoot, nodeArch, logf); err != nil {
 		logf("[%s] image-tier upload failed for deployment %s: %v", logger.ModDeploy, deploymentID, err)
 	}
 }
 
-func runImageTierUpload(client Uploader, missionID, deploymentID, repoRoot string, logf Logf) error {
+func runImageTierUpload(client Uploader, missionID, deploymentID, repoRoot, nodeArch string, logf Logf) error {
 	composeRel, err := findComposeOnDisk(repoRoot)
 	if err != nil {
 		return err
@@ -95,7 +115,7 @@ func runImageTierUpload(client Uploader, missionID, deploymentID, repoRoot strin
 		if !svc.hasBuild {
 			continue
 		}
-		tarPath, size, err := buildAndSave(repoRoot, composeRel, svc, ImageTag(deploymentID, svc.name), scratch)
+		tarPath, size, err := buildAndSave(repoRoot, composeRel, nodeArch, svc, ImageTag(deploymentID, svc.name), scratch)
 		if err != nil {
 			return err
 		}
@@ -226,8 +246,8 @@ func mappingValue(node *yaml.Node, key string) *yaml.Node {
 // buildAndSave runs docker build for one service (translating the compose
 // `build:` key — string context or {context, dockerfile, args, target}) and
 // docker-saves the tagged image into scratch/<service>.tar, gzip-compressed.
-func buildAndSave(repoRoot, composeRel string, svc composeService, tag, scratch string) (string, int64, error) {
-	args, err := buildArgs(repoRoot, filepath.Dir(filepath.Join(repoRoot, filepath.FromSlash(composeRel))), mappingValue(svc.node, "build"))
+func buildAndSave(repoRoot, composeRel, nodeArch string, svc composeService, tag, scratch string) (string, int64, error) {
+	args, err := buildArgs(repoRoot, filepath.Dir(filepath.Join(repoRoot, filepath.FromSlash(composeRel))), nodeArch, mappingValue(svc.node, "build"))
 	if err != nil {
 		return "", 0, err
 	}
@@ -287,13 +307,18 @@ func saveGzipped(cmd *exec.Cmd, tarPath, svcName string) (int64, error) {
 // buildArgs translates a compose `build:` key into a `docker build` argv
 // prefix. Supported: string form (`build: ./dir`), and mapping form with
 // context / dockerfile / args / target. Sibling keys the compose spec allows
-// (labels, cache_from, platforms...) are ignored for v1 — plain single-arch
-// builds cover the dang-node path (design OQ3: builder and node arch must
-// match anyway, so multi-arch machinery buys nothing yet).
-func buildArgs(repoRoot, composeDir string, build *yaml.Node) ([]string, error) {
+// (labels, cache_from, platforms...) are ignored — the single pinned arch
+// below is the whole platform story for v1. fix-image-tier-arch-mismatch:
+// every build carries `--platform linux/<nodeArch>` (normalized+whitelisted)
+// right after the verb, so the local daemon cross-builds for the target node
+// (an arm64 laptop emits amd64 layers under emulation) instead of baking the
+// builder's own arch — the silent trap was docker load succeeding on the
+// node and compose up dying with exec format error.
+func buildArgs(repoRoot, composeDir, nodeArch string, build *yaml.Node) ([]string, error) {
 	if build == nil {
 		return nil, fmt.Errorf("service has no build key")
 	}
+	platform := "linux/" + normalizeArch(nodeArch)
 	var argv []string
 	switch build.Kind {
 	case yaml.ScalarNode: // build: ./context
@@ -301,7 +326,7 @@ func buildArgs(repoRoot, composeDir string, build *yaml.Node) ([]string, error) 
 		if err != nil {
 			return nil, err
 		}
-		argv = []string{"build", ctx}
+		argv = []string{"build", "--platform", platform, ctx}
 	case yaml.MappingNode:
 		context := "."
 		if n := mappingValue(build, "context"); n != nil {
@@ -310,7 +335,7 @@ func buildArgs(repoRoot, composeDir string, build *yaml.Node) ([]string, error) 
 				return nil, err
 			}
 		}
-		argv = []string{"build", context}
+		argv = []string{"build", "--platform", platform, context}
 		if n := mappingValue(build, "dockerfile"); n != nil {
 			// Compose resolves dockerfile against the CONTEXT, but docker -f
 			// resolves against the daemon's cwd — join the (absolute) context
