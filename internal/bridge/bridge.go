@@ -288,6 +288,13 @@ type Bridge struct {
 	// session work_dir packs, same rationale as deploySourceInFlight.
 	sessionPreviewInFlightMu sync.Mutex
 	sessionPreviewInFlight   map[string]bool
+
+	// local-compose-preview: per-mission in-flight guard for local compose
+	// stacks. Keyed by mission (one row per mission server-side): a compose up
+	// can outlive the 1-minute poll tick, and a second claim of the same
+	// mission would race `up --wait` against `stop`.
+	localPreviewInFlightMu sync.Mutex
+	localPreviewInFlight   map[string]bool
 }
 
 // taskMeta stores metadata for workflow tasks
@@ -4277,6 +4284,29 @@ func (b *Bridge) deploySourceDone(deploymentId string) {
 	delete(b.deploySourceInFlight, deploymentId)
 }
 
+// claimLocalPreview takes the mission's local-preview in-flight slot; false
+// means a compose action is already running for it (same shape as
+// claimDeploySource).
+func (b *Bridge) claimLocalPreview(missionId string) bool {
+	b.localPreviewInFlightMu.Lock()
+	defer b.localPreviewInFlightMu.Unlock()
+	if b.localPreviewInFlight == nil {
+		b.localPreviewInFlight = make(map[string]bool)
+	}
+	if b.localPreviewInFlight[missionId] {
+		return false
+	}
+	b.localPreviewInFlight[missionId] = true
+	return true
+}
+
+// localPreviewDone releases the mission's in-flight slot.
+func (b *Bridge) localPreviewDone(missionId string) {
+	b.localPreviewInFlightMu.Lock()
+	defer b.localPreviewInFlightMu.Unlock()
+	delete(b.localPreviewInFlight, missionId)
+}
+
 // pollDeploySources fetches and dispatches one batch of pending source packs.
 // Every failure (network, per-item pack/upload) is logged and skipped; the
 // row stays pending server-side, so the next tick retries it. The return
@@ -4319,6 +4349,22 @@ func (b *Bridge) pollDeploySources() bool {
 			deploysource.RunSourceUpload(b.apiClient, work.MissionID, work.DeploymentID,
 				b.worktreeManager.ProjectDir(), b.logInfo, resp.Features)
 		}(d)
+	}
+
+	// Local compose previews ride the same response (local-compose-preview
+	// D2): pending starts and stop intents, already filtered to this machine
+	// server-side. Executor-form machines never get here — the features gate
+	// above stopped the loop — but the API omits their rows too.
+	for _, lp := range resp.LocalPreviews {
+		if !b.claimLocalPreview(lp.MissionID) {
+			continue
+		}
+		logf := b.logInfo
+		logf("[%s] local preview: %s requested for mission %s", logger.ModDeploy, lp.Action, lp.MissionID)
+		go func(work api.LocalPreviewWork) {
+			defer b.localPreviewDone(work.MissionID)
+			deploysource.RunLocalPreview(b.apiClient, work, b.worktreeManager.ProjectDir(), b.logInfo)
+		}(lp)
 	}
 	return true
 }

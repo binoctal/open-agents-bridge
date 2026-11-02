@@ -619,9 +619,38 @@ type HostedDeployWork struct {
 // guard -- a new bridge against an old API sees none and must fall back to
 // the single-shot declare instead of half-declaring a chunked tree (which
 // the old API would silently treat as the whole manifest).
+// LocalPreviews (local-compose-preview) rides the same poll: stacks the
+// user asked this machine to compose up/stop LOCALLY. An old API omitting
+// the member reads as none.
 type PendingHostedDeploys struct {
-	Deploys  []HostedDeployWork `json:"deploys"`
-	Features []string           `json:"features"`
+	Deploys       []HostedDeployWork `json:"deploys"`
+	Features      []string           `json:"features"`
+	LocalPreviews []LocalPreviewWork `json:"localPreviews"`
+}
+
+// LocalPreviewWork is one local-preview item: compose the mission's stack up
+// ("start") or down-to-stopped ("stop") on THIS machine and report the
+// outcome. IngressService/IngressPort ride a start item when the mission has
+// a hosted-deployment declaration (design D3: the declared ingress beats
+// compose ps port guessing); they are empty for never-hosted missions.
+type LocalPreviewWork struct {
+	MissionID      string `json:"missionId"`
+	Action         string `json:"action"` // "start" | "stop"
+	IngressService string `json:"ingressService,omitempty"`
+	IngressPort    int    `json:"ingressPort,omitempty"`
+}
+
+// LocalPreviewReport settles one work item. Status is exactly the API's
+// settle vocabulary: "running" (with URLs), "stopped" or "failed". The API
+// rejects anything that is not a legal transition off the row's current
+// state (e.g. running without a preceding user request), which is how a
+// stale bridge is kept from resurrecting state.
+type LocalPreviewReport struct {
+	Status      string   `json:"status"`
+	URLs        []string `json:"urls,omitempty"`
+	ComposePath string   `json:"composePath,omitempty"`
+	FailReason  string   `json:"failReason,omitempty"`
+	FailLogTail string   `json:"failLogTail,omitempty"`
 }
 
 // FeatureSourceUpload (fix-deploy-source-dual-claim): the API grants it only
@@ -643,6 +672,17 @@ func (c *Client) GetPendingHostedDeploys() (*PendingHostedDeploys, error) {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// ReportLocalPreview settles one local-preview work item claimed off the
+// pending poll. Lives under /internal/ with the machine token, same auth and
+// trust as declare-source. A failed send is NOT retried here: the row stays
+// in its pre-report state server-side, the next poll re-offers the item, and
+// re-execution is idempotent (compose up -d / stop on an already-settled
+// stack are no-ops) -- recovery by re-run, not by retry bookkeeping.
+func (c *Client) ReportLocalPreview(missionID string, report LocalPreviewReport) error {
+	_, err := c.request("POST", "/api/missions/internal/"+missionID+"/local-previews/report", report)
+	return err
 }
 
 // DeclareSourceResponse mirrors the platform's declareSource result: presigned
