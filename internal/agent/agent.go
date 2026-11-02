@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -469,11 +470,33 @@ func (a *Agent) handleMaterialize(ctx context.Context, ep APIEndpoint, item api.
 	return a.report(ctx, ep, item.DeploymentID, api.EventMaterialized, port, commit)
 }
 
+// deployImageTag mirrors the bridge's ImageTag three-end contract (bridge
+// internal/deploysource/imagebuild.go): oa-deploy-<deploymentID>-<service>
+// with the whole string folded lowercase — docker rejects uppercase
+// repository names, and deployment ids are mixed-case base62. The hosting
+// side derives the service from the manifest tar filename minus .tar, the
+// same spelling the platform's complete-time validator uses.
+func deployImageTag(deploymentID, service string) string {
+	return strings.ToLower("oa-deploy-" + deploymentID + "-" + service)
+}
+
+// nodeGOArch is the arch validation baseline (fix-image-tier-arch-mismatch
+// D4); a package var only so tests can pin both sides of the comparison.
+var nodeGOArch = runtime.GOARCH
+
 // loadImageTars (docker-image-deploy-tier D6) docker-loads each manifest tar
 // from the object store. Loads are independent of each other -- no ordering
 // -- and the failure carries the failing tar plus docker's output tail, the
 // only place the load error is visible before the compose up fails on a
 // missing local image.
+//
+// fix-image-tier-arch-mismatch D4: right after each load, the image's
+// architecture is inspected and compared against the node's. A mismatch
+// fails materialize HERE with a readable reason -- docker load happily
+// accepts a foreign-arch image and the failure only surfaces at compose up
+// as a bare "exec format error" with no image name. Unknown/empty arch
+// (older daemon output, inspect miss) passes: verification must not become
+// a new failure mode for working packs.
 func (a *Agent) loadImageTars(ctx context.Context, deploymentID string, manifest []api.File) error {
 	for _, f := range manifest {
 		if !strings.HasSuffix(f.Path, ".tar") {
@@ -491,7 +514,33 @@ func (a *Agent) loadImageTars(ctx context.Context, deploymentID string, manifest
 			}
 			return fmt.Errorf("docker load %s: %v: %s", f.Path, err, tail)
 		}
+		if err := a.checkLoadedArch(ctx, deploymentID, f.Path); err != nil {
+			return err
+		}
 		a.logf("deploy %s: loaded image tar %s", deploymentID, f.Path)
+	}
+	return nil
+}
+
+// checkLoadedArch inspects the just-loaded image's Architecture and fails on
+// a foreign-arch load (the exec-format trap). An unreadable answer passes --
+// see loadImageTars.
+func (a *Agent) checkLoadedArch(ctx context.Context, deploymentID, tarPath string) error {
+	service := strings.TrimSuffix(tarPath, ".tar")
+	tag := deployImageTag(deploymentID, service)
+	out, err := a.docker()(ctx, "image", "inspect", tag, "--format", "{{.Architecture}}")
+	if err != nil {
+		a.logf("deploy %s: arch check skipped for %s (inspect failed: %v)", deploymentID, tag, err)
+		return nil
+	}
+	imageArch := strings.ToLower(strings.TrimSpace(out))
+	if imageArch == "" || imageArch == "unknown" {
+		return nil
+	}
+	if imageArch != nodeGOArch {
+		return fmt.Errorf(
+			"image %s is arch %s but this node is %s -- compose up would fail with exec format error; redeploy with an up-to-date bridge (its image-tier build pins --platform linux/%s to the node arch) or build the image for linux/%s",
+			tag, imageArch, nodeGOArch, nodeGOArch, nodeGOArch)
 	}
 	return nil
 }

@@ -38,21 +38,33 @@ func imageManifest() []api.File {
 }
 
 // Loads hit every tar straight from the object store (sha path, no copy) and
-// leave non-tar members alone.
+// leave non-tar members alone. fix-image-tier-arch-mismatch: every load is
+// followed by an arch inspect of the tag derived from the three-end contract.
 func TestLoadImageTars(t *testing.T) {
-	dk := &fakeDocker{}
+	orig := nodeGOArch
+	nodeGOArch = "amd64"
+	defer func() { nodeGOArch = orig }()
+	dk := &fakeDocker{outcomes: map[string]struct {
+		stdout string
+		err    error
+	}{"image inspect": {"amd64\n", nil}}}
 	a := newImageAgent(t, dk, strings.Repeat("1", 64), strings.Repeat("2", 64))
 
 	if err := a.loadImageTars(context.Background(), "D1", imageManifest()); err != nil {
 		t.Fatalf("loadImageTars: %v", err)
 	}
-	if len(dk.calls) != 2 {
-		t.Fatalf("docker calls = %d, want 2 (compose member must not load)", len(dk.calls))
+	if len(dk.calls) != 4 {
+		t.Fatalf("docker calls = %d, want 4 (load+inspect per tar; compose member must not load)", len(dk.calls))
 	}
 	for i, want := range []string{strings.Repeat("1", 64), strings.Repeat("2", 64)} {
-		args := dk.calls[i].args
+		args := dk.calls[i*2].args
 		if strings.Join(args, " ") != "load -i "+filepath.Join(a.Store.Dir, "objects", want) {
-			t.Fatalf("call %d = %v, want load -i <objects/%s…>", i, args, want[:6])
+			t.Fatalf("call %d = %v, want load -i <objects/%s…>", i*2, args, want[:6])
+		}
+	}
+	for i, svc := range []string{"web", "worker"} {
+		if got := strings.Join(dk.calls[i*2+1].args, " "); got != "image inspect oa-deploy-d1-"+svc+" --format {{.Architecture}}" {
+			t.Fatalf("inspect %d = %q, want image inspect oa-deploy-d1-%s --format {{.Architecture}}", i, got, svc)
 		}
 	}
 }
@@ -82,10 +94,72 @@ func TestLoadImageTarsMissingObject(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "worker.tar") || !strings.Contains(err.Error(), "not in store") {
 		t.Fatalf("want missing-object error naming the tar, got %v", err)
 	}
-	// The present tar loaded first; the missing one stops its own load --
-	// per-member store check, never a docker call against a phantom path.
-	if len(dk.calls) != 1 {
-		t.Fatalf("docker calls = %d, want 1 (web.tar only; worker.tar stops at the store check)", len(dk.calls))
+	// The present tar loaded (and passed its arch inspect — empty output is
+	// the pass-through shape); the missing one stops its own load -- per-member
+	// store check, never a docker call against a phantom path.
+	if len(dk.calls) != 2 {
+		t.Fatalf("docker calls = %d, want 2 (web.tar load+inspect; worker.tar stops at the store check)", len(dk.calls))
+	}
+}
+
+// fix-image-tier-arch-mismatch D4: a foreign-arch tar (built on an arm64
+// laptop for an amd64 node — docker load accepts it) must fail materialize
+// right here with the image name, both arches, and the fix pointer, and the
+// remaining tars must never load. Mixed-case deployment ids fold to the
+// lowercase tag contract.
+func TestLoadImageTarsArchMismatch(t *testing.T) {
+	orig := nodeGOArch
+	nodeGOArch = "amd64"
+	defer func() { nodeGOArch = orig }()
+	dk := &fakeDocker{outcomes: map[string]struct {
+		stdout string
+		err    error
+	}{"image inspect": {"arm64\n", nil}}}
+	a := newImageAgent(t, dk, strings.Repeat("1", 64), strings.Repeat("2", 64))
+
+	err := a.loadImageTars(context.Background(), "MlqB", imageManifest())
+	if err == nil {
+		t.Fatal("want arch-mismatch error, got nil")
+	}
+	for _, want := range []string{"oa-deploy-mlqb-web", "arm64", "amd64", "--platform", "exec format error"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("mismatch error missing %q: %v", want, err)
+		}
+	}
+	if len(dk.calls) != 2 {
+		t.Fatalf("docker calls = %d, want 2 (web.tar load+inspect only; worker.tar never touched after the fail)", len(dk.calls))
+	}
+}
+
+// Unknown/empty arch answers pass -- verification must not become a new
+// failure mode for packs an older daemon reports oddly -- and so does an
+// inspect that errors outright (skip, never block).
+func TestLoadImageTarsArchUnknownPasses(t *testing.T) {
+	orig := nodeGOArch
+	nodeGOArch = "amd64"
+	defer func() { nodeGOArch = orig }()
+	for _, tc := range []struct {
+		name string
+		out  string
+		err  error
+	}{
+		{"empty", "", nil},
+		{"unknown", "unknown\n", nil},
+		{"inspect-error", "", errors.New("no such image")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dk := &fakeDocker{outcomes: map[string]struct {
+				stdout string
+				err    error
+			}{"image inspect": {tc.out, tc.err}}}
+			a := newImageAgent(t, dk, strings.Repeat("1", 64), strings.Repeat("2", 64))
+			if err := a.loadImageTars(context.Background(), "D1", imageManifest()); err != nil {
+				t.Fatalf("loadImageTars must pass on %s: %v", tc.name, err)
+			}
+			if len(dk.calls) != 4 {
+				t.Fatalf("docker calls = %d, want 4 (both tars load+inspect)", len(dk.calls))
+			}
+		})
 	}
 }
 
