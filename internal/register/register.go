@@ -141,10 +141,27 @@ func Run(ctx context.Context, opts Options) error {
 	if err := writeCredentials(opts.CredentialsOut, creds); err != nil {
 		return fmt.Errorf("registration succeeded but persisting credentials failed: %w", err)
 	}
+	// The node-id marker (0644, next to the 0600 credentials) is how a
+	// same-host bridge recognizes this machine's node for the local tier
+	// (byo-hosting-node D3): root installs leave node.json unreadable to the
+	// user's bridge, and the node id is public material anyway — it rides
+	// every poll. Failure is non-fatal: local-tier detection degrades to the
+	// R2 path, and register still succeeded.
+	if err := writeNodeIDMarker(opts.CredentialsOut, creds.NodeID); err != nil {
+		logf("warning: could not write the node-id marker (%v); same-machine local deploys will fall back to R2 uploads", err)
+	}
 	logf("node %s registered (verified public IP %s)", confirm.NodeID, confirm.PublicIP)
 	logf("credentials written to %s (0600)", opts.CredentialsOut)
 	logf("next: start the agent with HOSTING_NODE_CREDENTIALS=%s (then start Caddy)", opts.CredentialsOut)
 	return nil
+}
+
+// NodeIDMarkerPath is where the world-readable node id lands (sibling of the
+// credentials file). The bridge reads exactly this name.
+const NodeIDMarkerPath = "node-id"
+
+func writeNodeIDMarker(credsPath, nodeID string) error {
+	return os.WriteFile(filepath.Join(filepath.Dir(credsPath), NodeIDMarkerPath), []byte(nodeID+"\n"), 0o644)
 }
 
 // probeServer is one bound probe listener.

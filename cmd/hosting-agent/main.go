@@ -220,6 +220,10 @@ func runUserNode(cfg *config.Config, logf agent.Logf) error {
 	if err := os.MkdirAll(cfg.ScratchRoot, 0o755); err != nil {
 		return fmt.Errorf("prepare scratch root %s: %w", cfg.ScratchRoot, err)
 	}
+	// {ScratchRoot}/bridge is the SHARED staging dir the user's bridge writes
+	// local-tier tar exports into. Failure is loud but non-fatal: local
+	// declares degrade to "path not allowed" until the operator fixes it.
+	ensureBridgeExportDir(cfg.ScratchRoot, logf)
 
 	// Ask forwarder first (fail loud at boot if the port is taken): Caddy's
 	// on_demand_tls handshake path depends on it.
@@ -302,4 +306,26 @@ func ensureNodeCaddyfile(path, domainSuffix, adminAddr, askAddr string, logf age
 	}
 	logf("wrote Caddyfile scaffold %s (admin %s, ask %s, on-demand TLS for *.%s); (re)start or reload caddy to apply", path, adminAddr, askAddr, domainSuffix)
 	return nil
+}
+
+// ensureBridgeExportDir prepares {scratchRoot}/bridge, the SHARED staging
+// directory the user's bridge writes local-tier tar exports into
+// (byo-hosting-node D3). The bridge runs as the desktop user while this
+// daemon usually runs as root: the scratch root itself stays 0755 and the
+// staging leaf is world-writable, so the bridge can create its
+// per-deployment dirs; the security boundary that matters is the store's
+// prefix+sha check on every import, not this directory mode. Failure is
+// warned, not fatal — local declares then degrade to "path not allowed"
+// until the operator fixes the permissions.
+func ensureBridgeExportDir(scratchRoot string, logf agent.Logf) {
+	dir := filepath.Join(scratchRoot, "bridge")
+	if err := os.MkdirAll(dir, 0o777); err != nil {
+		logf("warning: could not prepare the bridge export dir %s (%v); same-machine local declares will fail", dir, err)
+		return
+	}
+	// MkdirAll applies umask; chmod the leaf so a stricter umask cannot
+	// silently keep the bridge out.
+	if err := os.Chmod(dir, 0o777); err != nil {
+		logf("warning: could not open the bridge export dir %s for writing (%v)", dir, err)
+	}
 }

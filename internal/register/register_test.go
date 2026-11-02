@@ -148,6 +148,21 @@ func TestRunSuccessPersistsCredentials(t *testing.T) {
 	if di, err := os.Stat(filepath.Dir(out)); err == nil && di.Mode().Perm() != 0o700 {
 		t.Errorf("credentials dir mode = %o, want 700", di.Mode().Perm())
 	}
+	// The node-id marker (same-machine local tier, byo-hosting-node D3): a
+	// WORLD-READABLE sibling of the 0600 credentials, carrying only the node
+	// id — the user's bridge cannot read root's node.json but must still
+	// recognize this machine's rows.
+	marker := filepath.Join(filepath.Dir(out), NodeIDMarkerPath)
+	raw, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("node-id marker missing: %v", err)
+	}
+	if id := strings.TrimSpace(string(raw)); id != "nd_1" {
+		t.Errorf("marker content = %q, want the node id nd_1", id)
+	}
+	if mi, err := os.Stat(marker); err != nil || mi.Mode().Perm() != 0o644 {
+		t.Errorf("marker must be 0644 (public material), got %v %v", mi, err)
+	}
 }
 
 // Missing arguments fail before any network I/O, naming the flag to set.

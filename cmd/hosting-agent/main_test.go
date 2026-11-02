@@ -79,3 +79,39 @@ func sprintf(format string, args ...any) string {
 	}
 	return fmt.Sprintf(format, args...)
 }
+
+// The shared staging leaf must end up world-writable however it started: the
+// bridge (desktop user) exports local-tier tars under it while this daemon
+// usually runs as root — a stricter umask or a pre-existing 0755 dir must not
+// silently keep the bridge out.
+func TestEnsureBridgeExportDir(t *testing.T) {
+	root := t.TempDir()
+	var logs []string
+	logf := func(format string, args ...any) { logs = append(logs, sprintf(format, args...)) }
+
+	ensureBridgeExportDir(root, logf)
+	dir := filepath.Join(root, "bridge")
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("export dir missing: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o777 {
+		t.Errorf("fresh export dir mode = %o, want 777", got)
+	}
+
+	// A pre-existing 0755 dir (root-owned boot, manual mkdir) is re-opened.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ensureBridgeExportDir(root, logf)
+	info, err = os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o777 {
+		t.Errorf("re-opened export dir mode = %o, want 777", got)
+	}
+	if len(logs) != 0 {
+		t.Errorf("a healthy export dir must not warn, got %v", logs)
+	}
+}
