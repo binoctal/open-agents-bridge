@@ -29,6 +29,10 @@ type ManifestFile struct {
 	// compressed (image-tier-gzip-and-default D2). Empty = plain bytes.
 	// Self-description only: loaders sniff content, nothing branches on it.
 	Compression string
+	// LocalPath marks a same-machine declare-only entry (byo-hosting-node
+	// D3): the blob stays on this host and the hosting node imports it from
+	// this absolute path instead of R2. Empty = normal upload.
+	LocalPath string
 }
 
 // BuildManifest walks outputDir recursively and returns a sha256 manifest of

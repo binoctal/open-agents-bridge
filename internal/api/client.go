@@ -408,6 +408,12 @@ type PreviewFile struct {
 	// omitted = plain bytes. The agent ignores it (docker load sniffs
 	// content); the API validates the enum and passes it through.
 	Compression string `json:"compression,omitempty"`
+	// LocalPath is the same-machine declare-only mode (byo-hosting-node D3):
+	// non-empty means the blob NEVER uploads to R2 — the hosting node on
+	// this same host imports it from that absolute path (under the node's
+	// scratch root, sha-verified there). Only BYO-placed rows may carry it;
+	// the API rejects the mode anywhere else.
+	LocalPath string `json:"localPath,omitempty"`
 }
 
 // PreviewUpload is one presigned PUT target the platform wants filled in.
@@ -606,12 +612,17 @@ func (c *Client) UploadPreviewFile(url string, data []byte) error {
 // from the registry ("amd64"|"arm64"), present only when the platform knows
 // it: an old API, or one omitting the field for a missing/abnormal registry
 // row, leaves it empty and the image tier pins --platform to the amd64
-// default. Old bridges ignore the extra JSON member entirely.
+// default. NodeID (byo-hosting-node D3) is the row's target hosting node —
+// when it matches THIS machine's registered node id, the image tier takes
+// the local declare-only path (tars never leave the device); absent on old
+// APIs and NULL legacy rows, which both keep the R2 path unchanged. Old
+// bridges ignore the extra JSON members entirely.
 type HostedDeployWork struct {
 	MissionID    string `json:"missionId"`
 	DeploymentID string `json:"deploymentId"`
 	Tier         string `json:"tier"`
 	NodeArch     string `json:"nodeArch,omitempty"`
+	NodeID       string `json:"nodeId,omitempty"`
 }
 
 // PendingHostedDeploys wraps the pending poll response: the work items plus

@@ -253,7 +253,7 @@ func packPaths(root string, paths []string) (*PackResult, error) {
 func toAPIFiles(files []preview.ManifestFile) []api.PreviewFile {
 	out := make([]api.PreviewFile, 0, len(files))
 	for _, f := range files {
-		out = append(out, api.PreviewFile{Path: f.Path, SHA256: f.SHA256, Size: f.Size, Compression: f.Compression})
+		out = append(out, api.PreviewFile{Path: f.Path, SHA256: f.SHA256, Size: f.Size, Compression: f.Compression, LocalPath: f.LocalPath})
 	}
 	return out
 }
