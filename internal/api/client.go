@@ -83,7 +83,7 @@ type File struct {
 	// LocalPath is the same-machine declare-only mode (byo-hosting-node D3):
 	// when the bridge runs on THIS machine it declares the object by its
 	// scratch path instead of uploading to R2 -- the tar never leaves the
-	// device. The agent imports it into the content store (after the
+	// machine. The agent imports it into the content store (after the
 	// scratch-prefix escape check + sha verification) instead of presigning.
 	// Empty on cross-machine entries: the object rides R2 as always.
 	LocalPath string `json:"localPath,omitempty"`
