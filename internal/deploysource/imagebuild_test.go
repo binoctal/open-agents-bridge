@@ -1,7 +1,11 @@
 package deploysource
 
 import (
+	"bytes"
+	"compress/gzip"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -184,4 +188,49 @@ func writeFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestSaveGzipped (image-tier-gzip-and-default 1.2): the pipe contract —
+// gzip magic at the head of the file, gunzip round-trips the payload, and
+// the returned size is the compressed bytes on disk (what sha256/size in the
+// manifest must describe). Uses a plain printf command so no docker daemon
+// is needed.
+func TestSaveGzipped(t *testing.T) {
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "web.tar")
+	payload := strings.Repeat("docker-layer-bytes-", 4096) // ~74KB, compresses well
+	cmd := exec.Command("sh", "-c", "printf %s "+shQuote(payload))
+	size, err := saveGzipped(cmd, tarPath, "web")
+	if err != nil {
+		t.Fatalf("saveGzipped: %v", err)
+	}
+	raw, err := os.ReadFile(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := raw[0]; got != 0x1f {
+		t.Fatalf("gzip magic byte0 = %#x, want 0x1f", got)
+	}
+	if got := raw[1]; got != 0x8b {
+		t.Fatalf("gzip magic byte1 = %#x, want 0x8b", got)
+	}
+	if int64(len(raw)) != size {
+		t.Fatalf("returned size %d != on-disk %d", size, len(raw))
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("not a gzip stream: %v", err)
+	}
+	round, err := io.ReadAll(gz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(round) != payload {
+		t.Fatalf("round-trip mismatch: %d bytes vs %d", len(round), len(payload))
+	}
+}
+
+// shQuote single-quotes s for the sh -c printf argument.
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

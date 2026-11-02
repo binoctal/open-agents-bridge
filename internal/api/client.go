@@ -404,6 +404,10 @@ type PreviewFile struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`
 	Size   int64  `json:"size"`
+	// Compression labels the payload codec (image-tier-gzip-and-default D2);
+	// omitted = plain bytes. The agent ignores it (docker load sniffs
+	// content); the API validates the enum and passes it through.
+	Compression string `json:"compression,omitempty"`
 }
 
 // PreviewUpload is one presigned PUT target the platform wants filled in.

@@ -253,10 +253,15 @@ func packPaths(root string, paths []string) (*PackResult, error) {
 func toAPIFiles(files []preview.ManifestFile) []api.PreviewFile {
 	out := make([]api.PreviewFile, 0, len(files))
 	for _, f := range files {
-		out = append(out, api.PreviewFile{Path: f.Path, SHA256: f.SHA256, Size: f.Size})
+		out = append(out, api.PreviewFile{Path: f.Path, SHA256: f.SHA256, Size: f.Size, Compression: f.Compression})
 	}
 	return out
 }
+
+// CompressionGzip labels gzip-compressed manifest payloads (the image tier's
+// docker-save tars). One constant so bridge/agent/API can never drift on the
+// spelling.
+const CompressionGzip = "gzip"
 
 // uploadAll PUTs every presigned upload with bounded parallelism — same shape
 // and rationale as preview.uploadAll (a source tree carries thousands of

@@ -8,6 +8,7 @@ package deploysource
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -102,8 +103,8 @@ func runImageTierUpload(client Uploader, missionID, deploymentID, repoRoot strin
 			return fmt.Errorf("tar for service %s is %d bytes, over the %d byte single-PUT ceiling; reduce the image or use the source tier",
 				svc.name, size, MaxImageTarBytes)
 		}
-		files = append(files, preview.ManifestFile{Path: svc.name + ".tar", SHA256: fileSHA256(tarPath), Size: size})
-		logf("[%s] built service %s for deployment %s: tar %d bytes", logger.ModDeploy, svc.name, deploymentID, size)
+		files = append(files, preview.ManifestFile{Path: svc.name + ".tar", SHA256: fileSHA256(tarPath), Size: size, Compression: CompressionGzip})
+		logf("[%s] built service %s for deployment %s: gz tar %d bytes", logger.ModDeploy, svc.name, deploymentID, size)
 	}
 
 	rewritten, err := os.Create(filepath.Join(scratch, filepath.Base(composeRel)))
@@ -224,7 +225,7 @@ func mappingValue(node *yaml.Node, key string) *yaml.Node {
 
 // buildAndSave runs docker build for one service (translating the compose
 // `build:` key — string context or {context, dockerfile, args, target}) and
-// docker-saves the tagged image into scratch/<service>.tar.
+// docker-saves the tagged image into scratch/<service>.tar, gzip-compressed.
 func buildAndSave(repoRoot, composeRel string, svc composeService, tag, scratch string) (string, int64, error) {
 	args, err := buildArgs(repoRoot, filepath.Dir(filepath.Join(repoRoot, filepath.FromSlash(composeRel))), mappingValue(svc.node, "build"))
 	if err != nil {
@@ -236,11 +237,51 @@ func buildAndSave(repoRoot, composeRel string, svc composeService, tag, scratch 
 		return "", 0, fmt.Errorf("docker build %s: %v: %s", svc.name, err, tailOutput(out, 400))
 	}
 	tarPath := filepath.Join(scratch, svc.name+".tar")
-	save := exec.Command("docker", "save", "-o", tarPath, tag)
-	if out, err := save.CombinedOutput(); err != nil {
-		return "", 0, fmt.Errorf("docker save %s: %v: %s", svc.name, err, tailOutput(out, 400))
+	save := exec.Command("docker", "save", tag)
+	size, err := saveGzipped(save, tarPath, svc.name)
+	if err != nil {
+		return "", 0, err
 	}
-	return tarPath, fileSize(tarPath), nil
+	return tarPath, size, nil
+}
+
+// saveGzipped streams cmd's stdout through gzip (BestSpeed) into tarPath and
+// returns the compressed size (image-tier-gzip-and-default D1/D3). The PATH
+// keeps the .tar suffix — the three-end contract keys off it — while the
+// bytes compress; docker load -i sniffs the gzip magic by content, so every
+// deployed agent loads these unchanged and old-bridge plain tars stay legal
+// forever. BestSpeed: docker layers are mostly pre-compressed binaries, so
+// higher levels buy <10% ratio at ~3x the wall clock. Split from
+// buildAndSave so the pipe contract (gzip magic on disk, size = compressed
+// bytes) is unit-testable without a docker daemon.
+func saveGzipped(cmd *exec.Cmd, tarPath, svcName string) (int64, error) {
+	f, err := os.Create(tarPath)
+	if err != nil {
+		return 0, fmt.Errorf("docker save %s: %v", svcName, err)
+	}
+	gz, err := gzip.NewWriterLevel(f, gzip.BestSpeed)
+	if err != nil {
+		f.Close()
+		return 0, fmt.Errorf("docker save %s: %v", svcName, err)
+	}
+	cmd.Stdout = gz
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	runErr := cmd.Run()
+	// Close in pipe order so every buffered byte lands even on failure; the
+	// partial file only matters for the error tail.
+	gzErr := gz.Close()
+	fErr := f.Close()
+	if runErr != nil {
+		return 0, fmt.Errorf("docker save %s: %v: %s", svcName, runErr, tailOutput(errBuf.Bytes(), 400))
+	}
+	if gzErr != nil {
+		return 0, fmt.Errorf("docker save %s: gzip: %v", svcName, gzErr)
+	}
+	if fErr != nil {
+		return 0, fmt.Errorf("docker save %s: %v", svcName, fErr)
+	}
+	return fileSize(tarPath), nil
 }
 
 // buildArgs translates a compose `build:` key into a `docker build` argv

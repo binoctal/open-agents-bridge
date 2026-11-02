@@ -25,6 +25,10 @@ type ManifestFile struct {
 	Path   string
 	SHA256 string
 	Size   int64
+	// Compression names the payload codec when the bytes on the wire are
+	// compressed (image-tier-gzip-and-default D2). Empty = plain bytes.
+	// Self-description only: loaders sniff content, nothing branches on it.
+	Compression string
 }
 
 // BuildManifest walks outputDir recursively and returns a sha256 manifest of
