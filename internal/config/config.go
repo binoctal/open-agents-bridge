@@ -13,6 +13,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/binoctal/open-agents/hosting-agent/internal/register"
 )
 
 // Endpoint is one API environment the agent serves. The single ECS node hosts
@@ -130,6 +132,27 @@ type Config struct {
 	// (default 30). Separate from the runtime tier's knob so one tier can
 	// tighten without moving the other.
 	SessionPreviewIdleTTLMinutes int
+
+	// NodeCreds is set when the agent runs in USER-NODE mode (byo-hosting-node
+	// D1): credentials written by `register --code`, one endpoint (the
+	// platform the code was redeemed against), no Coolify, no shared secret.
+	// Nil = platform mode (the ECS agent, unchanged).
+	NodeCreds *register.Credentials
+
+	// ScratchRoot is the only directory tree same-machine declare-only
+	// manifest entries (localPath) may reference (byo-hosting-node D3). Every
+	// local path is checked against escape BEFORE any read; entries outside
+	// refuse the materialize.
+	ScratchRoot string
+
+	// AskListenAddr is the localhost listener Caddy's on_demand_tls ask
+	// callback hits (user-node mode only; empty = "127.0.0.1:20190").
+	AskListenAddr string
+
+	// CaddyfilePath is where the user-node mode writes its Caddy scaffold
+	// (on-demand TLS + ask callback + wildcard catch-all) for the operator's
+	// systemd caddy unit to run. Empty = "/etc/hosting-agent/Caddyfile".
+	CaddyfilePath string
 }
 
 // FromEnv builds a Config from environment variables, applying defaults and
@@ -162,6 +185,27 @@ func FromEnv() (*Config, error) {
 		RuntimePreviewLogDir:         envOr("RUNTIME_PREVIEW_LOG_DIR", "/var/lib/caddy/oa-runtime"),
 
 		SessionPreviewIdleTTLMinutes: envInt("SESSION_PREVIEW_IDLE_TTL_MINUTES", 30),
+
+		ScratchRoot:   envOr("HOSTING_AGENT_SCRATCH_ROOT", "/var/lib/hosting-agent/scratch"),
+		AskListenAddr: envOr("HOSTING_AGENT_ASK_ADDR", "127.0.0.1:20190"),
+		CaddyfilePath: envOr("HOSTING_AGENT_CADDYFILE", "/etc/hosting-agent/Caddyfile"),
+	}
+
+	// User-node mode (byo-hosting-node D1): the credentials file IS the
+	// configuration -- one platform, node-credential auth, no Coolify, no
+	// endpoint list. Checked before resolveEndpoints so a user machine needs
+	// none of the platform's mandatory env.
+	if p := strings.TrimSpace(os.Getenv("HOSTING_NODE_CREDENTIALS")); p != "" {
+		creds, err := register.LoadCredentials(p)
+		if err != nil {
+			return nil, err
+		}
+		c.NodeCreds = creds
+		c.AgentID = creds.NodeID
+		c.Endpoints = []Endpoint{{BaseURL: creds.APIBaseURL}}
+		// Caddy on the user node is agent-managed on-demand TLS (D2); the
+		// admin endpoint default is the same localhost:2019 convention.
+		return c, nil
 	}
 
 	endpoints, err := resolveEndpoints(c.CoolifyProjectUUID)

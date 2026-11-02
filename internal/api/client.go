@@ -29,14 +29,27 @@ import (
 )
 
 // Client talks to the API worker's /internal/hosting-agent/* endpoints.
+//
+// Two credential modes (byo-hosting-node D1): the platform shared secret
+// (X-Internal-Secret, ECS agents) or per-node registry credentials
+// (X-Node-Id/X-Node-Secret, user machines -- the shared secret never leaves
+// the platform). Exactly one mode is active per client; NodeID != "" selects
+// the node mode.
 type Client struct {
 	BaseURL        string
 	AgentID        string
 	InternalSecret string
-	HTTP           *http.Client
+
+	// NodeID/NodeSecret are the BYO registry credentials (NewNode). When set,
+	// every request carries X-Node-Id/X-Node-Secret and the API pins the
+	// caller to that node's owner (defense in depth on both sides).
+	NodeID     string
+	NodeSecret string
+
+	HTTP *http.Client
 }
 
-// New builds a client with sane timeouts.
+// New builds a client with sane timeouts (platform shared-secret mode).
 func New(baseURL, agentID, internalSecret string) *Client {
 	return &Client{
 		BaseURL:        baseURL,
@@ -46,12 +59,34 @@ func New(baseURL, agentID, internalSecret string) *Client {
 	}
 }
 
+// NewNode builds a node-credential client (byo-hosting-node D1): the agentID
+// IS the registry node id -- the API overrides any ?agent_id=/body claim with
+// the credential identity anyway, but keeping them equal means platform-mode
+// bookkeeping (watermark rows, work keying) reads consistently in logs.
+func NewNode(baseURL, nodeID, nodeSecret string) *Client {
+	return &Client{
+		BaseURL:    baseURL,
+		AgentID:    nodeID,
+		NodeID:     nodeID,
+		NodeSecret: nodeSecret,
+		HTTP:       &http.Client{Timeout: 30 * time.Second},
+	}
+}
+
 // File mirrors the source manifest entry the bridge declared (same shape the
 // API validates in hosted-deployments.ts).
 type File struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`
 	Size   int64  `json:"size"`
+
+	// LocalPath is the same-machine declare-only mode (byo-hosting-node D3):
+	// when the bridge runs on THIS machine it declares the object by its
+	// scratch path instead of uploading to R2 -- the tar never leaves the
+	// device. The agent imports it into the content store (after the
+	// scratch-prefix escape check + sha verification) instead of presigning.
+	// Empty on cross-machine entries: the object rides R2 as always.
+	LocalPath string `json:"localPath,omitempty"`
 }
 
 // Work actions. materialize carries the manifest; register_route carries the
@@ -562,7 +597,7 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("X-Internal-Secret", c.InternalSecret)
+	c.auth(req)
 	return c.do(ctx, req, path, out)
 }
 
@@ -576,8 +611,36 @@ func (c *Client) postJSON(ctx context.Context, path string, payload any, out any
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Secret", c.InternalSecret)
+	c.auth(req)
 	return c.do(ctx, req, path, out)
+}
+
+// postAnonJSON is postJSON with NO credential header -- the register
+// handshake only (the install code is itself the bearer secret, D1; the agent
+// has no credentials yet by definition).
+func (c *Client) postAnonJSON(ctx context.Context, path string, payload any, out any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal %s payload: %w", path, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.do(ctx, req, path, out)
+}
+
+// auth stamps the credential headers for the client's mode (exactly one of
+// the two -- a node client must never accidentally fall back to the shared
+// secret, and the platform client has no node secret to send).
+func (c *Client) auth(req *http.Request) {
+	if c.NodeID != "" {
+		req.Header.Set("X-Node-Id", c.NodeID)
+		req.Header.Set("X-Node-Secret", c.NodeSecret)
+		return
+	}
+	req.Header.Set("X-Internal-Secret", c.InternalSecret)
 }
 
 func (c *Client) do(ctx context.Context, req *http.Request, path string, out any) error {
@@ -593,7 +656,7 @@ func (c *Client) do(ctx context.Context, req *http.Request, path string, out any
 		return &UnauthorizedError{Path: path, Body: string(raw)}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &HTTPError{Path: path, Status: resp.StatusCode, Body: string(raw)}
+		return &HTTPError{Path: path, Status: resp.StatusCode, Body: decodeErrorEnvelope(raw)}
 	}
 	if out != nil {
 		if err := json.Unmarshal(raw, out); err != nil {
@@ -601,6 +664,27 @@ func (c *Client) do(ctx context.Context, req *http.Request, path string, out any
 		}
 	}
 	return nil
+}
+
+// decodeErrorEnvelope extracts the API worker's error envelope
+// ({error: {code, message, details?}}) into a one-line readable string. The
+// register handshake in particular owes the operator the platform's own
+// failure reason (probe results, code expiry) -- a bare "400" would force
+// them to the server logs. Non-envelope bodies pass through verbatim.
+func decodeErrorEnvelope(raw []byte) string {
+	var env struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err == nil && (env.Error.Code != "" || env.Error.Message != "") {
+		if env.Error.Code != "" && env.Error.Message != "" {
+			return fmt.Sprintf("%s: %s", env.Error.Code, env.Error.Message)
+		}
+		return env.Error.Code + env.Error.Message
+	}
+	return string(raw)
 }
 
 // UnauthorizedError means the internal secret was rejected.
@@ -625,6 +709,84 @@ type HTTPError struct {
 
 func (e *HTTPError) Error() string {
 	return fmt.Sprintf("%d from %s: %s", e.Status, e.Path, e.Body)
+}
+
+// --- Register handshake + ask (byo-hosting-node D1/D2) --------------------------
+//
+// These methods back the `hosting-agent register --code` subcommand and the
+// user node's Caddy on-demand-TLS ask forwarding. Wire contract pinned in
+// apps/api/src/routes/hosting-nodes.ts (redeem/confirm) and
+// routes/hosting-agent.ts (/ask) -- keep both sides in lockstep.
+
+// RedeemResult is POST /internal/hosting-node-register/redeem's answer.
+type RedeemResult struct {
+	Nonce           string `json:"nonce"`
+	ProbePath       string `json:"probePath"`
+	DeadlineSeconds int    `json:"deadlineSeconds"`
+}
+
+// RedeemInstallCode exchanges the one-time install code for a probe nonce the
+// agent must answer with on 80/443 (unauthenticated: the code IS the bearer
+// secret). The code stays usable until confirm succeeds or the TTL runs out,
+// so a failed probe can retry the same code after fixing the network.
+func (c *Client) RedeemInstallCode(ctx context.Context, code string) (*RedeemResult, error) {
+	var out RedeemResult
+	if err := c.postAnonJSON(ctx, "/internal/hosting-node-register/redeem", map[string]any{"code": code}, &out); err != nil {
+		return nil, err
+	}
+	if out.Nonce == "" || out.ProbePath == "" {
+		return nil, fmt.Errorf("redeem response missing nonce/probePath")
+	}
+	return &out, nil
+}
+
+// RegistrationConfirm is POST /internal/hosting-node-register/confirm's
+// answer: the credentials this process must persist (0600) and the public IP
+// the platform actually verified -- never a bare self-report.
+type RegistrationConfirm struct {
+	NodeID     string `json:"nodeId"`
+	NodeSecret string `json:"nodeSecret"`
+	PublicIP   string `json:"publicIp"`
+}
+
+// ConfirmRegistration asks the platform to probe this machine (the nonce
+// listener must already be answering on 80/443) and issue credentials. arch
+// is runtime.GOARCH ("amd64"/"arm64"); publicIP is the self-detected egress
+// IPv4, a fallback for the platform's own connection-IP observation.
+func (c *Client) ConfirmRegistration(ctx context.Context, code, publicIP, arch string) (*RegistrationConfirm, error) {
+	var out RegistrationConfirm
+	payload := map[string]any{"code": code, "arch": arch}
+	if publicIP != "" {
+		payload["publicIp"] = publicIP
+	}
+	if err := c.postAnonJSON(ctx, "/internal/hosting-node-register/confirm", payload, &out); err != nil {
+		return nil, err
+	}
+	if out.NodeID == "" || out.NodeSecret == "" {
+		return nil, fmt.Errorf("confirm response missing credentials")
+	}
+	return &out, nil
+}
+
+// Ask forwards one on-demand-TLS authorization question for domain (design
+// D2): true = the platform confirms a READY deployment with that label sits
+// on this node, Caddy may issue the cert. false covers every refusal (403,
+// network error) -- on a refusal the handshake MUST fail closed, never hang
+// or fall through to "allowed".
+func (c *Client) Ask(ctx context.Context, domain string) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.BaseURL+"/internal/hosting-agent/ask?domain="+url.QueryEscape(domain), nil)
+	if err != nil {
+		return false
+	}
+	c.auth(req)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	return resp.StatusCode == http.StatusOK
 }
 
 // Retry wraps fn with exponential backoff + jitter (node-runner pattern). It

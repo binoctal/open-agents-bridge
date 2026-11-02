@@ -44,6 +44,13 @@ type Store struct {
 	Dir       string
 	Presigner Presigner
 	HTTP      *http.Client
+
+	// ScratchRoot gates same-machine declare-only manifest entries
+	// (byo-hosting-node D3): a localPath outside this prefix refuses the
+	// materialize (path-escape guard). Empty = localPath entries refuse --
+	// the platform node never configures one, so a stray local manifest
+	// there fails closed instead of reading an arbitrary path.
+	ScratchRoot string
 }
 
 // New builds a store rooted at dir.
@@ -69,13 +76,22 @@ func (s *Store) RepoPath(deploymentID string) string {
 	return filepath.Join(s.Dir, "repos", deploymentID+".git")
 }
 
-// Remove drops the deployment's repo (delete-path cleanup; the object store
-// is shared and stays).
+// Remove drops the deployment's repo and worktree (delete-path cleanup; the
+// object store is shared and stays).
 func (s *Store) Remove(deploymentID string) error {
 	if err := os.RemoveAll(s.RepoPath(deploymentID)); err != nil {
 		return err
 	}
-	return os.RemoveAll(s.RepoPath(deploymentID) + ".swap")
+	if err := os.RemoveAll(s.RepoPath(deploymentID) + ".swap"); err != nil {
+		return err
+	}
+	return os.RemoveAll(s.WorktreePath(deploymentID))
+}
+
+// WorktreePath is the plain (non-git) tree a user node composes up from
+// (byo-hosting-node D3: no Coolify pulls, the agent itself runs compose).
+func (s *Store) WorktreePath(deploymentID string) string {
+	return filepath.Join(s.Dir, "worktrees", deploymentID)
 }
 
 // fixedCommitDate pins author/committer timestamps so the same manifest
@@ -185,6 +201,17 @@ func (s *Store) FetchMissing(ctx context.Context, manifest []api.File, fn presig
 	if len(manifest) == 0 {
 		return fmt.Errorf("empty manifest")
 	}
+	// Declare-only entries first (byo-hosting-node D3): local objects are
+	// imported into the content store (escape-checked + sha-verified) BEFORE
+	// the missing scan, so the presign path never sees them -- the platform
+	// holds no blob for a local entry and a presign download would 404.
+	for _, f := range manifest {
+		if f.LocalPath != "" && !s.hasObject(f.SHA256) {
+			if err := s.importLocalObject(f); err != nil {
+				return err
+			}
+		}
+	}
 	const attempts = 3
 	var lastErr error
 	for try := 0; try < attempts; try++ {
@@ -210,6 +237,97 @@ func (s *Store) FetchMissing(ctx context.Context, manifest []api.File, fn presig
 		}
 	}
 	return lastErr
+}
+
+// importLocalObject lands one declare-only entry in the content store:
+// scratch-prefix escape check, sha256 verification against the declared
+// hash, then hardlink (or copy) into objects/{sha}. The escape check is the
+// agent-side half of the local-manifest protocol's two-layer guard (design
+// D3 risk table): the platform could be coerced into declaring an arbitrary
+// path, and this is where the agent refuses to read it.
+func (s *Store) importLocalObject(f api.File) error {
+	if err := s.checkLocalPath(f.LocalPath); err != nil {
+		return fmt.Errorf("local object %s: %w", f.Path, err)
+	}
+	h := sha256.New()
+	in, err := os.Open(f.LocalPath)
+	if err != nil {
+		return fmt.Errorf("local object %s: open: %w", f.Path, err)
+	}
+	if _, err := io.Copy(h, in); err != nil {
+		in.Close()
+		return fmt.Errorf("local object %s: read: %w", f.Path, err)
+	}
+	in.Close()
+	if got := hex.EncodeToString(h.Sum(nil)); got != f.SHA256 {
+		return fmt.Errorf("local object %s: sha256 mismatch (declared %s, file hashes %s) -- the declared scratch file changed or the declaration is stale",
+			f.Path, f.SHA256[:12], got[:12])
+	}
+	if err := os.MkdirAll(filepath.Dir(s.objectPath(f.SHA256)), 0o755); err != nil {
+		return err
+	}
+	return hardlinkOrCopy(f.LocalPath, s.objectPath(f.SHA256))
+}
+
+// checkLocalPath enforces the scratch-root prefix (path-escape guard). Both
+// the lexical path AND its symlink-resolved form must sit under the resolved
+// root: a symlink planted inside the scratch tree must not smuggle a read
+// from outside it. Errors are worded for the deployment row's failure detail
+// (user-visible, byo-hosting-node spec: 逃逸拒绝并审计，失败原因可读).
+func (s *Store) checkLocalPath(p string) error {
+	if s.ScratchRoot == "" {
+		return fmt.Errorf("localPath entries are not allowed on this node (no scratch root configured)")
+	}
+	if !filepath.IsAbs(p) {
+		return fmt.Errorf("local path %q is not absolute", p)
+	}
+	root, err := filepath.EvalSymlinks(s.ScratchRoot)
+	if err != nil {
+		return fmt.Errorf("scratch root %s unusable: %w", s.ScratchRoot, err)
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return fmt.Errorf("local path %s unusable: %w", p, err)
+	}
+	cleanRoot := filepath.Clean(root) + string(os.PathSeparator)
+	if !strings.HasPrefix(resolved+string(os.PathSeparator), cleanRoot) {
+		return fmt.Errorf("local path %s escapes the scratch root %s (path-escape refused)", p, s.ScratchRoot)
+	}
+	return nil
+}
+
+// Worktree materializes the manifest as a PLAIN directory at
+// worktrees/{deploymentID} (user-node compose-up path, byo-hosting-node
+// D1/D3: no git repo, no git http -- the agent itself runs docker compose
+// from this tree). Fetch/import discipline identical to MaterializeVia; the
+// tree assembles in a .work scratch and swaps in atomically, so a crash never
+// leaves a half-built worktree behind (same contract as BuildRepo).
+func (s *Store) Worktree(ctx context.Context, p Presigner, deploymentID, sourcePrefix string, manifest []api.File, extra map[string][]byte) (string, error) {
+	presign := func(ctx context.Context, shas []string) (*api.PresignResponse, error) {
+		return p.PresignSource(ctx, deploymentID, shas)
+	}
+	if err := s.FetchMissing(ctx, manifest, presign); err != nil {
+		return "", fmt.Errorf("materialize %s: %w", deploymentID, err)
+	}
+	final := s.WorktreePath(deploymentID)
+	work := final + ".work"
+	if err := os.RemoveAll(work); err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(work)
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		return "", err
+	}
+	if err := s.assembleTree(work, manifest, extra); err != nil {
+		return "", fmt.Errorf("materialize %s: %w", deploymentID, err)
+	}
+	if err := os.RemoveAll(final); err != nil {
+		return "", err
+	}
+	if err := os.Rename(work, final); err != nil {
+		return "", fmt.Errorf("materialize %s: swap worktree in: %w", deploymentID, err)
+	}
+	return final, nil
 }
 
 // ObjectPath is the on-disk path of a fetched object (sha-addressed, no
@@ -249,29 +367,8 @@ func (s *Store) BuildRepo(ctx context.Context, repoKey string, manifest []api.Fi
 	if err := os.MkdirAll(work, 0o755); err != nil {
 		return "", err
 	}
-	for _, f := range manifest {
-		dst := filepath.Join(work, filepath.FromSlash(f.Path))
-		if filepath.Clean(dst) != dst || !strings.HasPrefix(dst, work+string(os.PathSeparator)) {
-			return "", fmt.Errorf("build repo %s: manifest path escapes root: %s", repoKey, f.Path)
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return "", err
-		}
-		if err := hardlinkOrCopy(s.objectPath(f.SHA256), dst); err != nil {
-			return "", fmt.Errorf("build repo %s: place %s: %w", repoKey, f.Path, err)
-		}
-	}
-	for path, content := range extra {
-		dst := filepath.Join(work, filepath.FromSlash(path))
-		if filepath.Clean(dst) != dst || !strings.HasPrefix(dst, work+string(os.PathSeparator)) {
-			return "", fmt.Errorf("build repo %s: extra path escapes root: %s", repoKey, path)
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return "", err
-		}
-		if err := os.WriteFile(dst, content, 0o644); err != nil {
-			return "", fmt.Errorf("build repo %s: place extra %s: %w", repoKey, path, err)
-		}
+	if err := s.assembleTree(work, manifest, extra); err != nil {
+		return "", fmt.Errorf("build repo %s: %w", repoKey, err)
 	}
 
 	// 1b. Static-site fallback (fix-seed-audit-blockers S4). A tree with
@@ -333,6 +430,37 @@ func (s *Store) BuildRepo(ctx context.Context, repoKey string, manifest []api.Fi
 		return "", fmt.Errorf("build repo %s: swap repo in: %w", repoKey, err)
 	}
 	return commit, nil
+}
+
+// assembleTree places every manifest object (from the content store) plus any
+// extra derived files into work, refusing manifest paths that escape the root
+// (the same lexical check BuildRepo always enforced; Worktree shares it).
+func (s *Store) assembleTree(work string, manifest []api.File, extra map[string][]byte) error {
+	place := func(rel string, place func(dst string) error) error {
+		dst := filepath.Join(work, filepath.FromSlash(rel))
+		if filepath.Clean(dst) != dst || !strings.HasPrefix(dst, work+string(os.PathSeparator)) {
+			return fmt.Errorf("manifest path escapes root: %s", rel)
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		return place(dst)
+	}
+	for _, f := range manifest {
+		if err := place(f.Path, func(dst string) error {
+			return hardlinkOrCopy(s.objectPath(f.SHA256), dst)
+		}); err != nil {
+			return fmt.Errorf("place %s: %w", f.Path, err)
+		}
+	}
+	for path, content := range extra {
+		if err := place(path, func(dst string) error {
+			return os.WriteFile(dst, content, 0o644)
+		}); err != nil {
+			return fmt.Errorf("place extra %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // staticFallbackName is what package.json is moved to when the static

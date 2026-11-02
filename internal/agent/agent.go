@@ -10,7 +10,6 @@ package agent
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	crand "crypto/rand"
 	"encoding/hex"
@@ -18,6 +17,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/binoctal/open-agents/hosting-agent/internal/api"
+	composepkg "github.com/binoctal/open-agents/hosting-agent/internal/compose"
 	"github.com/binoctal/open-agents/hosting-agent/internal/githttp"
 	"github.com/binoctal/open-agents/hosting-agent/internal/ingress"
 	"github.com/binoctal/open-agents/hosting-agent/internal/store"
@@ -88,6 +89,12 @@ type Agent struct {
 
 	WorkPollInterval  time.Duration
 	WatermarkInterval time.Duration
+
+	// UserNode marks the BYO user-node form (byo-hosting-node D1): node-
+	// credential auth, deployment-only command surface (enum whitelist +
+	// ownership re-check), agent-driven compose up / docker run (no Coolify,
+	// no git http), no usage sampling. Set by main from the credentials file.
+	UserNode bool
 
 	// WorkIdleMax caps the idle backoff of the work poll: an endpoint that
 	// keeps answering "no items" is polled at base*2, base*4, ... up to this
@@ -363,7 +370,65 @@ func (a *Agent) pollWork(ctx context.Context) error {
 	return a.fatalIfAllDisabled()
 }
 
+// userNodeActions is the user-node command surface (byo-hosting-node D1):
+// the deployment lifecycle enum ONLY. Everything else -- the sandbox fleet,
+// runtime previews, session previews, any future action -- is a platform
+// surface a user machine must refuse even if a compromised or buggy platform
+// dispatches it. Refusal is loud: log line + (for deployment-keyed items) a
+// materialize_failed report so the owner's audit trail shows the refusal.
+var userNodeActions = map[string]bool{
+	api.ActionMaterialize:   true,
+	api.ActionRegisterRoute: true,
+	api.ActionAssertRoute:   true,
+	api.ActionRemoveRoute:   true,
+	api.ActionRelease:       true,
+	api.ActionProbe:         true,
+}
+
+// userNodeGate enforces the agent-side half of the D1 double check on every
+// item before dispatch: action inside the enum, no sandbox/instance payload,
+// and (route actions) the item's host really is this deployment's label --
+// a hostile dispatch must not be able to wire a FOREIGN label onto this
+// node's ingress.
+func (a *Agent) userNodeGate(ctx context.Context, ep APIEndpoint, item api.WorkItem) bool {
+	if item.SandboxID != "" || item.InstanceID != "" {
+		a.refuseItem(ctx, ep, item, "sandbox/preview work items are platform-only; this is a user node")
+		return false
+	}
+	if !userNodeActions[item.Action] {
+		a.refuseItem(ctx, ep, item, fmt.Sprintf("action %q is outside the user-node command enum", item.Action))
+		return false
+	}
+	if item.Host != "" {
+		label := strings.ToLower(item.DeploymentID)
+		if !strings.HasPrefix(strings.ToLower(item.Host), label+".") {
+			a.refuseItem(ctx, ep, item, fmt.Sprintf("route host %q does not match deployment %s (foreign-label dispatch refused)", item.Host, item.DeploymentID))
+			return false
+		}
+	}
+	return true
+}
+
+// refuseItem logs the refusal (journal-visible audit) and reports
+// materialize_failed for deployment-keyed items the API will accept (rows on
+// THIS node owned by THIS owner -- a foreign row's report 404s server-side,
+// which is the correct silent drop; the log line above remains the record).
+func (a *Agent) refuseItem(ctx context.Context, ep APIEndpoint, item api.WorkItem, reason string) {
+	key := item.DeploymentID
+	if key == "" {
+		key = item.SandboxID + item.InstanceID
+	}
+	a.logf("REFUSED item %s action=%q host=%q: %s", key, item.Action, item.Host, reason)
+	if item.DeploymentID != "" {
+		_ = a.report(ctx, ep, item.DeploymentID, api.EventMaterializeFailed, 0, "refused on user node: "+reason)
+	}
+}
+
 func (a *Agent) handle(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {
+	// User-node command gate (byo-hosting-node D1, 2.2): before ANY dispatch.
+	if a.UserNode && !a.userNodeGate(ctx, ep, item) {
+		return nil
+	}
 	// Runtime preview items manage their own in-flight claims: runtime_up
 	// runs async (a Coolify build takes minutes), so the claim must outlive
 	// this call -- the generic claim/release below cannot express that.
@@ -442,6 +507,20 @@ func (a *Agent) handleMaterialize(ctx context.Context, ep APIEndpoint, item api.
 	if err != nil {
 		a.logf("deploy %s: manifest fetch failed: %v", item.DeploymentID, err)
 		return a.report(ctx, ep, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
+	}
+	// User node (byo-hosting-node 2.3): the agent itself brings the workload
+	// up -- compose up from a plain worktree (or docker run for a future
+	// single-container shape) -- and reports the host port. No Coolify, no
+	// git http; readiness is this report (the API's BYO branch folds
+	// materialize_done+build_done and flips the row ready).
+	if a.UserNode {
+		port, err := a.nodeMaterialize(ctx, ep, item, manifest)
+		if err != nil {
+			a.logf("deploy %s: node materialize failed: %v", item.DeploymentID, err)
+			return a.report(ctx, ep, item.DeploymentID, api.EventMaterializeFailed, 0, err.Error())
+		}
+		a.logf("deploy %s: up on 127.0.0.1:%d (user node)", item.DeploymentID, port)
+		return a.report(ctx, ep, item.DeploymentID, api.EventMaterialized, port, "")
 	}
 	commit, err := a.materializeTree(ctx, ep, item, manifest)
 	if err != nil {
@@ -565,6 +644,156 @@ func (a *Agent) rmiDeployImages(ctx context.Context, deploymentID string) {
 	}
 }
 
+// nodeComposeProject is the docker compose project name a user node runs a
+// deployment under (and the label release purges by). Lowercase-folded with
+// the deployment id like deployImageTag -- compose project names reject
+// uppercase the same way repository names do.
+func nodeComposeProject(deploymentID string) string {
+	return strings.ToLower("oa-" + deploymentID)
+}
+
+// nodeMaterialize brings one deployment up on a user node (byo-hosting-node
+// 2.3): compose rows rewrite the stack file (same rule table as the platform
+// path -- limits, port stripping, loopback ingress binding, profiles),
+// materialize a PLAIN worktree (R2 objects or declare-only local tars), then
+// `docker compose up -d --wait`. Returns the ingress host port the report
+// carries (the API folds it into app_port).
+func (a *Agent) nodeMaterialize(ctx context.Context, ep APIEndpoint, item api.WorkItem, manifest []api.File) (int, error) {
+	if c := item.Compose; c != nil {
+		spec := *c
+		// Same pipeline as Store.MaterializeCompose, minus the git repo: the
+		// rewritten compose rides the worktree directly.
+		presign := func(ctx context.Context, shas []string) (*api.PresignResponse, error) {
+			return ep.Client.PresignSource(ctx, item.DeploymentID, shas)
+		}
+		if err := a.Store.FetchMissing(ctx, manifest, presign); err != nil {
+			return 0, err
+		}
+		var composeSHA string
+		for _, f := range manifest {
+			if f.Path == spec.ComposePath {
+				composeSHA = f.SHA256
+				break
+			}
+		}
+		if composeSHA == "" {
+			return 0, fmt.Errorf("compose path %s not in manifest", spec.ComposePath)
+		}
+		raw, err := a.Store.ObjectBytes(composeSHA)
+		if err != nil {
+			return 0, fmt.Errorf("read compose source: %w", err)
+		}
+		rewritten, err := composepkg.Rewrite(raw, spec)
+		if err != nil {
+			return 0, err
+		}
+		tree := manifest
+		if spec.Tier == "image" {
+			// Tars never enter the tree (docker load reads them from the
+			// object store); same filter discipline as the platform path.
+			tree = make([]api.File, 0, len(manifest))
+			for _, f := range manifest {
+				if !strings.HasSuffix(f.Path, ".tar") {
+					tree = append(tree, f)
+				}
+			}
+		}
+		work, err := a.Store.Worktree(ctx, ep.Client, item.DeploymentID, item.SourcePrefix, tree, map[string][]byte{spec.ComposePath: rewritten})
+		if err != nil {
+			return 0, err
+		}
+		if spec.Tier == "image" {
+			if err := a.loadImageTars(ctx, item.DeploymentID, manifest); err != nil {
+				return 0, err
+			}
+		}
+		if err := a.composeUp(ctx, item.DeploymentID, filepath.Join(work, filepath.FromSlash(spec.ComposePath))); err != nil {
+			return 0, err
+		}
+		return spec.HostPort, nil
+	}
+	// Non-compose rows: today the platform rejects non-compose tiers onto
+	// user nodes at admission (source tier is Coolify/nixpacks-bound), so
+	// this branch is the future-proofing path for a single-container image
+	// row -- load the tar, run it pinned to the pre-allocated host port.
+	return a.nodeRunSingle(ctx, item, manifest)
+}
+
+// composeUp runs `docker compose up -d --wait` for one deployment's worktree.
+// --wait turns "containers exist" into "ingress container answers", which is
+// what the platform's probe then keeps honest. The project name is stable per
+// deployment so a re-materialize converges the same project instead of
+// stacking orphan copies.
+func (a *Agent) composeUp(ctx context.Context, deploymentID, composeFile string) error {
+	args := []string{"compose", "-p", nodeComposeProject(deploymentID), "-f", composeFile, "up", "-d", "--wait", "--remove-orphans"}
+	out, err := a.docker()(ctx, args...)
+	if err != nil {
+		tail := strings.TrimSpace(out)
+		if len(tail) > 300 {
+			tail = tail[len(tail)-300:]
+		}
+		if tail != "" {
+			return fmt.Errorf("docker compose up: %v: %s", err, tail)
+		}
+		return fmt.Errorf("docker compose up: %w", err)
+	}
+	a.logf("deploy %s: compose up complete (%s)", deploymentID, composeFile)
+	return nil
+}
+
+// nodeRunSingle loads the single image tar and runs it bound to the
+// pre-allocated loopback port (container port = host port, mirroring the
+// platform's Coolify ports_exposes convention).
+func (a *Agent) nodeRunSingle(ctx context.Context, item api.WorkItem, manifest []api.File) (int, error) {
+	if item.AppPort <= 0 {
+		return 0, fmt.Errorf("single-container item carries no appPort; the platform must pre-allocate one")
+	}
+	var tars []api.File
+	for _, f := range manifest {
+		if strings.HasSuffix(f.Path, ".tar") {
+			tars = append(tars, f)
+		}
+	}
+	if len(tars) != 1 {
+		return 0, fmt.Errorf("single-container rows expect exactly one image tar, manifest has %d", len(tars))
+	}
+	if err := a.loadImageTars(ctx, item.DeploymentID, manifest); err != nil {
+		return 0, err
+	}
+	service := strings.TrimSuffix(tars[0].Path, ".tar")
+	tag := deployImageTag(item.DeploymentID, service)
+	name := nodeComposeProject(item.DeploymentID)
+	// Converge, not stack: a re-materialize replaces the old container.
+	if _, err := a.docker()(ctx, "rm", "-f", name); err != nil {
+		// absent container is the common case; docker prints nothing useful
+		// here, a.logf keeps the trail without failing the run.
+		a.logf("deploy %s: pre-run rm %s: %v", item.DeploymentID, name, err)
+	}
+	if _, err := a.docker()(ctx, "run", "-d", "--name", name,
+		"--restart", "unless-stopped",
+		"-p", fmt.Sprintf("127.0.0.1:%d:%d", item.AppPort, item.AppPort),
+		tag); err != nil {
+		return 0, fmt.Errorf("docker run %s: %w", tag, err)
+	}
+	return item.AppPort, nil
+}
+
+// nodeTeardown is the user-node release path: no Coolify app to delete, so
+// the agent tears down what IT created, converging by name without needing
+// the compose file back -- the single container carries the project name, and
+// compose stacks carry the com.docker.compose.project label
+// (purgeComposeProject: containers, then networks, then volumes; same end
+// state as the platform's release). Local images go last.
+func (a *Agent) nodeTeardown(ctx context.Context, deploymentID string) {
+	project := nodeComposeProject(deploymentID)
+	if _, err := a.docker()(ctx, "rm", "-f", project); err != nil {
+		// Absent is the common case for compose rows; log only.
+		a.logf("deploy %s: container rm %s: %v", deploymentID, project, err)
+	}
+	a.purgeComposeProject(ctx, deploymentID, project)
+	a.rmiDeployImages(ctx, deploymentID)
+}
+
 // materializeTree routes between the two materialize shapes
 // (hosted-compose-stacks 5.2): single-container trees pass through; compose
 // items rewrite the stack file (re-validated limits/ports/profiles) into the
@@ -632,6 +861,23 @@ func (a *Agent) handleRemoveRoute(ctx context.Context, ep APIEndpoint, item api.
 }
 
 func (a *Agent) handleRelease(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {
+	// User node (byo-hosting-node 2.2): same order (route off first), then
+	// the agent tears down what it created itself -- compose project down
+	// (volumes included) or the single container, images, worktree. No
+	// Coolify app, no git http port.
+	if a.UserNode {
+		if a.Ingress != nil {
+			if err := a.Ingress.Remove(ctx, item.DeploymentID); err != nil {
+				a.logf("deploy %s: route remove on release failed: %v", item.DeploymentID, err)
+			}
+		}
+		a.nodeTeardown(ctx, item.DeploymentID)
+		if err := a.Store.Remove(item.DeploymentID); err != nil {
+			a.logf("deploy %s: worktree removal failed: %v", item.DeploymentID, err)
+		}
+		a.logf("deploy %s: released (route + containers + volumes + worktree recycled)", item.DeploymentID)
+		return a.report(ctx, ep, item.DeploymentID, api.EventReleased, 0, "")
+	}
 	// Full local teardown: route first (a released repo must stop answering),
 	// then the git port, then the repo itself. Route errors are logged but do
 	// not block the rest -- a route that was never registered (delete before
@@ -674,20 +920,10 @@ func (a *Agent) purgeComposeProject(ctx context.Context, deploymentID, project s
 	// The daemon rejects a bare "com.docker.compose.project=x" filter key
 	// ("invalid filter"); it must go through the "label=" key.
 	label := "label=com.docker.compose.project=" + project
-	// dockerRun captures stderr: "exit status 1" alone once hid the actual
-	// CLI error and cost a blind debugging round (8.17).
-	dockerRun := func(args ...string) (string, error) {
-		cmd := exec.CommandContext(ctx, "docker", args...)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
-		if err != nil {
-			if stderr.Len() > 0 {
-				err = fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
-			}
-		}
-		return string(out), err
-	}
+	// a.docker() keeps stderr in the error ("exit status 1" alone once hid
+	// the actual CLI error and cost a blind debugging round, 8.17) and gives
+	// tests the injectable seam.
+	dockerRun := a.docker()
 	for _, k := range []struct {
 		name string
 		list []string
@@ -697,13 +933,13 @@ func (a *Agent) purgeComposeProject(ctx context.Context, deploymentID, project s
 		{"network", []string{"network", "ls", "-q", "--filter", label}, []string{"network", "rm"}},
 		{"volume", []string{"volume", "ls", "-q", "--filter", label}, []string{"volume", "rm"}},
 	} {
-		out, err := dockerRun(k.list...)
+		out, err := dockerRun(ctx, k.list...)
 		if err != nil {
 			a.logf("deploy %s: compose %s list for purge failed: %v", deploymentID, k.name, err)
 			continue
 		}
 		for _, id := range strings.Fields(out) {
-			if _, err := dockerRun(append(append([]string{}, k.rm...), id)...); err != nil {
+			if _, err := dockerRun(ctx, append(append([]string{}, k.rm...), id)...); err != nil {
 				a.logf("deploy %s: compose %s %s removal failed: %v", deploymentID, k.name, id, err)
 			}
 		}
@@ -843,6 +1079,12 @@ func (a *Agent) caddyVerdict(ctx context.Context) *bool {
 // (D4): each API keeps the samples whose coolify app id it owns and drops the
 // rest as orphans, so dual-environment billing never crosses.
 func (a *Agent) reportUsage(ctx context.Context) error {
+	// User nodes never sample usage (byo-hosting-node D1/D4): the platform's
+	// usage surface is INTERNAL_SECRET-gated by design, and BYO rows bill the
+	// flat management fee, not RAM·h -- there is nothing to sample for.
+	if a.UserNode {
+		return nil
+	}
 	samples := CollectUsageSamples(ctx, time.Now().UTC())
 	if len(samples) == 0 {
 		return nil

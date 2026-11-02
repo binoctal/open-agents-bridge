@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -32,6 +33,14 @@ type Caddy struct {
 	LogDir string
 
 	HTTP *http.Client
+
+	// serverName is the lazily resolved name of the HTTPS (443-listening)
+	// server injected routes belong to (byo-hosting-node: a user node's
+	// scaffold Caddyfile lets Caddy auto-create the HTTP/ACME server too,
+	// and its position in the srvN sequence is not ours to assume). Empty
+	// until first resolution; guarded by mu.
+	mu         sync.Mutex
+	serverName string
 }
 
 // NewCaddy builds an ingress writer.
@@ -83,10 +92,71 @@ func (c *Caddy) Upsert(ctx context.Context, deploymentID, containerAddr string) 
 	if err == nil || !isNotFound(err) {
 		return err
 	}
-	// New route: insert at the head of the list (must precede the wildcard
-	// placeholder route compiled from the Caddyfile).
+	// New route: insert at the head of the HTTPS server's route list (must
+	// precede the wildcard placeholder route compiled from the Caddyfile).
+	server, err := c.httpsServer(ctx)
+	if err != nil {
+		return err
+	}
 	return c.doRoute(ctx, http.MethodPut,
-		fmt.Sprintf("http://%s/config/apps/http/servers/srv0/routes/0", c.Addr), route)
+		fmt.Sprintf("http://%s/config/apps/http/servers/%s/routes/0", c.Addr, server), route)
+}
+
+// httpsServer resolves (once) the name of the 443-listening server. On the
+// platform node this has always been srv0 and stays srv0; on a user node
+// (byo-hosting-node 2.4) the scaffold Caddyfile lets auto-HTTPS create the
+// plain-HTTP/ACME server as well, and the srvN sequence is Caddy's internal
+// detail -- resolving beats assuming. Failure falls back to srv0 with the
+// error swallowed into the log-visible path (the PUT then 404s and names it,
+// the existing diagnostic behavior).
+func (c *Caddy) httpsServer(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.serverName != "" {
+		return c.serverName, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("http://%s/config/apps/http/servers", c.Addr), nil)
+	if err != nil {
+		c.serverName = "srv0"
+		return c.serverName, nil
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		c.serverName = "srv0"
+		return c.serverName, nil
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		c.serverName = "srv0"
+		return c.serverName, nil
+	}
+	var servers map[string]struct {
+		Listen []string `json:"listen"`
+	}
+	if err := json.Unmarshal(raw, &servers); err != nil || len(servers) == 0 {
+		c.serverName = "srv0"
+		return c.serverName, nil
+	}
+	// Prefer the 443 listener; any single-server config (localhost dev
+	// without TLS) falls through to the first name sorted for determinism.
+	first := ""
+	for name, s := range servers {
+		if first == "" || name < first {
+			first = name
+		}
+		for _, l := range s.Listen {
+			if strings.HasSuffix(l, ":443") {
+				c.serverName = name
+				return name, nil
+			}
+		}
+	}
+	c.serverName = first
+	return first, nil
 }
 
 // Ping reports whether the admin endpoint answers at all. Any HTTP response
