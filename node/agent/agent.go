@@ -685,13 +685,13 @@ func nodeComposeProject(deploymentID string) string {
 // `docker compose up -d --wait`. Returns the ingress host port the report
 // carries (the API folds it into app_port).
 func (a *Agent) nodeMaterialize(ctx context.Context, ep APIEndpoint, item api.WorkItem, manifest []api.File) (int, error) {
+	presign := func(ctx context.Context, shas []string) (*api.PresignResponse, error) {
+		return ep.Client.PresignSource(ctx, item.DeploymentID, shas)
+	}
 	if c := item.Compose; c != nil {
 		spec := *c
 		// Same pipeline as Store.MaterializeCompose, minus the git repo: the
 		// rewritten compose rides the worktree directly.
-		presign := func(ctx context.Context, shas []string) (*api.PresignResponse, error) {
-			return ep.Client.PresignSource(ctx, item.DeploymentID, shas)
-		}
 		if err := a.Store.FetchMissing(ctx, manifest, presign); err != nil {
 			return 0, err
 		}
@@ -742,6 +742,13 @@ func (a *Agent) nodeMaterialize(ctx context.Context, ep APIEndpoint, item api.Wo
 	// user nodes at admission (source tier is Coolify/nixpacks-bound), so
 	// this branch is the future-proofing path for a single-container image
 	// row -- load the tar, run it pinned to the pre-allocated host port.
+	// The missing-blob fetch is the same contract as the compose branch:
+	// loadImageTars reads from the object store and would fail on a cold
+	// node with "object <sha> not in store" -- declare-only local tars are
+	// already imported and invisible to the presign scan.
+	if err := a.Store.FetchMissing(ctx, manifest, presign); err != nil {
+		return 0, err
+	}
 	return a.nodeRunSingle(ctx, item, manifest)
 }
 

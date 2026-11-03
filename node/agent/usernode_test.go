@@ -324,6 +324,53 @@ func TestUserNodeTeardownConvergesByName(t *testing.T) {
 	}
 }
 
+// A cold node must pull the missing tar blob before docker load: the
+// non-compose branch presigns and downloads from the object store instead of
+// failing with "object <sha> not in store" (the compose branch already had
+// this; the fix levels the single-container path with it).
+func TestUserNodeMaterializeSingleFetchesMissing(t *testing.T) {
+	tar := []byte("fake-tar-bytes")
+	tarSHA := sha256Hex(tar)
+	b := newByoAPI(t, map[string][]byte{tarSHA: tar})
+	manifestURL := manifestServer(t, []api.File{{Path: "web.tar", SHA256: tarSHA}})
+
+	// Cold store: nothing pre-imported, so the blob can only arrive via the
+	// presign download.
+	st := store.New(t.TempDir(), nil)
+	dk := &fakeDocker{}
+	a := &Agent{Store: st, UserNode: true, dockerRun: dk.run}
+	item := api.WorkItem{
+		Action:       api.ActionMaterialize,
+		DeploymentID: "AbC123",
+		ManifestURL:  manifestURL,
+		AppPort:      31001,
+	}
+	if err := a.handleMaterialize(context.Background(), APIEndpoint{Client: api.New(b.srv.URL, "node-test", "node-secret")}, item); err != nil {
+		t.Fatalf("handleMaterialize: %v", err)
+	}
+	if b.count(api.EventMaterializeFailed) > 0 {
+		t.Fatalf("materialize failed on the node: %v", b.lastField(api.EventMaterializeFailed, "detail"))
+	}
+	if b.presign == 0 {
+		t.Error("the missing blob must be presigned and downloaded before docker load")
+	}
+	var runArgs []string
+	for _, c := range dk.calls {
+		if c.args[0] == "run" {
+			runArgs = c.args
+		}
+	}
+	if runArgs == nil {
+		t.Fatalf("docker run must execute after the fetch, calls: %v", dk.calls)
+	}
+	if i := indexOf(runArgs, "-p"); i < 0 || runArgs[i+1] != "127.0.0.1:31001:31001" {
+		t.Errorf("run must bind the pre-allocated port, got %v", runArgs)
+	}
+	if got := runArgs[len(runArgs)-1]; got != "oa-deploy-abc123-web" {
+		t.Errorf("run must use the folded deploy tag, got %q", got)
+	}
+}
+
 // --- single-container future-proofing path ---------------------------------------
 
 func TestNodeRunSingleArgs(t *testing.T) {
