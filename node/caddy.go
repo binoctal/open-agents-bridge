@@ -4,7 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -50,7 +50,8 @@ func ensureCaddy(cacheDir string, logf agent.Logf) (caddyPath string, managed bo
 	if _, statErr := os.Stat(bin); statErr == nil {
 		// Previously installed by us; version check keeps it honest.
 		out, runErr := exec.Command(bin, "version").Output()
-		if runErr == nil && strings.Contains(string(out), "/"+caddyVersion+" ") {
+		// `caddy version` prints e.g. "v2.11.7 h1:<hash>".
+		if runErr == nil && strings.Contains(string(out), "v"+caddyVersion) {
 			logf("caddy %s already installed at %s", caddyVersion, bin)
 			return bin, true, nil
 		}
@@ -79,17 +80,21 @@ func downloadCaddy(dest string) error {
 	if err != nil {
 		return fmt.Errorf("download %s: %w", name, err)
 	}
-	sums, err := httpGetAll(client, caddyDownloadBase+"/checksums.txt")
+	// caddy publishes its checksums as a versioned asset
+	// (caddy_2.11.7_checksums.txt), not a bare checksums.txt.
+	sumsName := fmt.Sprintf("caddy_%s_checksums.txt", caddyVersion)
+	sums, err := httpGetAll(client, caddyDownloadBase+"/"+sumsName)
 	if err != nil {
-		return fmt.Errorf("download checksums.txt: %w", err)
+		return fmt.Errorf("download %s: %w", sumsName, err)
 	}
 	want, ok := checksumFor(string(sums), name)
 	if !ok {
-		return fmt.Errorf("checksums.txt has no entry for %s", name)
+		return fmt.Errorf("%s has no entry for %s", sumsName, name)
 	}
-	got := sha256.Sum256(tarball)
+	// caddy publishes sha512 digests (128 hex chars), not sha256.
+	got := sha512.Sum512(tarball)
 	if !strings.EqualFold(hex.EncodeToString(got[:]), want) {
-		return errors.New("sha256 mismatch on the downloaded tarball")
+		return errors.New("sha512 mismatch on the downloaded tarball")
 	}
 	binary, err := extractSingleFile(tarball)
 	if err != nil {

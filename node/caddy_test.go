@@ -4,7 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -60,14 +60,14 @@ func TestDownloadCaddyVerifiesChecksum(t *testing.T) {
 		_ = gz.Close()
 		tarball = buf.Bytes()
 	}
-	goodSum := sha256.Sum256(tarball)
-	badSum := sha256.Sum256([]byte("other"))
+	goodSum := sha512.Sum512(tarball)
+	badSum := sha512.Sum512([]byte("other"))
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch strings.TrimPrefix(r.URL.Path, "/v"+caddyVersion+"/") {
 		case name:
 			_, _ = w.Write(tarball)
-		case "checksums.txt":
+		case "caddy_" + caddyVersion + "_checksums.txt":
 			_, _ = fmt.Fprintf(w, "%s  %s\n%s  other.tar.gz\n", hex.EncodeToString(badSum[:]), name, hex.EncodeToString(goodSum[:]))
 		default:
 			http.NotFound(w, r)
@@ -85,6 +85,51 @@ func TestDownloadCaddyVerifiesChecksum(t *testing.T) {
 	}
 	if _, err := os.Stat(dest); !os.IsNotExist(err) {
 		t.Fatalf("mismatched tarball must not land on disk: %v", err)
+	}
+}
+
+func TestDownloadCaddySucceedsOnMatch(t *testing.T) {
+	name := "caddy_" + caddyVersion + "_linux_" + runtime.GOARCH + ".tar.gz"
+	var tarball []byte
+	{
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(gz)
+		payload := []byte("#!/bin/sh\necho fake caddy\n")
+		_ = tw.WriteHeader(&tar.Header{Name: "caddy", Typeflag: tar.TypeReg, Mode: 0o755, Size: int64(len(payload))})
+		_, _ = tw.Write(payload)
+		_ = tw.Close()
+		_ = gz.Close()
+		tarball = buf.Bytes()
+	}
+	goodSum := sha512.Sum512(tarball)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch strings.TrimPrefix(r.URL.Path, "/v"+caddyVersion+"/") {
+		case name:
+			_, _ = w.Write(tarball)
+		case "caddy_" + caddyVersion + "_checksums.txt":
+			_, _ = fmt.Fprintf(w, "%s  %s\n", hex.EncodeToString(goodSum[:]), name)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	orig := caddyDownloadBase
+	caddyDownloadBase = srv.URL + "/v" + caddyVersion
+	defer func() { caddyDownloadBase = orig }()
+
+	dest := filepath.Join(t.TempDir(), "bin", "caddy")
+	if err := downloadCaddy(dest); err != nil {
+		t.Fatalf("downloadCaddy: %v", err)
+	}
+	info, err := os.Stat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("installed mode %v, want 0755", info.Mode().Perm())
 	}
 }
 
