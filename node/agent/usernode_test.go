@@ -281,6 +281,91 @@ services:
 	}
 }
 
+// --- user-node stop (byo-hosting-node): stop keeps containers for restart ---------
+
+// stopDocker records calls and answers the two discovery queries by filter
+// content (fakeDocker's 2-arg outcome keys cannot tell the label query from
+// the exact-name one), with a stopOutcome for the stop calls.
+type stopDocker struct {
+	calls       []dockerCall
+	labelIDs    string
+	nameIDs     string
+	stopOutcome func(id string) error
+}
+
+func (s *stopDocker) run(_ context.Context, args ...string) (string, error) {
+	s.calls = append(s.calls, dockerCall{args: append([]string(nil), args...)})
+	joined := strings.Join(args, " ")
+	switch {
+	case strings.HasPrefix(joined, "ps -q --filter label=com.docker.compose.project="):
+		return s.labelIDs, nil
+	case strings.HasPrefix(joined, "ps -q --filter name="):
+		return s.nameIDs, nil
+	case args[0] == "stop":
+		if s.stopOutcome != nil {
+			return "", s.stopOutcome(args[1])
+		}
+		return "", nil
+	}
+	return "", nil
+}
+
+// Discovery-then-stop converges both shapes: the compose project's label
+// query returns the running ids, each is stopped by id, and the report is
+// stop_done (the API folds it into stopping -> stopped). The exact-name query
+// for the single-container shape returns nothing here -- both shapes ride the
+// same item.
+func TestUserNodeHandleStopStopsDiscoveredContainers(t *testing.T) {
+	sink, client := newReportAPIServer(t)
+	dk := &stopDocker{labelIDs: "cid1\ncid2\n"}
+	a := &Agent{Client: client, UserNode: true, dockerRun: dk.run}
+	if err := a.handleStop(context.Background(), a.endpoints()[0], api.WorkItem{Action: api.ActionStop, DeploymentID: "AbC123"}); err != nil {
+		t.Fatalf("handleStop: %v", err)
+	}
+	var stopped []string
+	for _, c := range dk.calls {
+		if len(c.args) >= 2 && c.args[0] == "stop" {
+			stopped = append(stopped, c.args[1])
+		}
+	}
+	if len(stopped) != 2 || stopped[0] != "cid1" || stopped[1] != "cid2" {
+		t.Fatalf("must stop cid1 and cid2 by id, got %v (calls: %v)", stopped, dk.calls)
+	}
+	if sink.count(api.EventStopDone) != 1 {
+		t.Fatalf("want one stop_done report, got %d", sink.count(api.EventStopDone))
+	}
+}
+
+// Zero discoveries is success -- nothing running is the steady state of a
+// re-offered stopping row, and it must still confirm stop_done.
+func TestUserNodeHandleStopNothingRunningConfirms(t *testing.T) {
+	sink, client := newReportAPIServer(t)
+	a := &Agent{Client: client, UserNode: true, dockerRun: (&stopDocker{}).run}
+	if err := a.handleStop(context.Background(), a.endpoints()[0], api.WorkItem{Action: api.ActionStop, DeploymentID: "d1"}); err != nil {
+		t.Fatalf("handleStop: %v", err)
+	}
+	if sink.count(api.EventStopDone) != 1 {
+		t.Fatalf("empty discovery must report stop_done, got %d", sink.count(api.EventStopDone))
+	}
+}
+
+// A real stop failure of a discovered container reports NOTHING: the API's
+// stopping row is cron-force-completed if unconfirmed, and a failure event
+// would flip a recoverable stop into a failed row.
+func TestUserNodeHandleStopFailureReportsNothing(t *testing.T) {
+	sink, client := newReportAPIServer(t)
+	dk := &stopDocker{labelIDs: "cid1\n", stopOutcome: func(string) error { return errors.New("cannot stop container") }}
+	a := &Agent{Client: client, UserNode: true, dockerRun: dk.run}
+	if err := a.handleStop(context.Background(), a.endpoints()[0], api.WorkItem{Action: api.ActionStop, DeploymentID: "d1"}); err != nil {
+		t.Fatalf("handleStop returns nil (log-only failure): %v", err)
+	}
+	for _, ev := range []string{api.EventStopDone, api.EventMaterializeFailed} {
+		if sink.count(ev) != 0 {
+			t.Fatalf("failed stop must report no event, got %s x%d", ev, sink.count(ev))
+		}
+	}
+}
+
 // --- user-node release (2.2): converge by name, no compose file needed -----------
 
 // Release items carry no compose spec; teardown converges by the stable

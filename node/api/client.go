@@ -101,6 +101,7 @@ const (
 	ActionRegisterRoute  = "register_route"
 	ActionAssertRoute    = "assert_route"
 	ActionRemoveRoute    = "remove_route"
+	ActionStop           = "stop"
 	ActionRelease        = "release"
 	ActionProbe          = "probe"
 	ActionSandboxUp      = "sandbox_up"
@@ -303,6 +304,7 @@ const (
 	EventMaterializeFailed = "materialize_failed"
 	EventRouteRegistered   = "route_registered"
 	EventRouteRemoved      = "route_removed"
+	EventStopDone          = "stop_done"
 	EventReleased          = "released"
 	EventRuntimeFail       = "runtime_fail"
 

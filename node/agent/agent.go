@@ -407,6 +407,7 @@ var userNodeActions = map[string]bool{
 	api.ActionRegisterRoute: true,
 	api.ActionAssertRoute:   true,
 	api.ActionRemoveRoute:   true,
+	api.ActionStop:          true,
 	api.ActionRelease:       true,
 	api.ActionProbe:         true,
 }
@@ -509,6 +510,8 @@ func (a *Agent) handle(ctx context.Context, ep APIEndpoint, item api.WorkItem) e
 		return a.handleAssertRoute(ctx, ep, item)
 	case api.ActionRemoveRoute:
 		return a.handleRemoveRoute(ctx, ep, item)
+	case api.ActionStop:
+		return a.handleStop(ctx, ep, item)
 	case api.ActionRelease:
 		return a.handleRelease(ctx, ep, item)
 	case api.ActionProbe:
@@ -600,8 +603,11 @@ var nodeGOArch = runtime.GOARCH
 // fails materialize HERE with a readable reason -- docker load happily
 // accepts a foreign-arch image and the failure only surfaces at compose up
 // as a bare "exec format error" with no image name. Unknown/empty arch
-// (older daemon output, inspect miss) passes: verification must not become
-// a new failure mode for working packs.
+// (older daemon output) passes: verification must not become a new failure
+// mode for working packs. An inspect MISS no longer passes (11-03): the
+// load just succeeded, so the contract tag being uninspectable means the
+// tar's RepoTags never carried it and compose up would fail anyway -- see
+// checkLoadedArch.
 func (a *Agent) loadImageTars(ctx context.Context, deploymentID string, manifest []api.File) error {
 	for _, f := range manifest {
 		if !strings.HasSuffix(f.Path, ".tar") {
@@ -635,8 +641,17 @@ func (a *Agent) checkLoadedArch(ctx context.Context, deploymentID, tarPath strin
 	tag := deployImageTag(deploymentID, service)
 	out, err := a.docker()(ctx, "image", "inspect", tag, "--format", "{{.Architecture}}")
 	if err != nil {
-		a.logf("deploy %s: arch check skipped for %s (inspect failed: %v)", deploymentID, tag, err)
-		return nil
+		// The load just succeeded, so an inspect miss on the CONTRACT tag has
+		// one explanation: the tar's RepoTags do not carry it (found live
+		// 11-03: a hand-made tar tagged nginx:1.27 loaded fine, the arch check
+		// logged a skip, and the failure only surfaced at compose up as a
+		// misleading "pull access denied"). Failing HERE with the contract
+		// tag named turns that dead end into a readable error. A tar whose
+		// RepoTags are correct but whose arch is unknown/empty still passes
+		// below -- old daemons must not gain a new failure mode.
+		return fmt.Errorf(
+			"tar %s loaded but image %s is not inspectable: %v -- the tar's RepoTags must carry the contract tag oa-deploy-<deployment>-<service> (platform-built tars are tagged at build time)",
+			filepath.Base(tarPath), tag, err)
 	}
 	imageArch := strings.ToLower(strings.TrimSpace(out))
 	if imageArch == "" || imageArch == "unknown" {
@@ -891,6 +906,45 @@ func (a *Agent) handleRemoveRoute(ctx context.Context, ep APIEndpoint, item api.
 	}
 	a.logf("deploy %s: route removed", item.DeploymentID)
 	return a.report(ctx, ep, item.DeploymentID, api.EventRouteRemoved, 0, "")
+}
+
+// handleStop stops the deployment's containers WITHOUT tearing anything down
+// (BYO stop semantics, byo-hosting-node): stopped containers stay on disk, so
+// restart re-materializes onto them in seconds instead of re-pulling. The
+// convergence is discovery-then-stop, not shape guessing: the compose shape is
+// found by its project label, the single-container shape by its exact folded
+// name, and each discovered container is stopped by id. Zero discoveries is
+// success (nothing running), so re-offers of the stopping row are harmless.
+// A real stop failure of an existing container reports NOTHING: the API's
+// stopping row is force-completed by the cron if the agent never confirms,
+// and a failure event would flip a recoverable stop into a failed row.
+func (a *Agent) handleStop(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {
+	project := nodeComposeProject(item.DeploymentID)
+	exact := "^" + strings.ToLower("oa-"+item.DeploymentID) + "$"
+	var ids []string
+	for _, args := range [][]string{
+		{"ps", "-q", "--filter", "label=com.docker.compose.project=" + project},
+		{"ps", "-q", "--filter", "name=" + exact},
+	} {
+		out, err := a.docker()(ctx, args...)
+		if err != nil {
+			a.logf("deploy %s: container discovery failed (%v) -- not reporting stop_done", item.DeploymentID, err)
+			return nil
+		}
+		ids = append(ids, strings.Fields(out)...)
+	}
+	if len(ids) == 0 {
+		a.logf("deploy %s: no running containers to stop", item.DeploymentID)
+		return a.report(ctx, ep, item.DeploymentID, api.EventStopDone, 0, "")
+	}
+	for _, id := range ids {
+		if _, err := a.docker()(ctx, "stop", id); err != nil {
+			a.logf("deploy %s: stop %s failed (row will be force-completed): %v", item.DeploymentID, id, err)
+			return nil
+		}
+	}
+	a.logf("deploy %s: stopped %d container(s) (kept for restart)", item.DeploymentID, len(ids))
+	return a.report(ctx, ep, item.DeploymentID, api.EventStopDone, 0, "")
 }
 
 func (a *Agent) handleRelease(ctx context.Context, ep APIEndpoint, item api.WorkItem) error {

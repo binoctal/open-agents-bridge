@@ -132,8 +132,10 @@ func TestLoadImageTarsArchMismatch(t *testing.T) {
 }
 
 // Unknown/empty arch answers pass -- verification must not become a new
-// failure mode for packs an older daemon reports oddly -- and so does an
-// inspect that errors outright (skip, never block).
+// failure mode for packs an older daemon reports oddly. (An inspect that
+// ERRORS no longer passes: 11-03, the load just succeeded so a miss on the
+// contract tag means the tar's RepoTags never carried it -- covered by
+// TestLoadImageTarsInspectMissFails below.)
 func TestLoadImageTarsArchUnknownPasses(t *testing.T) {
 	orig := nodeGOArch
 	nodeGOArch = "amd64"
@@ -145,7 +147,6 @@ func TestLoadImageTarsArchUnknownPasses(t *testing.T) {
 	}{
 		{"empty", "", nil},
 		{"unknown", "unknown\n", nil},
-		{"inspect-error", "", errors.New("no such image")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dk := &fakeDocker{outcomes: map[string]struct {
@@ -160,6 +161,32 @@ func TestLoadImageTarsArchUnknownPasses(t *testing.T) {
 				t.Fatalf("docker calls = %d, want 4 (both tars load+inspect)", len(dk.calls))
 			}
 		})
+	}
+}
+
+// 11-03: a tar whose RepoTags never carried the contract tag loads fine and
+// then vanishes from compose's view -- the failure used to surface much later
+// as a misleading "pull access denied" at compose up. The inspect miss now
+// fails RIGHT HERE with the contract tag named, and the remaining tars never
+// load.
+func TestLoadImageTarsInspectMissFails(t *testing.T) {
+	dk := &fakeDocker{outcomes: map[string]struct {
+		stdout string
+		err    error
+	}{"image inspect": {"", errors.New(`Error: No such image: oa-deploy-d1-web:latest`)}}}
+	a := newImageAgent(t, dk, strings.Repeat("1", 64), strings.Repeat("2", 64))
+
+	err := a.loadImageTars(context.Background(), "D1", imageManifest())
+	if err == nil {
+		t.Fatal("want inspect-miss error, got nil")
+	}
+	for _, want := range []string{"oa-deploy-d1-web", "RepoTags", "contract tag"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("inspect-miss error missing %q: %v", want, err)
+		}
+	}
+	if len(dk.calls) != 2 {
+		t.Fatalf("docker calls = %d, want 2 (web.tar load+inspect only)", len(dk.calls))
 	}
 }
 

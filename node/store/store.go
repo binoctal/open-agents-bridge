@@ -550,22 +550,61 @@ func (s *Store) fetchBatch(ctx context.Context, fn presignFunc, shas []string) e
 	return nil
 }
 
-// downloadVerified streams url to the content store only if the body hashes
-// to sha; a mismatch removes the partial file and fails the batch.
+// downloadVerified streams url into the content store only if the resulting
+// file hashes to sha. It resumes from a previous attempt's .part when one is
+// present: a Range request continues at the partial size (R2 answers 206 with
+// the remaining bytes), the already-downloaded prefix feeds the hash, and a
+// server that ignores Range (plain 200) restarts from scratch. The .part is
+// kept across NETWORK failures -- a multi-hundred-MB image-tier tar over a
+// slow cross-border link can drop every ~50min and re-downloading from zero
+// each retry means the transfer never finishes (11-03: 141MB of 196MB lost to
+// a truncate-on-retry) -- and removed only when the content proves wrong (sha
+// mismatch) or the object completes (rename).
 func (s *Store) downloadVerified(ctx context.Context, url, sha string) error {
 	if err := os.MkdirAll(filepath.Dir(s.objectPath(sha)), 0o755); err != nil {
 		return err
 	}
 	tmp := s.objectPath(sha) + ".part"
-	f, err := os.Create(tmp)
+	// O_RDWR: the resumed prefix is READ back through this handle to feed
+	// the hash before the tail streams in through the same one.
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp)
+	h := sha256.New()
+	var offset int64
+	if st, err := os.Stat(tmp); err == nil && st.Size() > 0 {
+		offset = st.Size()
+		// Hash the already-downloaded prefix so the final sum covers the
+		// whole object, and verify it before spending bandwidth on the tail:
+		// a prefix that does not hash to a plausible position is unprovable
+		// (partial writes mid-object are possible), so restart from zero.
+		if _, err := f.Seek(0, io.SeekStart); err == nil {
+			if _, err := io.Copy(h, f); err != nil {
+				offset = 0
+				h.Reset()
+			} else {
+				if _, err := f.Seek(offset, io.SeekStart); err != nil {
+					offset = 0
+					h.Reset()
+				}
+			}
+		}
+		if offset == 0 {
+			if err := f.Truncate(0); err != nil {
+				f.Close()
+				return err
+			}
+		}
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
+		f.Close()
 		return err
+	}
+	if offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
 	resp, err := s.HTTP.Do(req)
 	if err != nil {
@@ -573,12 +612,28 @@ func (s *Store) downloadVerified(ctx context.Context, url, sha string) error {
 		return fmt.Errorf("get %s: %w", sha[:12], err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	switch {
+	case resp.StatusCode == http.StatusPartialContent:
+		// The server honored the range; the hash already covers [0, offset).
+	case resp.StatusCode == http.StatusOK:
+		// Full content: any resumed prefix is invalid -- restart the file
+		// and the hash from byte zero.
+		if offset > 0 {
+			if err := f.Truncate(0); err != nil {
+				f.Close()
+				return err
+			}
+			h.Reset()
+			if _, err := f.Seek(0, io.SeekStart); err != nil {
+				f.Close()
+				return err
+			}
+		}
+	default:
 		f.Close()
 		return fmt.Errorf("get %s: status %d", sha[:12], resp.StatusCode)
 	}
 
-	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(f, h), resp.Body); err != nil {
 		f.Close()
 		return fmt.Errorf("stream %s: %w", sha[:12], err)
@@ -587,6 +642,9 @@ func (s *Store) downloadVerified(ctx context.Context, url, sha string) error {
 		return err
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != sha {
+		// Wrong content: the .part is poison, not progress. Remove it so the
+		// next attempt starts clean instead of resuming onto garbage.
+		_ = os.Remove(tmp)
 		return fmt.Errorf("sha256 mismatch for %s: got %s", sha[:12], got[:12])
 	}
 	return os.Rename(tmp, s.objectPath(sha))

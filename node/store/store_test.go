@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -328,6 +329,143 @@ func TestDownloadVerifiedRejectsCorruptObject(t *testing.T) {
 	}
 	if _, statErr := os.Stat(st.objectPath(good)); !os.IsNotExist(statErr) {
 		t.Fatal("a failed verification must not leave an object behind")
+	}
+}
+
+// 11-03 (byo-hosting-node): a dropped transfer must KEEP its .part and the
+// retry must resume with a Range request at the partial size -- a 196MB tar
+// over a link that dies every ~50min never finishes if every retry restarts
+// from byte zero. The fake serves the tail as 206 like R2 does.
+func TestDownloadVerifiedResumesFromPart(t *testing.T) {
+	full := []byte(strings.Repeat("x", 4096) + "tail-marker")
+	fullSHA := sha(full)
+	cut := 1000
+	var ranges []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rng := r.Header.Get("Range"); rng != "" {
+			ranges = append(ranges, rng)
+			var start int64
+			if _, err := fmt.Sscanf(rng, "bytes=%d-", &start); err != nil || start > int64(len(full)) {
+				http.Error(w, "bad range", http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(full)-1, len(full)))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(full[start:])
+			return
+		}
+		// First attempt: serve the prefix, flush it to the client, then drop
+		// the connection mid-body (a flush is what makes this a stream error
+		// rather than a failed GET).
+		_, _ = w.Write(full[:cut])
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
+		panic(http.ErrAbortHandler)
+	}))
+	defer srv.Close()
+	st := New(t.TempDir(), nil)
+	part := st.objectPath(fullSHA) + ".part"
+
+	if err := st.downloadVerified(context.Background(), srv.URL+"/"+fullSHA, fullSHA); err == nil || !strings.Contains(err.Error(), "stream") {
+		t.Fatalf("mid-body drop must fail attempt 1 with a stream error, got %v", err)
+	}
+	if st, err := os.Stat(part); err != nil || st.Size() != int64(cut) {
+		t.Fatalf("dropped transfer must keep %d bytes of .part, got (%v, %v)", cut, st, err)
+	}
+
+	if err := st.downloadVerified(context.Background(), srv.URL+"/"+fullSHA, fullSHA); err != nil {
+		t.Fatalf("resume attempt: %v", err)
+	}
+	if len(ranges) != 1 || ranges[0] != fmt.Sprintf("bytes=%d-", cut) {
+		t.Fatalf("resume must send exactly one Range bytes=%d-, got %v", cut, ranges)
+	}
+	got, err := os.ReadFile(st.objectPath(fullSHA))
+	if err != nil || string(got) != string(full) {
+		t.Fatalf("resumed object must equal the full body (err %v)", err)
+	}
+	if _, err := os.Stat(part); !os.IsNotExist(err) {
+		t.Fatal("completed object must leave no .part behind")
+	}
+}
+
+// A server that ignores Range and answers plain 200 must produce the exact
+// object, not prefix+body -- the resumed prefix is discarded and the file and
+// hash restart from zero.
+func TestDownloadVerifiedRestartsWhenServerIgnoresRange(t *testing.T) {
+	full := []byte("the full object body")
+	fullSHA := sha(full)
+	var sawRange bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			sawRange = true // sent, but the 200 below ignores it
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(full)
+	}))
+	defer srv.Close()
+	st := New(t.TempDir(), nil)
+	part := st.objectPath(fullSHA) + ".part"
+	if err := os.MkdirAll(filepath.Dir(part), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(part, full[:4], 0o644); err != nil { // "the "
+		t.Fatal(err)
+	}
+
+	if err := st.downloadVerified(context.Background(), srv.URL+"/"+fullSHA, fullSHA); err != nil {
+		t.Fatalf("200-restart attempt: %v", err)
+	}
+	if !sawRange {
+		t.Fatal("a non-empty .part must ask with a Range header")
+	}
+	got, err := os.ReadFile(st.objectPath(fullSHA))
+	if err != nil || string(got) != string(full) {
+		t.Fatalf("object must be the exact body (no prefix duplication), got %q (err %v)", got, err)
+	}
+}
+
+// A .part whose content proves WRONG (sha mismatch) is poison, not progress:
+// it must be removed so the next attempt starts clean. A Range-honoring server
+// makes this observable -- a kept .part would resume from a wrong offset and
+// mismatch forever.
+func TestDownloadVerifiedRemovesPoisonPart(t *testing.T) {
+	full := []byte("correct content")
+	fullSHA := sha(full)
+	var sawRange bool
+	var served int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rng := r.Header.Get("Range"); rng != "" {
+			sawRange = true
+			var start int64
+			fmt.Sscanf(rng, "bytes=%d-", &start)
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(full)-1, len(full)))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(full[start:])
+			return
+		}
+		served++
+		if served == 1 {
+			_, _ = w.Write([]byte("evil content")) // hashes to nothing useful
+			return
+		}
+		_, _ = w.Write(full) // the server is fixed between attempts
+	}))
+	defer srv.Close()
+	st := New(t.TempDir(), nil)
+	part := st.objectPath(fullSHA) + ".part"
+
+	if err := st.downloadVerified(context.Background(), srv.URL+"/"+fullSHA, fullSHA); err == nil {
+		t.Fatal("wrong content must fail verification")
+	}
+	if _, err := os.Stat(part); !os.IsNotExist(err) {
+		t.Fatal("a sha-mismatch .part must be removed, not kept for resume")
+	}
+	if err := st.downloadVerified(context.Background(), srv.URL+"/"+fullSHA, fullSHA); err != nil {
+		t.Fatalf("clean retry after poison: %v", err)
+	}
+	if sawRange {
+		t.Fatal("retry after poison removal must start from byte zero (no Range)")
 	}
 }
 
