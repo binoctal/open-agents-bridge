@@ -56,6 +56,6 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Show version information",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("open-agents-bridge %s\n", updater.GetVersionInfo())
+		fmt.Printf("open-agents-bridge %s\nnode: enabled\n", updater.GetVersionInfo())
 	},
 }
