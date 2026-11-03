@@ -238,6 +238,21 @@ func runUserNode(cfg *config.Config, logf agent.Logf) error {
 		}
 	}
 
+	// Wake channel (hosted-deploy-push-wakeup): connect the node room so the
+	// platform can nudge an immediate poll when work lands, instead of the
+	// idle backoff deciding when the row is first seen. User-node form only:
+	// the platform form's identity is the shared INTERNAL_SECRET, which has no
+	// lane on this socket (the API's type=node branch verifies registry
+	// credentials) -- it keeps polling exactly as before.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	pollNow := make(chan struct{}, 1)
+	if wakeURL := agent.WakeURL(creds.APIBaseURL, creds.NodeID, creds.NodeSecret); wakeURL != "" {
+		go agent.RunWakeLoop(ctx, wakeURL, pollNow, logf)
+	} else {
+		logf("wake channel disabled: no derivable URL (poll-only mode)")
+	}
+
 	a := &agent.Agent{
 		Endpoints: []agent.APIEndpoint{{
 			Client:  client,
@@ -246,6 +261,7 @@ func runUserNode(cfg *config.Config, logf agent.Logf) error {
 		Store:             st,
 		Ingress:           routes, // nil-safe: no Caddy admin = route wiring disabled
 		UserNode:          true,
+		PollNow:           pollNow,
 		WorkPollInterval:  time.Duration(cfg.WorkPollIntervalSec) * time.Second,
 		WatermarkInterval: time.Duration(cfg.WatermarkIntervalSec) * time.Second,
 		WorkIdleMax:       time.Duration(cfg.WorkPollIdleMaxSec) * time.Second,
@@ -253,8 +269,6 @@ func runUserNode(cfg *config.Config, logf agent.Logf) error {
 	}
 	logf("user node %s online (platform %s, scratch root %s)", creds.NodeID, creds.APIBaseURL, cfg.ScratchRoot)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	return a.Run(ctx)
 }
 

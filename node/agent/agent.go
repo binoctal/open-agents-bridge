@@ -86,6 +86,14 @@ type Agent struct {
 	// this tier -- SP only materializes, wires routes, sweeps and stops.
 	SP *SessionPreviews
 
+	// PollNow short-circuits the work poll's idle backoff (hosted-deploy-
+	// push-wakeup): the wake goroutine nudges it whenever the platform pokes
+	// the node room, and Run polls immediately instead of waiting out the
+	// backoff window. Nil (platform form, older wiring) keeps the pure-poll
+	// behavior -- a nil channel never fires in select. Buffered 1 so nudges
+	// coalesce while a poll is in flight.
+	PollNow chan struct{}
+
 	WorkPollInterval  time.Duration
 	WatermarkInterval time.Duration
 
@@ -297,6 +305,14 @@ func (a *Agent) Run(ctx context.Context) error {
 			if err := a.pollWork(ctx); err != nil {
 				return err
 			}
+		case <-a.PollNow:
+			// Wake nudge (hosted-deploy-push-wakeup): poll now, bypassing the
+			// idle backoff gate. pollWork's own noteWork keeps the backoff
+			// state honest: work found resets it, an empty answer costs one
+			// billable request and deepens the idle gap by one step.
+			if err := a.pollWorkForce(ctx); err != nil {
+				return err
+			}
 		case <-wm.C:
 			if err := a.reportWatermark(ctx); err != nil {
 				return err
@@ -342,11 +358,22 @@ func (a *Agent) usageInterval() time.Duration {
 // the other endpoints; only every-endpoint-disabled returns an error to Run
 // (exit 1, systemd restart).
 func (a *Agent) pollWork(ctx context.Context) error {
+	return a.pollWorkOpt(ctx, false)
+}
+
+// pollWorkForce is the wake-nudge entry (hosted-deploy-push-wakeup): same
+// batch, but the idle-backoff gate is bypassed -- a nudge arriving mid-backoff
+// must poll immediately, not be swallowed by the very gap it exists to cut.
+func (a *Agent) pollWorkForce(ctx context.Context) error {
+	return a.pollWorkOpt(ctx, true)
+}
+
+func (a *Agent) pollWorkOpt(ctx context.Context, force bool) error {
 	for _, ep := range a.endpoints() {
 		if a.endpointDisabled(ep.Client) {
 			continue
 		}
-		if !a.workDue(ep.Client) {
+		if !force && !a.workDue(ep.Client) {
 			continue
 		}
 		items, err := ep.Client.GetWork(ctx)
