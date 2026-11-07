@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/binoctal/open-agents-bridge/internal/alert"
+	"github.com/binoctal/open-agents-bridge/internal/agents"
 	"github.com/binoctal/open-agents-bridge/internal/api"
 	"github.com/binoctal/open-agents-bridge/internal/command"
 	"github.com/binoctal/open-agents-bridge/internal/config"
@@ -553,6 +554,11 @@ func (b *Bridge) Start() error {
 
 	// Note: machine:online message is sent by the server (room.ts) when bridge connects
 	// No need to send it here to avoid duplicate notifications
+
+	// Provision ACP agent wrappers in the background (best-effort): once
+	// installed, session spawns use the local entry with zero network/npx.
+	// Failures log WARN and sessions fall back to the pinned-npx path.
+	go agents.ProvisionAll()
 
 	b.logInfo("[%s] Starting goroutines...", logger.ModBridge)
 

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/binoctal/open-agents-bridge/internal/agents"
 	"github.com/binoctal/open-agents-bridge/internal/logger"
 	"github.com/binoctal/open-agents-bridge/internal/protocol"
 	"github.com/binoctal/open-agents-bridge/internal/replay"
@@ -120,6 +121,9 @@ func (m *Manager) createSession(cliType, workDir, sessionID string, cols, rows i
 	}
 
 	protocolMgr := protocol.NewManager()
+	if m.testProtocolMgrHook != nil {
+		m.testProtocolMgrHook(protocolMgr)
+	}
 	sess := &Session{
 		ID:             sessionID,
 		CLIType:        cliType,
@@ -186,10 +190,25 @@ func (m *Manager) createSession(cliType, workDir, sessionID string, cols, rows i
 	var config protocol.AdapterConfig
 	switch {
 	case spec.ACP != nil:
+		command, args := spec.ACP.Command, spec.ACP.Args
+		// Provisioned agents win: zero network, zero npx, ~1s cold start.
+		// ResolveExec returns nil for types without a provisioning spec or
+		// when the install is missing/stale — then try one synchronous
+		// install (flock-guarded, the startup goroutine usually already
+		// finished) before falling back to the pinned-npx command.
+		if exe := agents.ResolveExec(cliType); exe != nil {
+			command, args = exe.Command()
+		} else if err := agents.EnsureInstalled(cliType); err == nil {
+			if exe := agents.ResolveExec(cliType); exe != nil {
+				command, args = exe.Command()
+			}
+		} else {
+			logger.Debug("[%s] agent provisioning unavailable for %s, using pinned npx path: %v", logger.ModSession, cliType, err)
+		}
 		config = protocol.AdapterConfig{
 			WorkDir: workDir,
-			Command: spec.ACP.Command,
-			Args:    spec.ACP.Args,
+			Command: command,
+			Args:    args,
 			Cols:    cols,
 			Rows:    rows,
 			// The ACP adapter reads this to gate terminal commands on user

@@ -47,6 +47,10 @@ type Manager struct {
 	// testHookTaskRegistered, when set, runs right after a task session is
 	// registered (lock released) — lets tests hold the slot deterministically.
 	testHookTaskRegistered func()
+	// testProtocolMgrHook, when set, configures each session's protocol
+	// manager right after creation (e.g. shortening the ACP handshake
+	// timeout). Nil in production — zero cost, zero behavior change.
+	testProtocolMgrHook func(*protocol.Manager)
 	queue                  []QueueItem
 	queueMu                sync.Mutex
 	ioLogger               *logger.IOLogger // I/O logger for debugging and auditing
