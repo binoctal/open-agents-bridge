@@ -160,7 +160,16 @@ func TestStatusFromMessageLabelVsTyped(t *testing.T) {
 // process (the established hermetic pattern — no real CLI involved).
 func TestStatusTrackerRemovedOnSessionRemoval(t *testing.T) {
 	dir := FixtureWorkspace(t)
-	script := `{"frames": []}`
+	// Minimal ACP handshake script: the replay CLI is a known ACP-only type,
+	// so the session must actually complete the initialize/session-new
+	// exchange (no PTY fallback exists for it since acp-startup-hardening —
+	// an empty/invalid script used to silently pass via the zombie fallback).
+	script := `{"kind":"header","cliType":"replay","adapterVersion":"fixture","recipe":"status-tracker-cleanup"}
+{"kind":"frame","seq":0,"dir":"in","frame":{"jsonrpc":"2.0","id":"bridge_1","method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"terminal":true}}}}
+{"kind":"frame","seq":1,"dir":"out","after":"initialize","frame":{"jsonrpc":"2.0","id":"bridge_1","result":{"protocolVersion":1,"agentInfo":{"name":"replay-fixture","version":"1.0.0"}}}}
+{"kind":"frame","seq":2,"dir":"in","frame":{"jsonrpc":"2.0","id":"bridge_2","method":"session/new","params":{"cwd":"/workspace","mcpServers":[]}}}
+{"kind":"frame","seq":3,"dir":"out","after":"session/new","frame":{"jsonrpc":"2.0","id":"bridge_2","result":{"sessionId":"fixture-session-1"}}}
+`
 	scriptPath := filepath.Join(t.TempDir(), "empty.jsonl")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o644); err != nil {
 		t.Fatalf("write script: %v", err)

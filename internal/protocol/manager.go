@@ -9,9 +9,12 @@ import (
 	"github.com/binoctal/open-agents-bridge/internal/replay"
 )
 
-// defaultACPHandshakeTimeout is how long we wait for the ACP process to emit
-// its first status message. Generous on purpose: a slow network or a cold npx
-// download must not be mistaken for a CLI that cannot speak ACP.
+// defaultACPHandshakeTimeout is the SINGLE source of truth for how long we
+// wait for the ACP initialize response (acp.go constructs its adapter with
+// this value and no second default exists). Generous on purpose: a slow
+// network or a cold npx download must not be mistaken for a CLI that cannot
+// speak ACP — a 30s second default here once caused silent PTY fallback into
+// zombie sessions (see acp-startup-hardening).
 const defaultACPHandshakeTimeout = 60 * time.Second
 
 // Manager manages protocol adapters and auto-detection
@@ -86,8 +89,16 @@ func (m *Manager) Connect(config AdapterConfig) error {
 		return nil
 	}
 
-	// Only fallback to PTY if ACP process failed to start entirely
-	// (e.g., command not found, not ACP-capable CLI)
+	// Fail loud when this CLI type has no PTY-equivalent command: retrying
+	// the same ACP server under PTY would look connected while answering
+	// every user message with a JSON-RPC parse error (zombie session).
+	if !config.PTYFallbackAllowed {
+		logger.Error("[%s] ACP failed and PTY fallback is disabled for this CLI type (%s %v): %v",
+			logger.ModProtocol, config.Command, config.Args, err)
+		return fmt.Errorf("CLI 启动失败：ACP 握手未完成（%v）。该 CLI 无 PTY 备用模式；请检查网络后重试，或改用 claude-pty 模式", err)
+	}
+
+	// Unknown/custom command: PTY is a legitimate guess (it may be a REPL).
 	logger.Info("[%s] ACP failed (%v), falling back to PTY", logger.ModProtocol, err)
 	return m.tryPTY(config)
 }
@@ -99,9 +110,9 @@ func (m *Manager) tryACP(config AdapterConfig) error {
 	adapter := NewACPAdapter()
 	// Connect() blocks on the initialize response, so the handshake budget has
 	// to reach the adapter — the select below is only entered after it returns.
-	if m.acpHandshakeTimeout > 0 {
-		adapter.SetInitTimeout(m.acpHandshakeTimeout)
-	}
+	// Unconditional: gating this on a test-only override once left production
+	// on the adapter's own (shorter) default while tests stayed green.
+	adapter.SetInitTimeout(m.handshakeTimeout())
 	// Wire-frame recording, if requested. Must precede Connect so the
 	// initialize handshake itself is captured. Nil is a no-op.
 	adapter.SetRecorder(m.recorder)

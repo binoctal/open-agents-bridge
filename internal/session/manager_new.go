@@ -175,7 +175,7 @@ func (m *Manager) createSession(cliType, workDir, sessionID string, cols, rows i
 	}
 
 	// --- Phase 2: Connect() outside lock (may block up to 60s for ACP handshake) ---
-	command, args, err := m.getCLICommand(cliType)
+	spec, err := m.getCLICommand(cliType)
 	if err != nil {
 		m.mu.Lock()
 		delete(m.sessions, sess.ID)
@@ -183,22 +183,42 @@ func (m *Manager) createSession(cliType, workDir, sessionID string, cols, rows i
 		m.notifyRemoved(sess.ID)
 		return nil, err
 	}
-	config := protocol.AdapterConfig{
-		WorkDir: workDir,
-		Command: command,
-		Args:    args,
-		Cols:    cols,
-		Rows:    rows,
-		// The ACP adapter reads this to gate terminal commands on user
-		// approval (modes without explicit auto-approval; see acp.go).
-		PermissionMode: permissionMode,
+	var config protocol.AdapterConfig
+	switch {
+	case spec.ACP != nil:
+		config = protocol.AdapterConfig{
+			WorkDir: workDir,
+			Command: spec.ACP.Command,
+			Args:    spec.ACP.Args,
+			Cols:    cols,
+			Rows:    rows,
+			// The ACP adapter reads this to gate terminal commands on user
+			// approval (modes without explicit auto-approval; see acp.go).
+			PermissionMode: permissionMode,
+			// PTY fallback is only legal when the type declares a PTY-
+			// equivalent command. Known ACP-only wrappers must fail loud
+			// instead (see CLICommandSpec).
+			PTYFallbackAllowed: spec.PTY != nil,
+		}
+	case spec.PTY != nil:
+		config = protocol.AdapterConfig{
+			WorkDir:       workDir,
+			Command:       spec.PTY.Command,
+			Args:          spec.PTY.Args,
+			Cols:          cols,
+			Rows:          rows,
+			PermissionMode: permissionMode,
+			ForceProtocol: "pty",
+		}
+	default:
+		m.mu.Lock()
+		delete(m.sessions, sess.ID)
+		m.mu.Unlock()
+		m.notifyRemoved(sess.ID)
+		return nil, fmt.Errorf("cliType %q has no usable command declaration", cliType)
 	}
-	if cliType == "claude" {
+	if cliType == "claude" || cliType == "claude-pty" {
 		config.CustomEnv = map[string]string{"CLAUDECODE": ""}
-	}
-	if cliType == "claude-pty" {
-		config.CustomEnv = map[string]string{"CLAUDECODE": ""}
-		config.ForceProtocol = "pty"
 	}
 	m.applyPermissionMode(permissionMode, cliType, &config)
 	mergeProfileEnv(&config, profileEnv, sessionID)

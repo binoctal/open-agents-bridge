@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/binoctal/open-agents-bridge/internal/agents"
 	configpkg "github.com/binoctal/open-agents-bridge/internal/config"
 	"github.com/binoctal/open-agents-bridge/internal/protocol"
 )
@@ -645,7 +646,7 @@ func TestManager_getCLICommand(t *testing.T) {
 		wantCmd string
 		wantArg string // first arg substring, "" if no args
 	}{
-		{"claude", "npx", "@agentclientprotocol/claude-agent-acp"},
+		{"claude", "npx", agents.ClaudeAgentSpec()}, // pinned exact (acp-startup-hardening)
 		{"claude-pty", "claude", ""},
 		{"qwen", "qwen-code", "--experimental-acp"},
 		{"goose", "goose", "acp"},
@@ -658,10 +659,17 @@ func TestManager_getCLICommand(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.cli, func(t *testing.T) {
-			cmd, args, err := m.getCLICommand(c.cli)
+			spec, err := m.getCLICommand(c.cli)
 			if err != nil {
 				t.Errorf("getCLICommand(%q): %v", c.cli, err)
 				return
+			}
+			var cmd string
+			var args []string
+			if spec.ACP != nil {
+				cmd, args = spec.ACP.Command, spec.ACP.Args
+			} else if spec.PTY != nil {
+				cmd, args = spec.PTY.Command, spec.PTY.Args
 			}
 			if cmd != c.wantCmd {
 				t.Errorf("command = %q, want %q", cmd, c.wantCmd)
@@ -671,18 +679,15 @@ func TestManager_getCLICommand(t *testing.T) {
 					t.Errorf("args = %v, want none", args)
 				}
 			} else {
-				if len(args) == 0 || !contains(args, c.wantArg) && args[0] != c.wantArg {
-					// accept either the arg appearing anywhere, or first arg
-					found := false
-					for _, a := range args {
-						if a == c.wantArg {
-							found = true
-							break
-						}
+				found := false
+				for _, a := range args {
+					if a == c.wantArg {
+						found = true
+						break
 					}
-					if !found {
-						t.Errorf("args = %v, want to contain %q", args, c.wantArg)
-					}
+				}
+				if !found {
+					t.Errorf("args = %v, want to contain %q", args, c.wantArg)
 				}
 			}
 		})

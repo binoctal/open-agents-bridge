@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/binoctal/open-agents-bridge/internal/agents"
 	configpkg "github.com/binoctal/open-agents-bridge/internal/config"
 	"github.com/binoctal/open-agents-bridge/internal/logger"
 	"github.com/binoctal/open-agents-bridge/internal/protocol"
@@ -593,42 +594,76 @@ func (m *Manager) applyPermissionMode(permissionMode, cliType string, config *pr
 	}
 }
 
-func (m *Manager) getCLICommand(cliType string) (string, []string, error) {
+// ExecSpec is one executable declaration (command + args).
+type ExecSpec struct {
+	Command string
+	Args    []string
+}
+
+// CLICommandSpec declares the command surface of one CLI type. The pair is
+// what makes PTY fallback structurally safe: PTY fallback may only use PTY,
+// and a nil PTY means ACP failure MUST fail loud instead of driving a
+// JSON-RPC server with keystrokes (acp-startup-hardening).
+type CLICommandSpec struct {
+	ACP *ExecSpec // nil = this type has no ACP command (PTY-only CLI)
+	PTY *ExecSpec // nil = no PTY-equivalent; ACP failure must fail loud
+}
+
+func (m *Manager) getCLICommand(cliType string) (CLICommandSpec, error) {
+	known := map[string]CLICommandSpec{
+		"claude": {
+			// Claude Code ACP via npm wrapper (renamed from
+			// @zed-industries/claude-code-acp). Version pinned EXACT in
+			// internal/agents: a bare --yes re-resolves registry latest every
+			// spawn, and cache corruption + version drift pushed cold start
+			// past the handshake timeout on 2026-11-07. --yes: without it npx
+			// asks "Ok to proceed?" on first install and reads the answer
+			// from stdin, which the ACP stream owns.
+			ACP: &ExecSpec{Command: "npx", Args: []string{"--yes", agents.ClaudeAgentSpec()}},
+		},
+		"claude-pty": {
+			// Claude Code PTY mode - full REPL with slash commands support
+			PTY: &ExecSpec{Command: "claude"},
+		},
+		"qwen": {
+			ACP: &ExecSpec{Command: "qwen-code", Args: []string{"--experimental-acp"}},
+		},
+		"goose": {
+			ACP: &ExecSpec{Command: "goose", Args: []string{"acp"}},
+		},
+		"gemini": {
+			ACP: &ExecSpec{Command: "gemini-cli", Args: []string{"--acp"}},
+		},
+		"opencode": {
+			// OpenCode (opencode.ai) ships a native ACP server as a subcommand
+			ACP: &ExecSpec{Command: "opencode", Args: []string{"acp"}},
+		},
+		"dsh": {
+			// DeepSeek Harness ACP server. The published launcher has no
+			// built-in acp profile; users create it once with
+			// `dsh plugin --profile acp add @deepseek-ai/dsh-acp`. A missing
+			// profile exits non-zero with that same fix-it hint, which fails
+			// loud up the session error channel — no detection probe needed.
+			ACP: &ExecSpec{Command: "dsh", Args: []string{"--profile", "acp"}},
+		},
+		"cline": {
+			ACP: &ExecSpec{Command: "cline"},
+		},
+		"codex": {
+			ACP: &ExecSpec{Command: "codex"},
+		},
+		"aider": {
+			// Aider - AI pair programming in terminal (PTY mode)
+			// Installation: pip install aider-chat
+			// Uses its own protocol, not ACP
+			PTY: &ExecSpec{Command: "aider", Args: []string{"--no-auto-commits", "--pretty"}},
+		},
+	}
+	if spec, ok := known[cliType]; ok {
+		return spec, nil
+	}
+
 	switch cliType {
-	case "claude":
-		// Claude Code ACP via npx (package renamed from @zed-industries/claude-code-acp)
-		// --yes: without it npx asks "Ok to proceed?" on first install and
-		// reads the answer from stdin, which the ACP stream owns — initialize
-		// then times out and the session silently falls back to a dead PTY.
-		return "npx", []string{"--yes", "@agentclientprotocol/claude-agent-acp"}, nil
-	case "claude-pty":
-		// Claude Code PTY mode - full REPL with slash commands support
-		return "claude", nil, nil
-	case "qwen":
-		return "qwen-code", []string{"--experimental-acp"}, nil
-	case "goose":
-		return "goose", []string{"acp"}, nil
-	case "gemini":
-		return "gemini-cli", []string{"--acp"}, nil
-	case "opencode":
-		// OpenCode (opencode.ai) ships a native ACP server as a subcommand
-		return "opencode", []string{"acp"}, nil
-	case "dsh":
-		// DeepSeek Harness ACP server. The published launcher has no built-in
-		// acp profile; users create it once with
-		// `dsh plugin --profile acp add @deepseek-ai/dsh-acp`. A missing
-		// profile exits non-zero with that same fix-it hint, which fails loud
-		// up the session error channel — no detection probe needed here.
-		return "dsh", []string{"--profile", "acp"}, nil
-	case "cline":
-		return "cline", nil, nil
-	case "codex":
-		return "codex", nil, nil
-	case "aider":
-		// Aider - AI pair programming in terminal (PTY mode)
-		// Installation: pip install aider-chat
-		// Uses its own protocol, not ACP
-		return "aider", []string{"--no-auto-commits", "--pretty"}, nil
 	case "replay":
 		// G17 replay shim: the command comes from the environment so
 		// production code never references the test binary. The shim reads
@@ -638,15 +673,21 @@ func (m *Manager) getCLICommand(cliType string) (string, []string, error) {
 		// fails loud").
 		cmd := os.Getenv("OA_REPLAY_SHIM")
 		if cmd == "" {
-			return "", nil, fmt.Errorf("cliType %q requires OA_REPLAY_SHIM to point at the replay shim executable", cliType)
+			return CLICommandSpec{}, fmt.Errorf("cliType %q requires OA_REPLAY_SHIM to point at the replay shim executable", cliType)
 		}
 		var args []string
 		if extra := os.Getenv("OA_REPLAY_SHIM_ARGS"); extra != "" {
 			args = strings.Fields(extra)
 		}
-		return cmd, args, nil
+		return CLICommandSpec{ACP: &ExecSpec{Command: cmd, Args: args}}, nil
 	default:
-		return cliType, nil, nil
+		// Unknown/custom command: keep auto-detect. PTY is a legitimate
+		// guess here — the command may well be an interactive REPL, unlike
+		// the known ACP-only wrappers above.
+		return CLICommandSpec{
+			ACP: &ExecSpec{Command: cliType},
+			PTY: &ExecSpec{Command: cliType},
+		}, nil
 	}
 }
 

@@ -30,10 +30,11 @@ type terminalState struct {
 	doneChan  chan struct{}
 }
 
-// defaultInitTimeout is how long Connect waits for the initialize response.
-// Generous on purpose: a cold `npx` download of an agent must not be mistaken
-// for a CLI that cannot speak ACP.
-const defaultInitTimeout = 30 * time.Second
+// The initialize-response timeout has a SINGLE source of truth:
+// defaultACPHandshakeTimeout in manager.go (same package). The adapter is
+// constructed with that value and Manager.tryACP re-injects it unconditionally.
+// A second default here once produced a 30s production timeout while tests
+// (which set the override explicitly) stayed green — see acp-startup-hardening.
 
 // turnIdleTimeout is how long a turn may go without any protocol traffic
 // (either direction) before the watchdog declares it stalled. Matches the
@@ -167,6 +168,7 @@ func NewACPAdapter() *ACPAdapter {
 		initDone:      make(chan struct{}),
 		procExited:    make(chan struct{}),
 		permMode:      "default",
+		initTimeout:   defaultACPHandshakeTimeout,
 		rpcWaiters:    make(map[string]chan rpcReply),
 	}
 	a.procExitCode.Store(-1)
@@ -623,7 +625,9 @@ func (a *ACPAdapter) initialize() error {
 	// Step 2: Wait for initialize response before sending session/new
 	initTimeout := a.initTimeout
 	if initTimeout <= 0 {
-		initTimeout = defaultInitTimeout
+		// Defensive only: the constructor always sets this. Kept pointing at
+		// the same single source of truth (manager.go), never a second default.
+		initTimeout = defaultACPHandshakeTimeout
 	}
 	select {
 	case <-a.initDone:

@@ -194,6 +194,9 @@ func TestACPIntegration(t *testing.T) {
 		Args:    []string{"test"},
 		Cols:    120,
 		Rows:    30,
+		// echo is an unknown command type: PTY fallback is the legitimate
+		// auto-detect guess this test exercises.
+		PTYFallbackAllowed: true,
 	}
 
 	if err := manager.Connect(config); err != nil {
