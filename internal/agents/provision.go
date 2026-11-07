@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/binoctal/open-agents-bridge/internal/config"
 	"github.com/binoctal/open-agents-bridge/internal/logger"
@@ -86,10 +85,10 @@ func EnsureInstalled(cliType string) error {
 		return fmt.Errorf("agents: open lock: %w", err)
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+	if err := lockExclusive(int(lock.Fd())); err != nil {
 		return fmt.Errorf("agents: flock: %w", err)
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	defer lockRelease(int(lock.Fd()))
 
 	// Re-check under the lock: another worker may have finished installing.
 	if err := checkVersion(dirFor(cliType), sp); err == nil {
