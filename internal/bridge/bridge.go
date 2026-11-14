@@ -1158,8 +1158,17 @@ func (b *Bridge) forwardSessionOutput(sessionID string, msg protocol.Message) {
 
 	switch msg.Type {
 	case protocol.MessageTypeContent:
-		if contentStr, ok := msg.Content.(string); ok {
-			b.batchContent(sessionID, protocolName, contentStr, protocol.MessageTypeContent)
+		// ACP user_message_chunk echo: the agent replaying back what the user
+		// just typed. The web client already renders the input locally and
+		// cross-client sync goes through the DO's session:send broadcast, so
+		// forwarding this as chat:response only duplicates the user's message
+		// as an assistant bubble — and gets persisted as an assistant history
+		// row. Skip the chat path; the workflow task-output forwarding below
+		// is unaffected.
+		if !isUserEcho(msg) {
+			if contentStr, ok := msg.Content.(string); ok {
+				b.batchContent(sessionID, protocolName, contentStr, protocol.MessageTypeContent)
+			}
 		}
 
 		// Forward to workflow task output if this is a workflow task
@@ -3866,6 +3875,15 @@ func taskTurnExitCode(meta map[string]interface{}, isTask bool) (int, bool) {
 		// "cancelled" and anything else is not the task finishing.
 		return 0, false
 	}
+}
+
+// isUserEcho reports whether a content message is the ACP user_message_chunk
+// echo — the agent replaying back the user's own prompt (tagged
+// meta.role == "user" in protocol/acp.go). See forwardSessionOutput for why
+// such messages must not re-enter the chat:response path.
+func isUserEcho(msg protocol.Message) bool {
+	role, ok := msg.Meta["role"].(string)
+	return ok && role == "user"
 }
 
 func taskStartedMessage(jobId, taskId, machineId string) Message {
