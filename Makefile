@@ -1,4 +1,4 @@
-.PHONY: all build clean install test release-sign
+.PHONY: all build clean install test release-sign export-contracts
 
 BINARY_NAME=open-agents-bridge
 BUILD_DIR=build
@@ -56,3 +56,6 @@ release-sign:
 	gh release download $(TAG) --repo binoctal/open-agents-bridge --pattern checksums.txt --dir $(BUILD_DIR)/release-sign --clobber
 	go run ./scripts/release-sign sign -key $(SIGN_KEY) -in $(BUILD_DIR)/release-sign/checksums.txt -out $(BUILD_DIR)/release-sign/checksums.txt.sig
 	gh release upload $(TAG) --repo binoctal/open-agents-bridge $(BUILD_DIR)/release-sign/checksums.txt.sig --clobber
+
+export-contracts:
+	go run ./scripts/dump-message-types > ../packages/contracts/bridge-message-types.json

@@ -1,0 +1,52 @@
+package bridge
+
+import (
+	"encoding/json"
+	"os"
+	"testing"
+)
+
+// G23 freshness tripwire: the dispatch vocabulary pinned in the main repo's
+// contracts package (packages/contracts/bridge-message-types.json) must equal
+// what the LIVE switches in this package actually handle. A case added or
+// removed without `make export-contracts` (and the main-repo constant update)
+// fails here AND in the web contracts test — three-end vocabulary sync stops
+// being human discipline (parity rule 3) and becomes a CI failure.
+//
+// The JSON lives in the parent repository, reachable only when the submodule
+// is checked out in its usual place (true in the main repo's CI, false for a
+// standalone bridge checkout) — skip silently when absent.
+func TestDispatchContractArtifactInSync(t *testing.T) {
+	const artifact = "../../../packages/contracts/bridge-message-types.json"
+	raw, err := os.ReadFile(artifact)
+	if err != nil {
+		if os.IsNotExist(err) {
+			t.Skip("contracts artifact not present (standalone bridge checkout)")
+		}
+		t.Fatalf("read %s: %v", artifact, err)
+	}
+	var pinned struct {
+		Handled []string `json:"handled"`
+	}
+	if err := json.Unmarshal(raw, &pinned); err != nil {
+		t.Fatalf("parse %s: %v", artifact, err)
+	}
+
+	live, err := ExtractDispatchTypes(".")
+	if err != nil {
+		t.Fatalf("extract live dispatch types: %v", err)
+	}
+
+	if len(live) != len(pinned.Handled) {
+		t.Fatalf("dispatch vocabulary drifted: live has %d types, pinned artifact has %d — run `make export-contracts` and update BRIDGE_HANDLED_TYPES in packages/contracts/src/index.ts", len(live), len(pinned.Handled))
+	}
+	pinnedSet := make(map[string]bool, len(pinned.Handled))
+	for _, h := range pinned.Handled {
+		pinnedSet[h] = true
+	}
+	for _, l := range live {
+		if !pinnedSet[l] {
+			t.Fatalf("dispatch type %q is handled live but missing from %s — run `make export-contracts` and update BRIDGE_HANDLED_TYPES", l, artifact)
+		}
+	}
+}
