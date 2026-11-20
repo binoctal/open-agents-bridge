@@ -26,7 +26,8 @@ func TestDispatchContractArtifactInSync(t *testing.T) {
 		t.Fatalf("read %s: %v", artifact, err)
 	}
 	var pinned struct {
-		Handled []string `json:"handled"`
+		Handled       []string `json:"handled"`
+		AgentStatuses []string `json:"agentStatuses"`
 	}
 	if err := json.Unmarshal(raw, &pinned); err != nil {
 		t.Fatalf("parse %s: %v", artifact, err)
@@ -47,6 +48,25 @@ func TestDispatchContractArtifactInSync(t *testing.T) {
 	for _, l := range live {
 		if !pinnedSet[l] {
 			t.Fatalf("dispatch type %q is handled live but missing from %s — run `make export-contracts` and update BRIDGE_HANDLED_TYPES", l, artifact)
+		}
+	}
+
+	// Same reconciliation for the six-state AgentStatus vocabulary: pinned in
+	// the artifact, mirrored as AGENT_STATUSES in the contracts package.
+	liveStatuses, err := ExtractAgentStatuses("../protocol")
+	if err != nil {
+		t.Fatalf("extract live agent statuses: %v", err)
+	}
+	if len(liveStatuses) != len(pinned.AgentStatuses) {
+		t.Fatalf("agent-status vocabulary drifted: live has %d statuses, pinned artifact has %d — run `make export-contracts` and update AGENT_STATUSES in packages/contracts/src/index.ts", len(liveStatuses), len(pinned.AgentStatuses))
+	}
+	pinnedStatuses := make(map[string]bool, len(pinned.AgentStatuses))
+	for _, s := range pinned.AgentStatuses {
+		pinnedStatuses[s] = true
+	}
+	for _, s := range liveStatuses {
+		if !pinnedStatuses[s] {
+			t.Fatalf("agent status %q exists live but missing from %s — run `make export-contracts` and update AGENT_STATUSES", s, artifact)
 		}
 	}
 }
