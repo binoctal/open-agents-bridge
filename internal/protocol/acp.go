@@ -1966,7 +1966,10 @@ func toolCallError(update map[string]interface{}) string {
 // 500 chars anyway.
 const (
 	toolCallInputValueMax = 512
-	toolCallResultMax     = 4096
+	// Tail-truncated (logger.TruncateTail): tool results end with the signal
+	// (errors, exit summaries) and agents resend accumulated output, where a
+	// head-truncate would surface a different head on every resend.
+	toolCallResultMax = 8000
 )
 
 // toolCallInput copies the rawInput object claude-code-acp attaches to
@@ -1996,7 +1999,7 @@ func toolCallInput(update map[string]interface{}) map[string]interface{} {
 func toolCallRawOutput(update map[string]interface{}) interface{} {
 	switch v := update["rawOutput"].(type) {
 	case string:
-		return logger.Truncate(v, toolCallResultMax)
+		return logger.TruncateTail(v, toolCallResultMax)
 	case []interface{}:
 		var sb strings.Builder
 		for _, c := range v {
@@ -2017,7 +2020,7 @@ func toolCallRawOutput(update map[string]interface{}) interface{} {
 			}
 		}
 		if sb.Len() > 0 {
-			return logger.Truncate(sb.String(), toolCallResultMax)
+			return logger.TruncateTail(sb.String(), toolCallResultMax)
 		}
 	}
 	return nil

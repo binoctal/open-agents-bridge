@@ -101,6 +101,9 @@ func TestToolCallUpdateFlattensRawOutput(t *testing.T) {
 }
 
 func TestToolCallUpdateResultBounded(t *testing.T) {
+	// Tail truncation (t3code discipline): the END of a tool result carries
+	// the signal, and agents resend accumulated output — the visible tail
+	// must stay stable across resends, with a marker stating what was lost.
 	wall := strings.Repeat("y", 100*1024)
 	calls := collectToolCalls(t, toolCallUpdateFrame(map[string]interface{}{
 		"sessionUpdate": "tool_call_update",
@@ -114,8 +117,14 @@ func TestToolCallUpdateResultBounded(t *testing.T) {
 	if !ok {
 		t.Fatalf("result = %#v, want string", calls[0].Result)
 	}
-	if len(res) > toolCallResultMax+16 {
-		t.Fatalf("result len = %d, want bounded by %d (+ellipsis)", len(res), toolCallResultMax)
+	if !strings.Contains(res, "bytes truncated]") {
+		t.Fatalf("result missing truncation marker: %q", res[:64])
+	}
+	if !strings.HasSuffix(res, strings.Repeat("y", 256)) {
+		t.Fatalf("result must keep the TAIL of the output")
+	}
+	if len(res) > toolCallResultMax+64 {
+		t.Fatalf("result len = %d, want bounded by %d (+marker)", len(res), toolCallResultMax)
 	}
 }
 

@@ -234,6 +234,31 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
+// TestTruncateTail verifies the tail-keeping variant: tool results carry
+// their signal at the end and agents resend accumulated output, so the
+// visible tail must be stable and the marker must state what was dropped.
+func TestTruncateTail(t *testing.T) {
+	if got := TruncateTail("hello", 200); got != "hello" {
+		t.Errorf("short string: got %q, want unchanged", got)
+	}
+	if got := TruncateTail(strings.Repeat("a", 200), 200); got != strings.Repeat("a", 200) {
+		t.Errorf("at-limit string: got modified %q", got)
+	}
+
+	s := strings.Repeat("x", 100) + "TAIL"
+	got := TruncateTail(s, 4)
+	if !strings.HasSuffix(got, "TAIL") {
+		t.Errorf("must keep the tail, got %q", got)
+	}
+	if !strings.Contains(got, "bytes truncated]") {
+		t.Errorf("must carry a truncation marker, got %q", got)
+	}
+	// 100 x's dropped → marker states 100.
+	if !strings.Contains(got, "[100 bytes truncated]") {
+		t.Errorf("marker must state dropped byte count, got %q", got)
+	}
+}
+
 // TestConsoleNoDebug verifies that Debug never appears on console (stderr)
 func TestConsoleNoDebug(t *testing.T) {
 	tmpDir := t.TempDir()

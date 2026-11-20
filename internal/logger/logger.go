@@ -534,9 +534,23 @@ func sameFile(a, b *os.File) bool {
 }
 
 // Truncate truncates a string to maxLen characters, appending "..." if truncated.
+// Keeps the HEAD — right for previews where the prefix is the signal.
 func Truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// TruncateTail keeps the END of s, prefixing a marker that states how many
+// bytes were dropped. Tool results carry their signal at the tail (errors,
+// exit summaries), and agents resend ACCUMULATED output — a head-truncate
+// surfaces a different head slice on every resend, while the tail stays
+// stable (t3code wire discipline, adopted 2026-11-20).
+func TruncateTail(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	dropped := len(s) - maxLen
+	return fmt.Sprintf("…[%d bytes truncated]…", dropped) + s[len(s)-maxLen:]
 }
