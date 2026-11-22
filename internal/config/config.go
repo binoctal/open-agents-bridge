@@ -208,6 +208,17 @@ func ConfigDir() string {
 	}
 }
 
+// AdapterLogDir is where ACP adapter host logs go. claude-agent-acp writes
+// its informational host log (idle-compaction lifecycle notices, tool
+// tracking) to CLAUDE_AGENT_LOGS/agent.log when that env is set; unset, it
+// aliases every console level to stderr (stdout is its ACP channel) and the
+// lines ride the error channel into session:error (prod forensics
+// 2026-11-22). logger.error mirrors to stderr either way, so real errors
+// stay visible to the bridge's readErrors.
+func AdapterLogDir() string {
+	return filepath.Join(ConfigDir(), "logs", "adapter")
+}
+
 func ConfigPath() string {
 	return filepath.Join(ConfigDir(), "config.json")
 }

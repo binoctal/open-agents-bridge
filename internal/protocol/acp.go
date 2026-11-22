@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	bridgeconfig "github.com/binoctal/open-agents-bridge/internal/config"
 	"github.com/binoctal/open-agents-bridge/internal/command"
 	"github.com/binoctal/open-agents-bridge/internal/filesystem"
 	"github.com/binoctal/open-agents-bridge/internal/logger"
@@ -269,6 +270,13 @@ func (a *ACPAdapter) Connect(config AdapterConfig) error {
 	// Add custom env vars
 	for k, v := range config.Env {
 		a.cmd.Env = append(a.cmd.Env, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	// Route the claude-agent-acp adapter's host log to a file (see
+	// config.AdapterLogDir). Kept BEFORE the CustomEnv pass so an explicit
+	// CustomEnv entry can still override or unset it.
+	if dir := bridgeconfig.AdapterLogDir(); os.MkdirAll(dir, 0o755) == nil {
+		a.cmd.Env = append(a.cmd.Env, "CLAUDE_AGENT_LOGS="+dir)
 	}
 	// Handle CustomEnv - empty value means unset the variable
 	for k, v := range config.CustomEnv {
