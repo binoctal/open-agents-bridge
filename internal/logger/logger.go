@@ -64,6 +64,7 @@ var globalLogger *Logger
 type Logger struct {
 	dir          string
 	file         *os.File
+	path         string // absolute path of the currently open log file
 	size         int64
 	level        int
 	consoleLevel int  // minimum level for console (stderr) output
@@ -201,8 +202,27 @@ func (l *Logger) openFile() error {
 
 	info, _ := f.Stat()
 	l.file = f
+	l.path = path
 	l.size = info.Size()
 	return nil
+}
+
+// Path returns the absolute path of the currently open log file (empty
+// before the first openFile). Callers use it to point humans at the real
+// file — the name is date-stamped, not a fixed "bridge.log".
+func (l *Logger) Path() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.path
+}
+
+// CurrentFile returns the active log file path of the global logger, or
+// "" when no logger has been created yet.
+func CurrentFile() string {
+	if globalLogger != nil {
+		return globalLogger.Path()
+	}
+	return ""
 }
 
 func (l *Logger) rotate() {

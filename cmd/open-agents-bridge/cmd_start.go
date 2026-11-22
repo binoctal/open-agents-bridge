@@ -5,14 +5,13 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
 	"github.com/binoctal/open-agents-bridge/internal/bridge"
 	"github.com/binoctal/open-agents-bridge/internal/config"
-	"github.com/binoctal/open-agents-bridge/internal/serverproof"
 	"github.com/binoctal/open-agents-bridge/internal/instancelock"
 	"github.com/binoctal/open-agents-bridge/internal/logger"
+	"github.com/binoctal/open-agents-bridge/internal/serverproof"
 	"github.com/binoctal/open-agents-bridge/internal/tray"
 	"github.com/spf13/cobra"
 )
@@ -20,7 +19,7 @@ import (
 var (
 	logLevel        string
 	headless        bool
-	machineName      string
+	machineName     string
 	recordReplayDir string
 	startUnsafe     bool
 )
@@ -132,7 +131,7 @@ Examples:
 		fmt.Printf("  Machine:   %s\n", machineDisplay)
 		fmt.Printf("  Server:   %s\n", cfg.ServerURL)
 		fmt.Printf("  MachineID: %s\n", cfg.MachineID)
-		fmt.Printf("  📋 Logs:    %s\n", filepath.Join(logger.GetLogDir(), "bridge.log"))
+		fmt.Printf("  📋 Logs:    %s\n", logger.CurrentFile())
 		fmt.Println()
 
 		b, err := bridge.New(cfg)
@@ -174,7 +173,7 @@ Examples:
 
 		if err := b.Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "❌ Bridge error: %v\n", err)
-			fmt.Fprintf(os.Stderr, "   See logs at: %s\n", filepath.Join(logger.GetLogDir(), "bridge.log"))
+			fmt.Fprintf(os.Stderr, "   See logs at: %s\n", logger.CurrentFile())
 			os.Exit(1)
 		}
 
