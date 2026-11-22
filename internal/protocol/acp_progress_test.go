@@ -66,6 +66,37 @@ func TestIsAdapterUnreachableDump(t *testing.T) {
 	}
 }
 
+// 2026-11-22 prod forensics: the claude-agent-acp adapter's host.log lines
+// (idle-compaction lifecycle, tool-tracking notices) land on stderr when no
+// log file is configured. readErrors() forwarded them as MessageTypeError,
+// so the web persisted `[idle-compaction] skip: …` as plain assistant rows
+// users read as failures.
+func TestIsAdapterHostLog(t *testing.T) {
+	suppressed := []string{
+		"[idle-compaction] skip: cache TTL is unknown, not 1h",
+		"[idle-compaction] armed deadline=2026-11-22T10:19:40.000Z",
+		"[idle-compaction] compaction failed: no reason given",
+		"[idle-compaction] disarmed: user prompt",
+		"[claude-agent-acp] Got a tool result for tool use that wasn't tracked:",
+	}
+	for _, line := range suppressed {
+		if !isAdapterHostLog(line) {
+			t.Errorf("adapter host log not suppressed: %q", line)
+		}
+	}
+
+	forwarded := []string{
+		"fatal: agent process crashed",
+		"[idle-compaction", // malformed, no space — still an unknown line
+		"[some-other-adapter] real error",
+	}
+	for _, line := range forwarded {
+		if isAdapterHostLog(line) {
+			t.Errorf("real error wrongly classified as adapter host log: %q", line)
+		}
+	}
+}
+
 // End-to-end over a real stderr pipe: progress lines must never surface as
 // MessageTypeError, while an unknown error line on the same stream must.
 func TestReadErrorsSuppressesProgressForwardsUnknown(t *testing.T) {

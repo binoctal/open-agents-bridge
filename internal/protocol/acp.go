@@ -798,6 +798,20 @@ func isAdapterUnreachableDump(line string) bool {
 	return strings.HasPrefix(line, "Unexpected case: ")
 }
 
+// isAdapterHostLog reports whether a stderr line is the claude-agent-acp
+// adapter's informational host log (idle-compaction lifecycle notices,
+// tool-tracking warnings) rather than an error. host.log is the adapter's
+// logger, not its error channel — without CLAUDE_AGENT_LOGS configured those
+// lines land on stderr, and forwarding them down the session:error path made
+// the web render healthy sessions as erroring (prod forensics 2026-11-22:
+// `[idle-compaction] skip: …` ×4 + `[claude-agent-acp] …` ×1 persisted as
+// plain assistant rows users read as failures). Pure function so the
+// suppression contract is unit-testable.
+func isAdapterHostLog(line string) bool {
+	return strings.HasPrefix(line, "[idle-compaction] ") ||
+		strings.HasPrefix(line, "[claude-agent-acp] ")
+}
+
 // readErrors reads stderr and only forwards actionable errors.
 // CLI debug output (object dumps, stack traces) is logged locally but not sent to the Web UI.
 func (a *ACPAdapter) readErrors() {
@@ -824,6 +838,14 @@ func (a *ACPAdapter) readErrors() {
 		// unrecognized engine events are adapter noise, not errors.
 		if isAdapterUnreachableDump(line) {
 			logger.Debug("[%s] stderr adapter dump (suppressed): %s", logger.ModACP, line)
+			continue
+		}
+
+		// Skip adapter host-log lines (see isAdapterHostLog) — logger output,
+		// not errors; still visible in the bridge's own debug log for
+		// forensics.
+		if isAdapterHostLog(line) {
+			logger.Debug("[%s] stderr adapter host log (suppressed): %s", logger.ModACP, line)
 			continue
 		}
 
